@@ -255,8 +255,46 @@ Edges: `Section —REFERENCES→ Act`, `Section —DEFINES→ DefinedTerm`,
 `Judgment —INTERPRETS→ Section`, `Judgment —DECIDED_BY→ Judge`,
 `Judgment —IN_COURT→ Court`.
 
-**Stored in Postgres.** At ~1M nodes, recursive CTEs are sufficient; Neo4j would add
-operational weight without benefit at this scale.
+### Storage: Neo4j
+
+**Stored in Neo4j Community Edition** (current stable `2026.06.0`), as a separate
+service reached over the Bolt protocol.
+
+Graph size is modest — ~1.3M nodes, ~1.9M edges — and Postgres recursive CTEs would
+handle the 1–2 hop retrieval-time expansion. Neo4j is chosen for what it enables beyond
+that:
+
+1. **Variable-depth precedent lineage.** `MATCH path = (a:Judgment)-[:CITES*1..6]->(b)`
+   is native in Cypher and awkward in SQL.
+2. **PageRank over the citation network** (GDS product tier, available in Community
+   Edition) gives authority ranking — landmark precedents surface by citation
+   centrality rather than keyword match.
+3. **Community detection (Louvain/Leiden) recovers doctrinal clustering** that the
+   metadata does not carry. Given `legal_subject` is 62% `general` with no consumer-law
+   tag (§3.4.5), inferring subject clusters from citation structure is a direct
+   mitigation for a documented data weakness.
+4. **LightRAG (v2) has a native Neo4j storage backend**, making the conceptual-graph
+   phase a configuration change rather than a re-platform.
+
+The graph is **read-only at request time** — written only by the batch builder, once per
+corpus release. There is therefore no runtime dual-write consistency concern between
+Neo4j and Postgres.
+
+**Operational notes:**
+- Community Edition is **GPLv3** (see §10, Licensing).
+- GDS Community Edition caps concurrency at 4 CPU cores. Irrelevant here: PageRank and
+  community detection are offline batch precomputes over ~1.9M edges, not request-path
+  work.
+- No clustering and no role-based access control in Community Edition. Acceptable —
+  the graph is a rebuildable derived artifact, so its availability requirement is low
+  and it holds no user data.
+- Sizing: ~4 GB page cache, ~4 GB heap.
+- Ship a Docker Compose file covering Postgres + Qdrant + Neo4j so the three-service
+  stack does not compromise the self-hosting success criterion (§12.7).
+
+**Reversibility:** the graph is derived data rebuilt by a batch job from parquet. If
+Neo4j proves wrong, the same builder targets another store. This is a cheap decision to
+revisit, unlike the voyage-4 embedding dependency (§13.2).
 
 ### Deferred to v2
 
@@ -394,18 +432,24 @@ retrieved context would yield a 0% hit rate. Verify with
 ## 9. Application architecture
 
 ```
-Next.js (web)  ──►  FastAPI (Python)  ──►  Qdrant   (vectors, self-hosted)
+Next.js (web)  ──►  FastAPI (Python)  ──►  Qdrant   (vectors)
+                          │             ──►  Neo4j    (knowledge graph, read-only
+                          │                            at request time)
                           │             ──►  Postgres (users, quota, conversations,
-                          │                            knowledge graph)
+                          │                            hallucination log)
                           └──►  LLM adapter (per-role, provider-agnostic)
 ```
 
 - **Backend:** Python / FastAPI, type-hinted throughout, `pathlib.Path`, small focused
   modules organised by domain.
-- **Postgres:** users, quota counters, conversations, knowledge graph, hallucination log.
+- **Neo4j:** knowledge graph (§5), Community Edition, Bolt protocol, rebuilt per corpus
+  release by a batch job.
+- **Postgres:** users, quota counters, conversations, hallucination log.
 - **Qdrant:** vectors, self-hosted, with payload filters for court, year, jurisdiction
   and `in_force`.
 - **Auth:** Supabase — Postgres plus email and Google OAuth in one dependency.
+- **Deployment:** Docker Compose covering all three datastores, so self-hosting remains
+  a single command.
 
 ### Access and quota
 
@@ -437,11 +481,26 @@ This is legal information for vulnerable people. These are requirements, not pol
 8. **Publish coverage limits** — the embedded-vs-held gap, the absence of consumer fora,
    and the exclusion of district courts.
 
-### Attribution
+### Attribution and licensing
 
-`vaquill/open-india-law` is CC BY 4.0 and **requires attribution**, a condition imposed
-by upstream eCourts/NCLT/NCLAT policy rather than by vaquill. `KanoonGPT/indian-case-laws`
-is Apache-2.0. Both must be credited in the product and repository.
+**Data.** `vaquill/open-india-law` is CC BY 4.0 and **requires attribution**, a condition
+imposed by upstream eCourts/NCLT/NCLAT policy rather than by vaquill.
+`KanoonGPT/indian-case-laws` is Apache-2.0. Both must be credited in the product and
+repository.
+
+**Neo4j Community Edition is GPLv3.** It runs as a **separate service reached over the
+Bolt network protocol**, which is the standard arrangement and keeps OpenLaw.in's own
+code free to carry a permissive licence (Apache-2.0 recommended). Two consequences to
+handle explicitly:
+
+- Any distributed Docker image bundling Neo4j CE ships GPLv3 software and must carry the
+  licence and source offer for that component.
+- Downstream adopters wanting to build closed commercial products on the stack will meet
+  GPL friction at the Neo4j layer. This does not conflict with the project's mission,
+  but it should be documented rather than discovered.
+
+This is a licensing summary, not legal advice; confirm before any distribution that
+matters.
 
 ---
 
@@ -451,7 +510,7 @@ is Apache-2.0. Both must be credited in the product and repository.
 |---|---|---|
 | **0. Verify** | Restore one `legal_corpus_v2` shard; inspect payloads | Does tribunal decision text exist? Confirms or kills tribunal scope |
 | **1. Data** | Join pipeline (SC neutral citation, HC CNR); English filter; quality filter; `acts_india` restore; SC re-embed | Every indexed chunk resolves to a government URL |
-| **2. Graph** | Deterministic knowledge graph in Postgres | 543K act-references and the citation network queryable |
+| **2. Graph** | Deterministic knowledge graph in Neo4j; batch builder; GDS PageRank (authority) and Louvain (doctrinal clusters) precomputed | 543K act-references and the citation network queryable; 1–2 hop expansion returns in <100ms |
 | **3. Retrieval** | Hybrid dense + sparse, graph expansion, reranking | Measured recall on a ~200-question citizen eval set |
 | **4. Answers** | Structured-output generation + citation validator | **Zero unverifiable citations** on the eval set |
 | **5. Multilingual** | Query and answer translation, legal glossary, per-language model config | Native-speaker review per language |
@@ -493,7 +552,14 @@ standards.
    portals that change without notice. A refresh strategy is required before the data
    ages materially.
 6. **Consumer fora absence** may be the single largest functional gap relative to what
-   citizens actually ask about.
+   citizens actually ask about. GDS community detection over the citation network (§5)
+   is a partial mitigation for the related `legal_subject` weakness, but it cannot
+   invent decisions the corpus does not contain.
+7. **Three datastores raise the self-hosting bar.** Postgres, Qdrant and Neo4j must come
+   up together for a legal-aid body with limited technical capacity. Docker Compose is
+   the mitigation, and §12.7 is the test of whether it worked.
+8. **Neo4j Community Edition is GPLv3** (§10). Not a conflict with an open-source
+   mission, but it constrains downstream commercial reuse and must be documented.
 
 ---
 
