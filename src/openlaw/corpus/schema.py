@@ -16,6 +16,30 @@ from openlaw.corpus.quality import clean_judge_names
 from openlaw.corpus.subjects import parse_legal_subject
 
 
+def _as_tuple(value: object) -> tuple[str, ...]:
+    """Return `value` as a tuple of strings, treating a bare string as absent.
+
+    Guards against a malformed row where a list column arrives as a string:
+    iterating it would silently yield one entry per character.
+    """
+    if not value or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(str(item) for item in value)
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    """Return `value` coerced to an int, falling back to `default` on failure.
+
+    A malformed chunk index should not raise before pydantic gets a chance to
+    validate the row — that would abort an ingest of hundreds of thousands of
+    rows on a single bad value instead of letting the row fail closed.
+    """
+    try:
+        return int(value) if value else default
+    except (TypeError, ValueError):
+        return default
+
+
 def _has_parser_errors(quality_json: str | None) -> bool:
     """Return True when KanoonGPT's quality payload reports a parser failure."""
     if not quality_json:
@@ -87,14 +111,14 @@ class JudgmentChunk(BaseModel):
         """Build a chunk from a raw vaquill Parquet row."""
         case_id = str(row.get("case_id") or "")
         return cls(
-            chunk_id=str(row.get("chunk_id") or ""),
+            chunk_id=str(row.get("chunk_id") or "").strip(),
             case_id=case_id,
             join_key=normalise_identifier(case_id),
-            chunk_index=int(row.get("chunk_index") or 0),
-            text=str(row.get("text") or ""),
+            chunk_index=_as_int(row.get("chunk_index")),
+            text=str(row.get("text") or "").strip(),
             text_original=str(row.get("text_original") or row.get("text") or ""),
             court_code=str(row.get("court_code") or ""),
-            judges=clean_judge_names(row.get("judges")),
+            judges=clean_judge_names(_as_tuple(row.get("judges"))),
             decision_date=parse_decision_date(row.get("decision_date")),
             language_code=str(row.get("language_code") or ""),
             corpus_version=corpus_version,
@@ -127,16 +151,16 @@ class Provision(BaseModel):
         fails validation rather than being indexed.
         """
         return cls(
-            chunk_id=str(row.get("chunk_id") or ""),
-            act_id=str(row.get("act_id") or ""),
+            chunk_id=str(row.get("chunk_id") or "").strip(),
+            act_id=str(row.get("act_id") or "").strip(),
             title=str(row.get("title") or ""),
             section_number=str(row.get("section_number") or ""),
-            text=str(row.get("text") or ""),
+            text=str(row.get("text") or "").strip(),
             jurisdiction=str(row.get("jurisdiction") or ""),
             in_force=bool(row.get("in_force")),
             legal_subjects=parse_legal_subject(row.get("legal_subject")),
-            acts_referenced=tuple(row.get("acts_referenced") or ()),
-            defined_terms=tuple(row.get("defined_terms") or ()),
-            source_url=str(row.get("source_url") or ""),
+            acts_referenced=_as_tuple(row.get("acts_referenced")),
+            defined_terms=_as_tuple(row.get("defined_terms")),
+            source_url=str(row.get("source_url") or "").strip(),
             corpus_version=corpus_version,
         )

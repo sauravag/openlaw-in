@@ -156,3 +156,121 @@ def test_case_metadata_detects_parser_failure_flag() -> None:
         }
     )
     assert metadata.has_parser_errors is True
+
+
+# --- Fix round 1: whitespace and type-coercion hardening ---------------------
+
+
+def test_provision_rejects_a_whitespace_only_source_url() -> None:
+    """Critical: the product's entire guarantee is that every citation resolves
+    to a government source document. A whitespace-only URL must not pass
+    `min_length=1` by counting spaces as characters."""
+    with pytest.raises(ValidationError):
+        Provision.from_row(
+            {
+                "chunk_id": "x", "act_id": "IND_central_1", "title": "An Act",
+                "section_number": "1", "text": "text", "jurisdiction": "central",
+                "in_force": True, "legal_subject": "['general']",
+                "acts_referenced": [], "defined_terms": [], "source_url": "   ",
+            },
+            corpus_version="v2026.08",
+        )
+
+
+def test_provision_rejects_whitespace_only_text() -> None:
+    with pytest.raises(ValidationError):
+        Provision.from_row(
+            {
+                "chunk_id": "x", "act_id": "IND_central_1", "title": "An Act",
+                "section_number": "1", "text": "   ", "jurisdiction": "central",
+                "in_force": True, "legal_subject": "['general']",
+                "acts_referenced": [], "defined_terms": [],
+                "source_url": "https://example.gov.in/x.pdf",
+            },
+            corpus_version="v2026.08",
+        )
+
+
+def test_judgment_chunk_rejects_whitespace_only_text() -> None:
+    with pytest.raises(ValidationError):
+        JudgmentChunk.from_row(
+            {
+                "chunk_id": "c1", "case_id": "2016_INSC_1151", "chunk_index": 0,
+                "text": "   ", "text_original": "   ", "court_code": "SCI",
+                "judges": [], "decision_date": "2016-12-15", "language_code": "en",
+            },
+            corpus_version="v2026.08",
+        )
+
+
+def test_provision_acts_referenced_given_a_bare_string_yields_empty_tuple() -> None:
+    """A malformed row where `acts_referenced` arrives as a plain string must not
+    be iterated character-by-character into garbage entries."""
+    provision = Provision.from_row(
+        {
+            "chunk_id": "x", "act_id": "IND_central_1", "title": "An Act",
+            "section_number": "1", "text": "text", "jurisdiction": "central",
+            "in_force": True, "legal_subject": "['general']",
+            "acts_referenced": "Act One", "defined_terms": [],
+            "source_url": "https://example.gov.in/x.pdf",
+        },
+        corpus_version="v2026.08",
+    )
+    assert provision.acts_referenced == ()
+
+
+def test_judgment_chunk_judges_given_a_bare_string_yields_empty_tuple() -> None:
+    """A malformed row where `judges` arrives as a plain string must not be
+    iterated character-by-character into garbage entries."""
+    chunk = JudgmentChunk.from_row(
+        {
+            "chunk_id": "c1", "case_id": "2016_INSC_1151", "chunk_index": 0,
+            "text": "t", "text_original": "t", "court_code": "SCI",
+            "judges": "T.S. THAKUR", "decision_date": "2016-12-15",
+            "language_code": "en",
+        },
+        corpus_version="v2026.08",
+    )
+    assert chunk.judges == ()
+
+
+def test_judgment_chunk_with_non_numeric_chunk_index_defaults_to_zero() -> None:
+    chunk = JudgmentChunk.from_row(
+        {
+            "chunk_id": "c1", "case_id": "2016_INSC_1151", "chunk_index": "abc",
+            "text": "t", "text_original": "t", "court_code": "SCI",
+            "judges": [], "decision_date": "2016-12-15", "language_code": "en",
+        },
+        corpus_version="v2026.08",
+    )
+    assert chunk.chunk_index == 0
+
+
+def test_case_metadata_treats_malformed_quality_json_as_a_parser_failure() -> None:
+    """Fail-closed: unparseable quality metadata is untrustworthy, so it must be
+    flagged as a parser failure rather than silently passing the row as clean."""
+    metadata = CaseMetadata.from_row(
+        {
+            "court_code": "SCI", "neutral_citation": "2019INSC398",
+            "cnr_number": None, "source_pdf_s3_url": None, "headnote_text": None,
+            "quality_json": "{not json",
+        }
+    )
+    assert metadata.has_parser_errors is True
+
+
+def test_judgment_chunk_text_original_is_not_stripped() -> None:
+    """`text_original` is the unmodified audit copy and must stay byte-exact,
+    even when it carries leading/trailing whitespace that `text` would have
+    stripped."""
+    chunk = JudgmentChunk.from_row(
+        {
+            "chunk_id": "c1", "case_id": "2016_INSC_1151", "chunk_index": 0,
+            "text": "the appeal is dismissed",
+            "text_original": "  the appeal is dismissed  ",
+            "court_code": "SCI",
+            "judges": [], "decision_date": "2016-12-15", "language_code": "en",
+        },
+        corpus_version="v2026.08",
+    )
+    assert chunk.text_original == "  the appeal is dismissed  "
