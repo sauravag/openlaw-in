@@ -18,12 +18,15 @@ def _metadata(join_key: str, court_code: str = "SCI") -> CaseMetadata:
 
 
 def _kanoongpt_row(
-    neutral_citation: str, source_pdf_s3_url: str, has_parser_errors: bool
+    neutral_citation: str,
+    source_pdf_s3_url: str,
+    has_parser_errors: bool,
+    court_code: str = "SCI",
 ) -> dict[str, Any]:
     """A raw KanoonGPT row, dirty or clean, in the shape `read_case_metadata` reads."""
     quality = {"flags": {"has_parser_failed": has_parser_errors}}
     return {
-        "court_code": "SCI",
+        "court_code": court_code,
         "neutral_citation": neutral_citation,
         "cnr_number": None,
         "source_pdf_s3_url": source_pdf_s3_url,
@@ -97,6 +100,52 @@ def test_build_metadata_index_prefers_clean_record_when_dirty_seen_first(
     assert record is not None
     assert record.has_parser_errors is False
     assert record.source_pdf_url == "https://clean.gov.in"
+
+
+# --- Critical 3: an optional court filter, so the index needn't hold 17M records --
+
+
+def test_build_metadata_index_with_no_filter_keeps_every_court(tmp_path: Path) -> None:
+    root = _write_kanoongpt_fixture(
+        tmp_path,
+        [
+            _kanoongpt_row("2016_INSC_1151", "https://sci.gov.in", False, court_code="SCI"),
+            _kanoongpt_row("DLHC0105174", "https://dlhc.gov.in", False, court_code="7_26"),
+        ],
+    )
+
+    index = build_metadata_index(root)
+
+    assert len(index) == 2
+
+
+def test_build_metadata_index_keeps_only_matching_court_codes(tmp_path: Path) -> None:
+    root = _write_kanoongpt_fixture(
+        tmp_path,
+        [
+            _kanoongpt_row("2016_INSC_1151", "https://sci.gov.in", False, court_code="SCI"),
+            _kanoongpt_row("DLHC0105174", "https://dlhc.gov.in", False, court_code="7_26"),
+        ],
+    )
+
+    index = build_metadata_index(root, court_codes=frozenset({"SCI"}))
+
+    assert len(index) == 1
+    kept = index.lookup("2016_INSC_1151")
+    assert kept is not None
+    assert kept.court_code == "SCI"
+    assert index.lookup("DLHC0105174") is None
+
+
+def test_build_metadata_index_court_filter_can_drop_everything(tmp_path: Path) -> None:
+    root = _write_kanoongpt_fixture(
+        tmp_path,
+        [_kanoongpt_row("2016_INSC_1151", "https://sci.gov.in", False, court_code="SCI")],
+    )
+
+    index = build_metadata_index(root, court_codes=frozenset({"NO_SUCH_COURT"}))
+
+    assert len(index) == 0
 
 
 def test_build_metadata_index_keeps_clean_record_when_dirty_seen_second(

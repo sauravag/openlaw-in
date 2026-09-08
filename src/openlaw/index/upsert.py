@@ -58,9 +58,16 @@ def build_point(
 def upsert_points(
     points: list[dict[str, Any]], qdrant_url: str, client: httpx.Client
 ) -> None:
-    """Write `points` into the Supreme Court collection."""
+    """Write `points` into the Supreme Court collection.
+
+    Sent with `wait=true` so the call does not return until Qdrant has actually
+    applied the upsert — otherwise Qdrant defaults to `wait=false`, and a
+    driver's own "done" progress line (or a validation run started right after)
+    could observe the collection before this write lands.
+    """
     client.put(
         f"{qdrant_url}/collections/{SC_COLLECTION}/points",
+        params={"wait": "true"},
         json={"points": points},
         timeout=120,
     ).raise_for_status()

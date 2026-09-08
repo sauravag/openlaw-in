@@ -14,8 +14,12 @@ from typing import Any
 
 import httpx
 
+from openlaw.index.embed import EMBEDDING_DIMENSIONS
+
 MIRROR_ROOT = "https://oss-data-in.vaquill.ai/qdrant"
-VECTOR_SIZE = 1024
+# Same 1024 dimensions as `EMBEDDING_DIMENSIONS` — imported, not duplicated, so the
+# two constants cannot drift apart.
+VECTOR_SIZE = EMBEDDING_DIMENSIONS
 DISTANCE = "Cosine"
 COLLECTION_ALREADY_EXISTS = 409
 
@@ -58,6 +62,21 @@ def shard_snapshot_urls(
     return base, f"{base}.checksum"
 
 
+def ensure_collection(spec: CollectionSpec, qdrant_url: str, client: httpx.Client) -> None:
+    """Create `spec`'s collection, tolerating 409 when it already exists.
+
+    Idempotent and safe to re-run after an interrupted run: if the collection
+    already exists (Qdrant returns 409), that is treated as success rather than
+    an error. Any other error status is raised.
+    """
+    response = client.put(
+        f"{qdrant_url}/collections/{spec.name}",
+        json=build_collection_payload(spec),
+    )
+    if response.status_code != COLLECTION_ALREADY_EXISTS:
+        response.raise_for_status()
+
+
 def restore_collection(
     spec: CollectionSpec, qdrant_url: str, client: httpx.Client
 ) -> None:
@@ -70,12 +89,7 @@ def restore_collection(
     partially populated) collection is the documented Qdrant flow and never
     deletes or recreates the collection.
     """
-    response = client.put(
-        f"{qdrant_url}/collections/{spec.name}",
-        json=build_collection_payload(spec),
-    )
-    if response.status_code != COLLECTION_ALREADY_EXISTS:
-        response.raise_for_status()
+    ensure_collection(spec, qdrant_url, client)
 
     for shard in range(spec.shards):
         index = client.get(f"{spec.mirror}/shard-{shard}/index.json").json()

@@ -40,6 +40,19 @@ def _as_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _as_http_url(value: object) -> str | None:
+    """Return `value` stripped, or None when it is not an http(s) URL.
+
+    A judgment whose PDF URL is not an http(s) URL — whitespace, a bare
+    identifier, a `file://` path — is not citable and must not masquerade as
+    a resolved source.
+    """
+    text = str(value or "").strip()
+    if text.startswith(("http://", "https://")):
+        return text
+    return None
+
+
 def _has_parser_errors(quality_json: str | None) -> bool:
     """Return True when KanoonGPT's quality payload reports a parser failure."""
     if not quality_json:
@@ -83,7 +96,7 @@ class CaseMetadata(BaseModel):
             court_code=str(row.get("court_code") or ""),
             neutral_citation=neutral or None,
             cnr_number=cnr or None,
-            source_pdf_url=row.get("source_pdf_s3_url") or None,
+            source_pdf_url=_as_http_url(row.get("source_pdf_s3_url")),
             headnote=row.get("headnote_text") or None,
             has_parser_errors=_has_parser_errors(row.get("quality_json")),
         )

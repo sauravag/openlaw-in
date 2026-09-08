@@ -259,6 +259,54 @@ def test_case_metadata_treats_malformed_quality_json_as_a_parser_failure() -> No
     assert metadata.has_parser_errors is True
 
 
+# --- Important 4: a judgment PDF URL must be an http(s) URL or absent --------
+
+
+def _case_row(source_pdf_s3_url: object) -> dict[str, Any]:
+    return {
+        "court_code": "SCI",
+        "neutral_citation": "2019INSC398",
+        "cnr_number": None,
+        "source_pdf_s3_url": source_pdf_s3_url,
+        "headnote_text": None,
+        "quality_json": "{}",
+    }
+
+
+def test_case_metadata_treats_a_whitespace_only_pdf_url_as_absent() -> None:
+    metadata = CaseMetadata.from_row(_case_row("   "))
+    assert metadata.source_pdf_url is None
+
+
+def test_case_metadata_treats_a_bare_number_as_absent() -> None:
+    """`resolve_judgment_url` must never return a bare identifier as if it were
+    a citable government URL."""
+    metadata = CaseMetadata.from_row(_case_row("14300"))
+    assert metadata.source_pdf_url is None
+
+
+def test_case_metadata_treats_a_file_url_as_absent() -> None:
+    metadata = CaseMetadata.from_row(_case_row("file:///etc/passwd"))
+    assert metadata.source_pdf_url is None
+
+
+def test_case_metadata_keeps_a_valid_https_url() -> None:
+    url = "https://indian-supreme-court-judgments.s3.amazonaws.com/x.pdf"
+    metadata = CaseMetadata.from_row(_case_row(url))
+    assert metadata.source_pdf_url == url
+
+
+def test_case_metadata_keeps_a_valid_http_url() -> None:
+    url = "http://example.gov.in/x.pdf"
+    metadata = CaseMetadata.from_row(_case_row(url))
+    assert metadata.source_pdf_url == url
+
+
+def test_case_metadata_treats_a_missing_pdf_url_as_absent() -> None:
+    metadata = CaseMetadata.from_row(_case_row(None))
+    assert metadata.source_pdf_url is None
+
+
 def test_judgment_chunk_text_original_is_not_stripped() -> None:
     """`text_original` is the unmodified audit copy and must stay byte-exact,
     even when it carries leading/trailing whitespace that `text` would have

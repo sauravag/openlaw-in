@@ -5,6 +5,7 @@ from openlaw.index.qdrant_restore import (
     ACTS_INDIA,
     CollectionSpec,
     build_collection_payload,
+    ensure_collection,
     restore_collection,
     shard_snapshot_urls,
 )
@@ -140,3 +141,34 @@ def test_restore_collection_succeeds_on_fresh_create() -> None:
     assert f"http://qdrant.test/collections/{ACTS_INDIA.name}" in called_urls
     for recover_url in _recover_urls("http://qdrant.test"):
         assert recover_url in called_urls
+
+
+# --- Important 5: a shared, idempotent ensure_collection helper --------------
+#
+# `restore_collection`'s create-then-tolerate-409 logic used to live only in this
+# module. `build_sc_index.py` issued its own create-collection PUT with no such
+# handling — the same non-idempotency bug this fixed here, unfixed there. Both
+# callers now share one implementation via `ensure_collection`.
+
+
+def test_ensure_collection_tolerates_409_already_exists() -> None:
+    client = FakeClient(create_status=409)
+
+    ensure_collection(ACTS_INDIA, "http://qdrant.test", client)  # must not raise
+
+    assert client.put_calls[0]["url"] == f"http://qdrant.test/collections/{ACTS_INDIA.name}"
+
+
+def test_ensure_collection_raises_on_a_real_server_error() -> None:
+    client = FakeClient(create_status=500)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        ensure_collection(ACTS_INDIA, "http://qdrant.test", client)
+
+
+def test_ensure_collection_is_fine_on_a_fresh_create() -> None:
+    client = FakeClient(create_status=200)
+
+    ensure_collection(ACTS_INDIA, "http://qdrant.test", client)  # must not raise
+
+    assert len(client.put_calls) == 1

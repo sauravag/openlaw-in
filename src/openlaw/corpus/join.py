@@ -31,13 +31,23 @@ class MetadataIndex:
         return frozenset(self._records)
 
 
-def build_metadata_index(root: Path) -> MetadataIndex:
+def build_metadata_index(
+    root: Path, court_codes: frozenset[str] | None = None
+) -> MetadataIndex:
     """Build a metadata index from every KanoonGPT Parquet file under `root`.
 
     Records reporting parser errors lose to clean records for the same key.
+
+    `court_codes`, when given, restricts the index to records whose `court_code`
+    is a member — the full 17,070,574-record KanoonGPT release (~12.7 GB plus
+    ~1.7 GB of dict overhead) does not fit comfortably in memory when only one
+    court's ~43,000 records are actually needed. `None` (the default) keeps
+    every record, matching prior behaviour.
     """
     records: dict[str, CaseMetadata] = {}
     for metadata in read_case_metadata(root):
+        if court_codes is not None and metadata.court_code not in court_codes:
+            continue
         existing = records.get(metadata.join_key)
         if existing is None or (
             existing.has_parser_errors and not metadata.has_parser_errors
