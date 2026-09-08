@@ -169,6 +169,13 @@ These were found by inspecting the data and must be handled in the pipeline.
    (`A` through `H`) inline. Judge extraction has parser noise — observed values
    include `judges: ['which']` and `['SH. ANIL KUMAR SISODIA', 'vide']` in Delhi HC.
 
+   **Margin letters are left in place deliberately.** Stripping them was implemented and
+   then removed: an isolated capital between two lowercase words is indistinguishable
+   from a party placeholder in a statutory illustration (`"A owes B a sum of money"`),
+   the dominant idiom in Indian law. The regex fired on **60.5% of English Supreme Court
+   chunks** and corrupted `"if A owes B a sum of money"` into `"if owes a sum of money"`.
+   Judge-noise filtering is safe and is kept; margin-letter scrubbing is not and is not.
+
 4. **Semantic section labels are effectively unusable.** In 300,000 sampled SC chunks:
    `body` 149,163, `paragraph` 122,518, `section` 25,278 — but `ratio_decidendi` 25,
    `obiter_dicta` 9, `precedents` 7. Retrieval must not depend on these to locate a
