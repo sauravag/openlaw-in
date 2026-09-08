@@ -17,3 +17,8 @@ def test_parses_high_court_date_with_time_component() -> None:
 @pytest.mark.parametrize("raw", [None, "", "   ", "not-a-date", "0000-00-00"])
 def test_returns_none_for_unparseable_input(raw: str | None) -> None:
     assert parse_decision_date(raw) is None
+
+
+def test_returns_none_for_non_string_input() -> None:
+    """The contract is 'returns None rather than raising' on any bad input."""
+    assert parse_decision_date(float("nan")) is None

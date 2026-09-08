@@ -11,7 +11,9 @@ _FORMATS: tuple[str, ...] = ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S")
 
 def parse_decision_date(raw: str | None) -> date | None:
     """Return the date in `raw`, or None when it is absent or unparseable."""
-    if not raw or not raw.strip():
+    if not isinstance(raw, str):
+        return None
+    if not raw.strip():
         return None
     text = raw.strip()
     for fmt in _FORMATS:

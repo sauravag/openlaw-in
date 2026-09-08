@@ -1,19 +1,27 @@
 """Quality filters for measured defects in the vaquill judgment corpus.
 
-Two defects are handled:
+One defect is handled here:
 
 1. Judge extraction emits parser noise. Observed real values include
    ``['which']`` and ``['SH. ANIL KUMAR SISODIA', 'vide']``.
-2. English Supreme Court text carries stray Supreme Court Reports margin letters
-   (``A``-``H``) inline, an artifact of the reporter's page layout.
 
-Margin-letter removal is conservative by design. ``Section 302 A`` and
-``Exhibit A`` are legitimate, so a letter is removed only when isolated between
-lowercase words and not preceded by a legal-reference keyword. Callers must
-retain ``text_original`` unmodified for audit.
+A second defect — stray Supreme Court Reports margin letters (``A``-``H``)
+inline in English Supreme Court text — was deliberately NOT handled, after
+measurement showed the obvious regex-based fix corrupts far more text than it
+cleans. Do not re-add margin-letter scrubbing without solving this problem:
+
+A single capital letter A-H sitting between two lowercase words is NOT reliably
+a margin marker. It is, overwhelmingly, a party placeholder — the dominant
+idiom in Indian statutory illustrations and judgments ("if A owes B a sum of
+money", "A agrees to sell to B a horse", "as between A and B the contract").
+An earlier implementation tried to distinguish the two with a regex and
+failed: measured against the real corpus, it fired on 60.5% of English Supreme
+Court chunks and 1.5% of central legislation provisions, silently deleting
+party letters out of legal quotations. This product's entire value
+proposition is quoting Indian law accurately, so mass-mutating quoted text is
+worse than leaving OCR/typesetting noise in place. Margin letters are left in
+the text on purpose.
 """
-
-import re
 
 # Lowercase function words that indicate a mis-parsed judge field.
 _JUDGE_NOISE: frozenset[str] = frozenset(
@@ -23,15 +31,6 @@ _JUDGE_NOISE: frozenset[str] = frozenset(
     }
 )
 _MIN_JUDGE_LENGTH = 3
-
-# An isolated A-H between two lowercase words: the SCR margin-marker shape.
-_MARGIN_LETTER = re.compile(r"(?<=[a-z])\s+([A-H])\s+(?=[a-z])")
-# Keywords after which a lone capital is a real reference, not a margin marker.
-_REFERENCE_KEYWORDS = re.compile(
-    r"\b(section|sections|exhibit|annexure|annexures|schedule|part|clause|"
-    r"chapter|appendix|form|table|article)\s+(?:\d+\s+)?[A-H]\b",
-    re.IGNORECASE,
-)
 
 
 def is_plausible_judge_name(name: str | None) -> bool:
@@ -52,31 +51,3 @@ def clean_judge_names(names: list[str] | None) -> tuple[str, ...]:
     if not names:
         return ()
     return tuple(name.strip() for name in names if is_plausible_judge_name(name))
-
-
-def scrub_margin_letters(text: str) -> str:
-    """Remove isolated Supreme Court Reports margin letters (A-H) from `text`.
-
-    Conservative: a letter preceded by a legal-reference keyword is preserved.
-    Returns a new string; `text` is not modified.
-    """
-    if not text:
-        return text
-
-    protected: list[str] = [
-        match.group(0) for match in _REFERENCE_KEYWORDS.finditer(text)
-    ]
-    placeholders: dict[str, str] = {
-        f"\x00{index}\x00": phrase for index, phrase in enumerate(protected)
-    }
-
-    guarded = text
-    for placeholder, phrase in placeholders.items():
-        guarded = guarded.replace(phrase, placeholder, 1)
-
-    scrubbed = _MARGIN_LETTER.sub(" ", guarded)
-
-    for placeholder, phrase in placeholders.items():
-        scrubbed = scrubbed.replace(placeholder, phrase)
-
-    return scrubbed
