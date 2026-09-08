@@ -2100,10 +2100,15 @@ def restore_collection(
     spec: CollectionSpec, qdrant_url: str, client: httpx.Client
 ) -> None:
     """Create `spec`'s collection and recover every shard snapshot into it."""
-    client.put(
+    created = client.put(
         f"{qdrant_url}/collections/{spec.name}",
         json=build_collection_payload(spec),
-    ).raise_for_status()
+    )
+    # 409 means the collection already exists, which is what we wanted. Anything
+    # else is a real failure. Without this the restore cannot be retried after an
+    # interrupted 10.44 GB download.
+    if created.status_code != 409:
+        created.raise_for_status()
 
     for shard in range(spec.shards):
         index = client.get(f"{spec.mirror}/shard-{shard}/index.json").json()
