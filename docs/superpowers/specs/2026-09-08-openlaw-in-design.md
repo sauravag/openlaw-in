@@ -204,13 +204,17 @@ These were found by inspecting the data and must be handled in the pipeline.
 - **Tribunal and regulator decisions are not available as text.** 2,112,201 documents
   (542 GB) are held as PDFs only — `Extracted text: No`, "Case index searchable".
   RERA, CAT, DRT, NGT, NCLT, ITAT and CESTAT cannot be cited. See §4.
-- **17% of `acts_india` provisions have no resolvable government URL.** Measured over
-  20,000 restored points: 17.0% carry an empty or non-URL `source_url` (one holds the bare
-  string `14300`). They are *entirely* regulator instruments (`jurisdiction: regulatory`)
-  — MCA notifications, Law Commission reports. Roughly 187,000 points of 1,098,577.
+- **137,441 `acts_india` provisions (12.5%) have no resolvable government URL.** Counted
+  over the **full** restored population of 1,098,577, not a sample — an earlier
+  20,000-point sample suggested 17.0%, which scroll order had biased. They carry an empty
+  or non-URL `source_url` (one holds the bare string `14300`) and are *entirely* regulator
+  instruments (`jurisdiction: regulatory`) — MCA notifications, Law Commission reports.
   **These must be excluded at retrieval time by payload filter**, because a provision that
   cannot be cited must never be offered as a source. They are not deleted: the snapshot is
   the publisher's artifact and the exclusion belongs in retrieval, not in the corpus.
+- **No `acts_india` point carries a `corpus_version` field.** All 1,098,577 lack it — the
+  published snapshot predates our convention. Version provenance for restored collections
+  comes from the collection name and release notes, not from point payloads.
 - **District and trial court decisions are not included** in the upstream corpus.
 - **High Court judgments are not in v1** — deferred to phase 2 (§4).
 - **Snapshots are point-in-time.** `v2026.08` is an archive, not current law.
