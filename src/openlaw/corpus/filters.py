@@ -39,7 +39,13 @@ def english_only(chunks: Iterable[JudgmentChunk]) -> Iterator[JudgmentChunk]:
 
 
 def deduplicate(chunks: Iterable[JudgmentChunk]) -> Iterator[JudgmentChunk]:
-    """Yield chunks with repeated `chunk_id` values removed, first occurrence kept."""
+    """Yield chunks with repeated `chunk_id` values removed, first occurrence kept.
+
+    This is safe only because real vaquill `chunk_id`s embed the language
+    (e.g. `1979_INSC_59_000_pun`), so cross-language collisions cannot occur;
+    there is no English preference here, so callers must apply `english_only`
+    BEFORE `deduplicate`, not after.
+    """
     seen: set[str] = set()
     for chunk in chunks:
         if chunk.chunk_id in seen:
