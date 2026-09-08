@@ -78,8 +78,29 @@ Published Qdrant collections (verified against `oss-data-in.vaquill.ai/qdrant/in
 | Collection | Content | Shards | Size |
 |---|---|---|---|
 | `acts_india` | Legislation + regulator provisions | 2 | 11,207,628,288 B (10.44 GB) |
-| `legal_corpus_v1` | High Court + Supreme Court judgment chunks | 4 | 272,836,016,640 B (254.14 GB) |
-| `legal_corpus_v2` | Tribunal + regulator decision chunks | 4 | 179,587,603,968 B (167.25 GB) |
+| `legal_corpus_v1` | **High Court judgments only** — older ingest, no citation field | 4 | 272,836,016,640 B (254.14 GB) |
+| `legal_corpus_v2` | **Supreme Court + High Court judgments** — newer ingest, carries citations | 4 | 179,587,603,968 B (167.25 GB) |
+
+> **The dataset README's collection table is wrong and must not be relied on.**
+> It labels `legal_corpus_v1` as "High Court and Supreme Court" and
+> `legal_corpus_v2` as "Tribunal and regulator decision chunks". Four documents
+> inside the `open-india-law` repository contradict it and agree with each other:
+>
+> - `docs/pipeline/corpus-data-backfill.md` — v1 "~9.8M unique cases, HC only";
+>   v2 "~5.9M unique cases, SC + HC"
+> - `docs/audit/02-methodology.md` — v1 "High Court judgments, older ingest";
+>   v2 "High Court and Supreme Court judgments, newer ingest"
+> - `data/QDRANT_RESTORE.md` — v1 "no citation field"; v2 "Newer ingest, carries
+>   citations"
+> - `docs/audit/tribunals/README.md` — SC and HC judgments are the full-text
+>   material in both collections
+>
+> `coverage.yml` records `embedded_without_text_pct` of 2.2 (v1) and 2.7 (v2),
+> confirming both hold genuine full text. The collections overlap:
+> `docs/audit/01-summary.md` notes that for most shared courts the v2 copy is a
+> subset of v1, so restoring both requires deduplication by `case_id`.
+
+**There are no tribunal vectors in any published collection** — see §3.5.
 
 Judgment schema carries `case_id`, `chunk_id`, `chunk_index`, `text`, `court`,
 `court_code`, `judges`, `title`, `petitioner`, `respondent`, `disposition`,
@@ -173,52 +194,66 @@ These were found by inspecting the data and must be handled in the pipeline.
   Consumer disputes are among the highest-volume citizen legal problems. v1 answers
   them from the Consumer Protection Act and Supreme Court precedent but cannot cite
   consumer-forum decisions. Launch messaging must not imply otherwise.
+- **Tribunal and regulator decisions are not available as text.** 2,112,201 documents
+  (542 GB) are held as PDFs only — `Extracted text: No`, "Case index searchable".
+  RERA, CAT, DRT, NGT, NCLT, ITAT and CESTAT cannot be cited. See §4.
 - **District and trial court decisions are not included** in the upstream corpus.
+- **High Court judgments are not in v1** — deferred to phase 2 (§4).
 - **Snapshots are point-in-time.** `v2026.08` is an archive, not current law.
 
 ---
 
 ## 4. v1 corpus scope
 
-**13,293,269 vectors.**
+**1,469,516 vectors.**
 
 | Source | Vectors | Method | Cost |
 |---|---:|---|---|
 | `acts_india` — 22,265 enactments, all sections, regulator instruments | 1,098,269 | Restore published snapshot (10.44 GB) | Free |
-| `legal_corpus_v2` — tribunal + regulator decisions | 11,823,753 | Restore published snapshot (167.25 GB) | Free |
 | Supreme Court, English only — 35,596 cases | 371,247 | Re-embed with voyage-4 | ~$20–35 |
 
-**Supreme Court must be re-embedded** because it cannot be extracted selectively from
-`legal_corpus_v1`'s four shared shards. At 371,247 chunks (~280M tokens) this is cheap.
-It **must** use voyage-4 to remain in the same vector space as `acts_india`; vectors
-from a different model are not comparable.
+**Supreme Court is re-embedded rather than restored.** `legal_corpus_v2` does contain
+Supreme Court chunks with citations, but it holds 11,823,753 SC **and** High Court
+vectors across four shards that cannot be split by court, so obtaining 371,247 SC
+chunks would mean a 167.25 GB download and a 32 GB-RAM box. Re-embedding ~280M tokens
+for ~$20–35 is dramatically cheaper and yields exactly the wanted slice. Embedding
+**must** use voyage-4 to stay in the same vector space as `acts_india`; vectors from a
+different model are not comparable.
 
-**High Courts are deferred to phase 2.** `legal_corpus_v1` is 254.14 GB and cannot be
-split by court. Restoring it is a separate infrastructure decision, not a v1 cost.
+**High Courts are deferred to phase 2.** When they are added, the source should be
+**`legal_corpus_v2` (167.25 GB, carries citations), not `legal_corpus_v1`
+(254.14 GB, no citation field)** — v2 is smaller and richer. Note the two collections
+overlap and would need deduplication by `case_id` if both were ever restored.
 
-### Why tribunals are in scope
+### Tribunals are out of scope — the data does not exist
 
-Several forums in `legal_corpus_v2` map directly onto common citizen problems:
-RERA (homebuyer disputes), CAT (government service matters), DRT (borrowers facing
-bank recovery), NGT (environmental), NCLT, ITAT, CESTAT.
+An earlier draft of this spec included tribunal and regulator decisions
+(RERA, CAT, DRT, NGT, NCLT, ITAT, CESTAT) on the strength of the dataset README's
+claim that `legal_corpus_v2` held "Tribunal and regulator decision chunks". **That
+claim is false.** `legal_corpus_v2` holds Supreme Court and High Court judgments
+(§3.1), and no published collection contains tribunal vectors.
 
-### Phase 0 kill-gate
+`COVERAGE.md` states the position directly: tribunal and regulator documents are
+2,112,201 files, 542 GB, `Original PDF: Yes`, **`Extracted text: No`**, status
+**"Case index searchable"**. Every one of the 15 forums is marked `Searchable: Case
+index`. Only ~348,516 of those documents (16%) are even reasoned decisions rather than
+procedural order sheets; extracting them is a large OCR job that upstream has not done.
 
-vaquill's README is internally inconsistent about tribunals: it states tribunal
-material is *"indexed by case, not yet by full text… 2.1M PDFs with no text layer"*,
-while also publishing `legal_corpus_v2` with 11.8M embedded **decision chunks**.
+This is a genuine loss. RERA, CAT and DRT map onto very common citizen problems —
+homebuyer disputes, government service matters, and borrowers facing bank recovery.
+v1 cannot serve them from tribunal decisions and must not imply that it can.
 
-**Before committing to the tribunal scope, restore one shard of `legal_corpus_v2` and
-inspect the payloads.** If they are metadata-only rather than decision text, tribunals
-drop from v1 and the corpus reduces to `acts_india` + Supreme Court English
-(1,469,516 vectors).
+**Resolved without downloading anything.** This finding replaces the Phase 0 kill-gate
+that earlier drafts specified (restore one 42 GB shard and inspect payloads); the
+repository's own documentation answered the question.
 
 ### Infrastructure
 
 - Qdrant, self-hosted, int8 scalar quantization, `on_disk` vectors.
-- ~13.6 GB RAM for quantized vectors; provision 32 GB.
-- ~200 GB restored index; provision 400–500 GB SSD.
-- Dedicated server class (Hetzner AX-series, ~€50–70/mo) or cloud VM (~$150–250/mo).
+- ~1.5 GB RAM for quantized vectors; provision 8–16 GB.
+- ~15 GB restored index; provision 100 GB SSD.
+- A modest VM (~$40–80/mo) is sufficient. The 32 GB / 400–500 GB dedicated-server
+  sizing in earlier drafts applied to the tribunal scope and no longer applies.
 
 ---
 
@@ -229,10 +264,10 @@ drop from v1 and the corpus reduces to `acts_india` + Supreme Court English
 ### Rationale
 
 LightRAG performs LLM entity/relation extraction per chunk, so its cost scales directly
-with corpus size. Across the v1 corpus of **13,293,269 chunks** that is roughly 10B
-input tokens plus generation — on the order of **$30,000–60,000** with gleaning passes,
-re-incurred on every corpus refresh. Even against the reduced fallback corpus of
-1,469,516 chunks (if the Phase 0 gate drops tribunals) it would still be $3,000–7,000.
+with corpus size. Across the v1 corpus of **1,469,516 chunks** that is roughly 1.1B
+input tokens plus generation — on the order of **$3,000–7,000** with gleaning passes,
+re-incurred on every corpus refresh. Should High Courts be added in phase 2, the figure
+rises by more than an order of magnitude.
 
 It would also re-derive, at lower precision, edges that already exist as clean columns.
 
@@ -508,7 +543,7 @@ matters.
 
 | Phase | Deliverable | Gate |
 |---|---|---|
-| **0. Verify** | Restore one `legal_corpus_v2` shard; inspect payloads | Does tribunal decision text exist? Confirms or kills tribunal scope |
+| **0. Verify** | ~~Restore one `legal_corpus_v2` shard~~ — **resolved from documentation, 2026-09-08**: tribunals have no extracted text and drop from scope (§4) | Closed. No download required |
 | **1. Data** | Join pipeline (SC neutral citation, HC CNR); English filter; quality filter; `acts_india` restore; SC re-embed | Every indexed chunk resolves to a government URL |
 | **2. Graph** | Deterministic knowledge graph in Neo4j; batch builder; GDS PageRank (authority) and Louvain (doctrinal clusters) precomputed | 543K act-references and the citation network queryable; 1–2 hop expansion returns in <100ms |
 | **3. Retrieval** | Hybrid dense + sparse, graph expansion, reranking | Measured recall on a ~200-question citizen eval set |
@@ -543,18 +578,25 @@ standards.
    works. Sourcing them — ideally with legal-aid clinics — is on the critical path.
 2. **voyage-4 is a hard vendor dependency** for query embedding, since the published
    vectors live in its space. Escaping it means re-embedding the corpus.
-3. **Phase 0 may reduce the corpus** to statutes + Supreme Court if `legal_corpus_v2`
-   payloads are metadata-only.
+3. **Upstream documentation is unreliable and must be cross-checked.** The dataset
+   README mislabels both judgment collections (§3.1), and an earlier draft of this spec
+   built a whole corpus tier on that error. Trust the `open-india-law` repository's
+   audit and pipeline docs over the published README, and verify any coverage claim
+   against `COVERAGE.md` or `coverage.yml` before designing around it.
 4. **Cost scales linearly with success.** At 10K active users on Opus 5 the LLM bill is
    ~$17,400/month. The quota and the two-tier routing are the controls; funding needs to
    be in place before promotion.
 5. **Corpus staleness.** `v2026.08` is a snapshot built by 54 scrapers against government
    portals that change without notice. A refresh strategy is required before the data
    ages materially.
-6. **Consumer fora absence** may be the single largest functional gap relative to what
-   citizens actually ask about. GDS community detection over the citation network (§5)
-   is a partial mitigation for the related `legal_subject` weakness, but it cannot
-   invent decisions the corpus does not contain.
+6. **The forum gap is now the largest functional risk.** Neither consumer fora
+   (NCDRC and State Commissions, never collected) nor tribunals (collected as PDFs but
+   never text-extracted, §4) can be cited. Between them these cover homebuyer disputes,
+   consumer complaints, government service matters and bank recovery — a large share of
+   what citizens actually walk in with. v1 answers them from statutes and Supreme Court
+   precedent alone. GDS community detection (§5) partly mitigates the related
+   `legal_subject` weakness but cannot invent decisions the corpus does not contain.
+   Closing this gap means OCR at scale, which is a project in itself.
 7. **Three datastores raise the self-hosting bar.** Postgres, Qdrant and Neo4j must come
    up together for a legal-aid body with limited technical capacity. Docker Compose is
    the mitigation, and §12.7 is the test of whether it worked.
@@ -565,7 +607,10 @@ standards.
 
 ## 14. Explicitly out of scope for v1
 
-- High Court judgments (`legal_corpus_v1`, 254.14 GB) — phase 2.
+- High Court judgments — phase 2, sourced from `legal_corpus_v2` (167.25 GB, carries
+  citations), not `legal_corpus_v1`.
+- Tribunal and regulator decisions — **not deferred but unavailable**: held as PDFs
+  with no extracted text (§4). Blocked on upstream OCR, not on our scoping.
 - LightRAG conceptual knowledge graph — v2.
 - Document drafting, document upload, case tracking.
 - Lawyer-facing research tooling.
