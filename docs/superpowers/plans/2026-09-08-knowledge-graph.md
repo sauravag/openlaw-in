@@ -4,7 +4,7 @@
 
 **Goal:** Build a deterministic Indian legal knowledge graph in Neo4j from the corpus, and precompute citation authority and doctrinal clusters with GDS.
 
-**Architecture:** An offline batch builder. Edges come from columns that already exist (`acts_referenced`, `defined_terms`, `judges`, `legal_subject`) and from regexes over judgment text (case citations appear in 84.8% of English Supreme Court chunks, statutory section references in 48.4%). No LLM extraction — that is v2. After loading, two GDS algorithms run once per corpus release: PageRank over the citation network for authority ranking, and Louvain for doctrinal clustering that the weak `legal_subject` field cannot supply. The graph is read-only at request time.
+**Architecture:** An offline batch builder. Edges come from columns that already exist (`acts_referenced`, `defined_terms`, `judges`, `legal_subject`) and from regexes over judgment text (case citations appear in 84.8% of English Supreme Court chunks, statutory section references in 48.4%). No LLM extraction anywhere — it is rejected outright, not deferred (spec §5). After loading, two GDS algorithms run once per corpus release: PageRank over the citation network for authority ranking, and Louvain for doctrinal clustering that the weak `legal_subject` field cannot supply. The graph is read-only at request time.
 
 **Tech Stack:** Python 3.12+, `neo4j` driver (Bolt), Neo4j Community Edition 2026.06.0 with the Graph Data Science plugin, pytest.
 
@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- **Deterministic only.** No LLM calls anywhere in this plan. Every edge traces to a column or a regex, so the whole graph is reproducible from the Parquet files.
+- **Deterministic only.** No LLM calls anywhere in this plan, and none planned later. Every edge traces to a column or a regex, so the whole graph is reproducible from the Parquet files with no model in the loop and no drift between rebuilds.
 - **The graph is derived data.** Dropped and rebuilt per corpus release, never incrementally patched. No migration logic.
 - **Read-only at request time.** Writes happen only in the batch builder, so there is no runtime dual-write consistency concern with Postgres.
 - **1–2 hop expansion must return in under 100ms**, because it sits in the user's request path.

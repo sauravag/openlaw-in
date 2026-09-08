@@ -56,7 +56,6 @@ openlaw-in/
 │       └── validation.py                # payload validation
 ├── scripts/
 │   ├── make_fixtures.py                 # sample real data into test fixtures
-│   ├── verify_tribunal_payloads.py      # Phase 0 kill-gate
 │   ├── restore_acts_india.py            # driver
 │   ├── build_sc_index.py                # driver
 │   └── validate_corpus.py               # final gate
@@ -307,20 +306,26 @@ git commit -m "feat: project scaffold, settings, and test fixtures"
 
 ---
 
-## Task 2: Phase 0 kill-gate — verify tribunal payloads
+## Task 2: Local infrastructure
 
-**This task decides the corpus scope and must run before Tasks 10–12.** The spec (§4) records that vaquill's README contradicts itself: tribunal material is described as *"indexed by case, not yet by full text… 2.1M PDFs with no text layer"*, yet `legal_corpus_v2` publishes 11,823,753 embedded **decision chunks**. If the payloads are metadata-only, tribunals drop from v1 and the corpus falls from 13,293,269 to 1,469,516 vectors.
+Brings up the three datastores the pipeline writes to. Nothing after this task runs
+without them.
 
-Shard 0 is ~42 GB, so start this early — it does not block Tasks 3–9.
+> **Scope note.** Earlier drafts made this task a "Phase 0 kill-gate" that restored a
+> 42 GB shard of `legal_corpus_v2` to discover whether tribunal decisions had extracted
+> text. **That question is settled and the download is not needed.** The
+> `open-india-law` repository's own documentation answers it: `legal_corpus_v2` holds
+> Supreme Court and High Court judgments, not tribunal decisions, and `COVERAGE.md`
+> records tribunal material as 2,112,201 PDFs with `Extracted text: No`, "Case index
+> searchable". Tribunals are out of scope. The v1 corpus is **1,469,516 vectors** —
+> `acts_india` plus English Supreme Court. See spec §3.1 and §4.
 
 **Files:**
 - Create: `docker-compose.yml`
-- Create: `scripts/verify_tribunal_payloads.py`
-- Create: `docs/superpowers/plans/phase0-tribunal-verification-result.md` (written by the run)
 
 **Interfaces:**
-- Consumes: `openlaw.config.get_settings` (Task 1)
-- Produces: a written decision record. No importable code.
+- Consumes: nothing
+- Produces: Qdrant, Postgres and Neo4j running on localhost. No importable code.
 
 - [ ] **Step 1: Create `docker-compose.yml`**
 
@@ -353,152 +358,41 @@ services:
 
 Qdrant is pinned to `v1.16.3` because the published snapshots were taken from that version.
 
-- [ ] **Step 2: Start Qdrant and confirm it responds**
+- [ ] **Step 2: Start every service**
 
 ```bash
-docker compose up -d qdrant
-curl -s http://localhost:6333/healthz
+docker compose up -d
 ```
 
-Expected: `healthz check passed`
-
-- [ ] **Step 3: Write the verification script**
-
-Create `scripts/verify_tribunal_payloads.py`:
-
-```python
-"""Phase 0 kill-gate: does legal_corpus_v2 contain tribunal decision TEXT?
-
-Restores shard 0 of legal_corpus_v2 and inspects payload keys and text length.
-Writes a decision record. See spec section 4, "Phase 0 kill-gate".
-
-Run: python scripts/verify_tribunal_payloads.py
-"""
-
-import statistics
-import sys
-
-import httpx
-
-MIRROR = "https://oss-data-in.vaquill.ai/qdrant/legal_corpus_v2"
-QDRANT = "http://localhost:6333"
-COLLECTION = "legal_corpus_v2_probe"
-SHARD = 0
-# A payload holding real decision text should comfortably exceed this.
-MIN_MEAN_TEXT_CHARS = 200
-SAMPLE_SIZE = 50
-
-
-def create_collection(client: httpx.Client) -> None:
-    """Create a single-shard collection matching the published vector config."""
-    client.put(
-        f"{QDRANT}/collections/{COLLECTION}",
-        json={
-            "shard_number": 1,
-            "vectors": {
-                "dense": {
-                    "size": 1024,
-                    "distance": "Cosine",
-                    "on_disk": True,
-                    "quantization_config": {
-                        "scalar": {"type": "int8", "quantile": 0.99}
-                    },
-                }
-            },
-            "sparse_vectors": {"sparse": {}},
-        },
-    ).raise_for_status()
-
-
-def recover_shard(client: httpx.Client) -> None:
-    """Recover one published shard snapshot into the probe collection."""
-    index = client.get(f"{MIRROR}/shard-{SHARD}/index.json").json()
-    snapshot = index["snapshot"]
-    checksum = client.get(f"{MIRROR}/shard-{SHARD}/{snapshot}.checksum").text.strip()
-    client.put(
-        f"{QDRANT}/collections/{COLLECTION}/shards/{SHARD}/snapshots/recover",
-        json={
-            "location": f"{MIRROR}/shard-{SHARD}/{snapshot}",
-            "checksum": checksum,
-            "priority": "snapshot",
-        },
-        timeout=None,
-    ).raise_for_status()
-
-
-def sample_payloads(client: httpx.Client) -> list[dict]:
-    """Scroll a sample of points with their payloads."""
-    response = client.post(
-        f"{QDRANT}/collections/{COLLECTION}/points/scroll",
-        json={"limit": SAMPLE_SIZE, "with_payload": True, "with_vector": False},
-        timeout=120,
-    )
-    response.raise_for_status()
-    return response.json()["result"]["points"]
-
-
-def main() -> int:
-    with httpx.Client(follow_redirects=True, timeout=60) as client:
-        create_collection(client)
-        print("[Probe] collection created; recovering shard 0 (~42 GB, be patient)")
-        recover_shard(client)
-        points = sample_payloads(client)
-
-    if not points:
-        print("[Probe] FAIL: no points returned")
-        return 1
-
-    keys = sorted({key for point in points for key in point["payload"]})
-    text_key = next(
-        (name for name in ("text", "content", "chunk_text") if name in keys), None
-    )
-    print(f"[Probe] sampled {len(points)} points")
-    print(f"[Probe] payload keys: {keys}")
-
-    if text_key is None:
-        print("[Probe] VERDICT: metadata-only. Tribunals DROP from v1.")
-        return 2
-
-    lengths = [len(str(point["payload"].get(text_key, ""))) for point in points]
-    mean_length = statistics.mean(lengths)
-    print(f"[Probe] '{text_key}' mean length: {mean_length:.0f} chars")
-    print(f"[Probe] sample: {str(points[0]['payload'][text_key])[:300]!r}")
-
-    if mean_length >= MIN_MEAN_TEXT_CHARS:
-        print("[Probe] VERDICT: decision text present. Tribunals STAY in v1.")
-        return 0
-
-    print("[Probe] VERDICT: text field too short to be decisions. Tribunals DROP.")
-    return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-```
-
-- [ ] **Step 4: Run the verification**
-
-Run: `python scripts/verify_tribunal_payloads.py`
-Expected: one of three verdicts. Exit `0` = tribunals stay; exit `2` = tribunals drop; exit `1` = probe failed, investigate.
-
-- [ ] **Step 5: Record the decision**
-
-Create `docs/superpowers/plans/phase0-tribunal-verification-result.md` containing: the date, the exit code, the payload keys observed, the mean text length, the sample text, and the resulting scope decision — either *tribunals stay, corpus is 13,293,269 vectors* or *tribunals drop, corpus is 1,469,516 vectors*.
-
-- [ ] **Step 6: Drop the probe collection**
+- [ ] **Step 3: Verify all three are reachable**
 
 ```bash
-curl -X DELETE http://localhost:6333/collections/legal_corpus_v2_probe
+curl -fsS http://localhost:6333/healthz
+docker compose exec -T postgres pg_isready -U openlaw
+curl -fsS -o /dev/null -w '%{http_code}\n' http://localhost:7474
 ```
 
-- [ ] **Step 7: Commit**
+Expected: `healthz check passed`, `accepting connections`, and `200`.
+
+- [ ] **Step 4: Confirm the GDS plugin loaded**
+
+Neo4j must have Graph Data Science available — the knowledge-graph plan depends on it.
 
 ```bash
-git add docker-compose.yml scripts/verify_tribunal_payloads.py docs/
-git commit -m "feat: phase 0 kill-gate verifying legal_corpus_v2 payloads"
+docker compose exec -T neo4j cypher-shell -u neo4j -p openlawdev \
+  "RETURN gds.version() AS version"
 ```
 
----
+Expected: a version string. A `Unknown function 'gds.version'` error means
+`NEO4J_PLUGINS` did not take effect; recreate the container with
+`docker compose up -d --force-recreate neo4j`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add docker-compose.yml
+git commit -m "feat: local Qdrant, Postgres and Neo4j via Docker Compose"
+```
 
 ## Task 3: Identifier normalisation
 
@@ -3016,7 +2910,6 @@ source before relying on anything here.
 ## Corpus build
 
     python scripts/make_fixtures.py            # test fixtures (once)
-    python scripts/verify_tribunal_payloads.py # phase 0 kill-gate
     python scripts/restore_acts_india.py       # 1,098,269 provisions (~11.2 GB)
     python scripts/build_sc_index.py           # 371,247 Supreme Court chunks
     python scripts/validate_corpus.py          # the gate: all citations resolve
@@ -3051,8 +2944,8 @@ git commit -m "feat: corpus validation gate and attribution-bearing README"
 | §3.4.5 `legal_subject` string-encoded, no consumer tag | Task 4 |
 | §3.4.6 `section_title` quirk | `title` and `section_number` are indexed instead (Task 6). No task needed. |
 | Date format divergence | Task 4 |
-| §4 v1 corpus scope | Tasks 10, 11 |
-| §4 Phase 0 kill-gate | Task 2 |
+| §4 v1 corpus scope — 1,469,516 vectors | Tasks 10, 11 |
+| §4 tribunals out of scope (resolved from documentation) | Task 2 scope note |
 | §4 infrastructure (Qdrant/Postgres/Neo4j) | Task 2 (`docker-compose.yml`) |
 | Global: voyage-4 / 1024 / cosine | Tasks 10, 11 |
 | Global: every chunk resolves to a URL | Tasks 6, 8, 12 |

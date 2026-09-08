@@ -259,17 +259,20 @@ repository's own documentation answered the question.
 
 ## 5. Knowledge graph — deterministic
 
-**Decision: deterministic graph only in v1. LightRAG is deferred to v2.**
+**Decision: the knowledge graph is deterministic. There is no LLM-based entity
+extraction — not in v1, and not planned.**
 
 ### Rationale
 
-LightRAG performs LLM entity/relation extraction per chunk, so its cost scales directly
-with corpus size. Across the v1 corpus of **1,469,516 chunks** that is roughly 1.1B
-input tokens plus generation — on the order of **$3,000–7,000** with gleaning passes,
-re-incurred on every corpus refresh. Should High Courts be added in phase 2, the figure
-rises by more than an order of magnitude.
+Every edge traces to a column that already exists or to a regex over judgment text, so
+the whole graph is reproducible from the Parquet files with no model in the loop, no
+per-chunk inference cost, and no drift between rebuilds.
 
-It would also re-derive, at lower precision, edges that already exist as clean columns.
+LLM-based graph extraction was evaluated and **rejected**. Across 1,469,516 chunks it
+costs roughly 1.1B input tokens plus generation — on the order of $3,000–7,000,
+re-incurred on every corpus refresh — and it would re-derive, at lower precision, edges
+already present as clean structured columns. For a free product built on a corpus that
+carries its own relationships, that is spend without a return.
 
 ### Free edges, measured
 
@@ -308,8 +311,12 @@ that:
    metadata does not carry. Given `legal_subject` is 62% `general` with no consumer-law
    tag (§3.4.5), inferring subject clusters from citation structure is a direct
    mitigation for a documented data weakness.
-4. **LightRAG (v2) has a native Neo4j storage backend**, making the conceptual-graph
-   phase a configuration change rather than a re-platform.
+An earlier draft listed a fourth reason: that a future LLM-extracted conceptual graph
+would slot into Neo4j as a configuration change. **That reason has been withdrawn** —
+LLM-based extraction is now rejected outright rather than deferred. The Neo4j decision
+rests on the three reasons above, which are unaffected. At ~1.3M nodes Postgres would
+also serve; if those three benefits stop earning a third datastore, this is a cheap
+decision to revisit (see Reversibility below).
 
 The graph is **read-only at request time** — written only by the batch builder, once per
 corpus release. There is therefore no runtime dual-write consistency concern between
@@ -331,12 +338,14 @@ Neo4j and Postgres.
 Neo4j proves wrong, the same builder targets another store. This is a cheap decision to
 revisit, unlike the voyage-4 embedding dependency (§13.2).
 
-### Deferred to v2
+### What the deterministic graph does not capture
 
-LightRAG over a curated citizen-relevant subset (SC cases in family, tenancy, labour,
-consumer and criminal matters — roughly 50–80K chunks, ~$150–350), to add conceptual
-entities and multi-hop paths that regexes cannot recover. Gated on evaluation showing
-real multi-hop retrieval failures.
+Regexes recover structural relationships — which case cites which, which section
+belongs to which Act — but not conceptual ones. The graph has no edge for "this
+judgment concerns cruelty" or "these two provisions both turn on reasonable
+restriction". If evaluation later shows retrieval failing on that kind of question,
+the answer is better retrieval or richer structured tagging, **not** LLM extraction over
+the corpus. This limitation is accepted deliberately.
 
 ---
 
@@ -611,7 +620,7 @@ standards.
   citations), not `legal_corpus_v1`.
 - Tribunal and regulator decisions — **not deferred but unavailable**: held as PDFs
   with no extracted text (§4). Blocked on upstream OCR, not on our scoping.
-- LightRAG conceptual knowledge graph — v2.
+- LLM-based knowledge-graph extraction — **rejected, not deferred** (§5).
 - Document drafting, document upload, case tracking.
 - Lawyer-facing research tooling.
 - Mobile applications.
