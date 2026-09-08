@@ -330,10 +330,15 @@ without them.
 - [ ] **Step 1: Create `docker-compose.yml`**
 
 ```yaml
+# Local development only. Every port is bound to 127.0.0.1 so these
+# datastores are not reachable from the local network — the credentials
+# below are development defaults and Qdrant runs without authentication.
+# Production deployment must supply real secrets and its own network policy.
+
 services:
   qdrant:
     image: qdrant/qdrant:v1.16.3
-    ports: ["6333:6333", "6334:6334"]
+    ports: ["127.0.0.1:6333:6333", "127.0.0.1:6334:6334"]
     volumes: ["./data/qdrant:/qdrant/storage"]
 
   postgres:
@@ -342,7 +347,7 @@ services:
       POSTGRES_USER: openlaw
       POSTGRES_PASSWORD: openlaw
       POSTGRES_DB: openlaw
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: ["./data/postgres:/var/lib/postgresql/data"]
 
   neo4j:
@@ -352,7 +357,7 @@ services:
       NEO4J_PLUGINS: '["graph-data-science"]'
       NEO4J_server_memory_pagecache_size: 4G
       NEO4J_server_memory_heap_max__size: 4G
-    ports: ["7474:7474", "7687:7687"]
+    ports: ["127.0.0.1:7474:7474", "127.0.0.1:7687:7687"]
     volumes: ["./data/neo4j:/data"]
 ```
 
