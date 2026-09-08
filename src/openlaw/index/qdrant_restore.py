@@ -17,6 +17,7 @@ import httpx
 MIRROR_ROOT = "https://oss-data-in.vaquill.ai/qdrant"
 VECTOR_SIZE = 1024
 DISTANCE = "Cosine"
+COLLECTION_ALREADY_EXISTS = 409
 
 
 @dataclass(frozen=True)
@@ -60,11 +61,21 @@ def shard_snapshot_urls(
 def restore_collection(
     spec: CollectionSpec, qdrant_url: str, client: httpx.Client
 ) -> None:
-    """Create `spec`'s collection and recover every shard snapshot into it."""
-    client.put(
+    """Create `spec`'s collection and recover every shard snapshot into it.
+
+    Idempotent and safe to re-run after an interrupted download: if the collection
+    already exists (Qdrant returns 409), that is treated as success rather than an
+    error, and shard recovery proceeds against the existing collection. Shard
+    recovery replaces shard contents, so recovering into an existing (even
+    partially populated) collection is the documented Qdrant flow and never
+    deletes or recreates the collection.
+    """
+    response = client.put(
         f"{qdrant_url}/collections/{spec.name}",
         json=build_collection_payload(spec),
-    ).raise_for_status()
+    )
+    if response.status_code != COLLECTION_ALREADY_EXISTS:
+        response.raise_for_status()
 
     for shard in range(spec.shards):
         index = client.get(f"{spec.mirror}/shard-{shard}/index.json").json()
