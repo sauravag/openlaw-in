@@ -23,6 +23,17 @@ class ValidationReport:
         return not self.missing_url and not self.missing_version
 
 
+def has_source_url(payload: dict[str, Any]) -> bool:
+    """True when `payload` carries a non-blank government source URL.
+
+    The single definition of "citable", shared by the validation gate and by the
+    sparse rebuild, which excludes un-citable provisions from the retrieval
+    collection entirely.
+    """
+    url = payload.get("source_url")
+    return bool(url) and bool(str(url).strip())
+
+
 def validate_payloads(points: Iterable[dict[str, Any]]) -> ValidationReport:
     """Validate that every point in `points` carries a URL and corpus version."""
     checked = 0
@@ -34,8 +45,7 @@ def validate_payloads(points: Iterable[dict[str, Any]]) -> ValidationReport:
         payload = point.get("payload") or {}
         identifier = str(payload.get("chunk_id") or point.get("id") or "<unknown>")
 
-        url = payload.get("source_url")
-        if not url or not str(url).strip():
+        if not has_source_url(payload):
             missing_url.append(identifier)
 
         version = payload.get("corpus_version")
