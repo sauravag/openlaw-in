@@ -2870,6 +2870,56 @@ git commit -m "feat: corpus validation gate and attribution-bearing README"
 
 ---
 
+## Task 13: Rebuild sparse vectors consistently
+
+Hybrid retrieval (Plan 3) needs a sparse vector per chunk, and the ones we have cannot be
+used as they stand. **Measured on 5,000 random `acts_india` points:** 51.7% carry
+BM25-saturated weights (capped ≈2.2) while 47.6% carry raw term counts (values to 16+),
+mixed together with no pattern by jurisdiction or document type. Since hybrid search sums
+these weights, a raw-count chunk can outscore a BM25 chunk ~7x for no relevance reason.
+The collection also sets no IDF modifier, so "shall" counts as much as "arbitration".
+Separately, SC points from Task 11 are written **dense-only** and have no sparse vector at
+all.
+
+Both problems are fixed by one pass. This needs **no model and no API** — sparse vectors
+are computed from the `text` already in each payload, so this is CPU work of roughly an
+hour, not a re-embedding.
+
+**Files:**
+- Create: `src/openlaw/index/sparse.py`
+- Create: `scripts/build_sparse_vectors.py`
+- Create: `tests/index/test_sparse.py`
+
+**Interfaces:**
+- Consumes: `SC_COLLECTION` (Task 11); the live `acts_india` collection (read-only)
+- Produces:
+  - `SPARSE_VECTOR_NAME: str` — `"sparse"`
+  - `bm25_vector(text: str, idf: Mapping[int, float], avg_len: float) -> dict[str, list]`
+    returning `{"indices": [...], "values": [...]}`
+  - `token_index(token: str) -> int` — stable hash, matching the published scheme
+  - `corpus_statistics(texts: Iterable[str]) -> tuple[dict[int, float], float]` — document
+    frequencies → IDF, and mean document length
+
+**Constraints:**
+- **Never write to `acts_india`.** Rebuilt statute vectors go to a **new** collection; the
+  restored one stays untouched (it is the only copy of the published dense vectors and is
+  expensive to restore).
+- `k1=1.2`, `b=0.75`; IDF computed over the v1 corpus, not assumed.
+- Assert the two-scheme defect is gone afterwards: no value above `k1 + 1` in a sample.
+- Idempotent and checkpointed, like Task 11 — it touches ~1.47M points.
+
+- [ ] **Step 1: Write the failing test** — `tests/index/test_sparse.py`: a repeated term
+      saturates below `k1 + 1`; a rare term outweighs a common one at equal frequency;
+      `token_index` is stable across calls; an empty string yields an empty vector.
+- [ ] **Step 2: Implement** `src/openlaw/index/sparse.py`.
+- [ ] **Step 3: Driver** `scripts/build_sparse_vectors.py` — two passes (statistics, then
+      write), `--collection`, `--restart`, checkpointed.
+- [ ] **Step 4: Verify on the live index** — rebuild, then confirm no raw-count outliers
+      remain and that a known statutory phrase ranks its own section top-1 on sparse alone.
+- [ ] **Step 5: Commit** — `feat: rebuild sparse vectors under one consistent BM25 scheme`
+
+---
+
 ## Self-Review
 
 **1. Spec coverage.**
@@ -2913,7 +2963,7 @@ Spec phases 2–6 are out of scope for this plan by design — see the handoff b
 
 **Plan complete and saved to `docs/superpowers/plans/2026-09-08-corpus-foundation.md`.**
 
-This is Plan 1 of 5. The remaining plans are written after their predecessor lands:
+This is Plan 1 of 5 (13 tasks; Task 13 added after the sparse-vector defect was measured). The remaining plans are written after their predecessor lands:
 
 2. **Knowledge graph** (spec §5) — Neo4j builder, GDS PageRank and Louvain
 3. **Retrieval and answer contract** (spec §6) — hybrid retrieval, citation validator

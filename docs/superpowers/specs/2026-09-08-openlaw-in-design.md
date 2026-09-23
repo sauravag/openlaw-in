@@ -228,15 +228,22 @@ These were found by inspecting the data and must be handled in the pipeline.
 | Source | Vectors | Method | Cost |
 |---|---:|---|---|
 | `acts_india` — 22,265 enactments, all sections, regulator instruments | 1,098,269 | Restore published snapshot (10.44 GB) | Free |
-| Supreme Court, English only — 35,596 cases | 371,247 | Re-embed with voyage-4 | ~$20–35 |
+| Supreme Court, English only — 35,596 cases | 371,247 | Re-embed with voyage-4 | ~$8 (measured) |
 
 **Supreme Court is re-embedded rather than restored.** `legal_corpus_v2` does contain
 Supreme Court chunks with citations, but it holds 11,823,753 SC **and** High Court
 vectors across four shards that cannot be split by court, so obtaining 371,247 SC
-chunks would mean a 167.25 GB download and a 32 GB-RAM box. Re-embedding ~280M tokens
-for ~$20–35 is dramatically cheaper and yields exactly the wanted slice. Embedding
-**must** use voyage-4 to stay in the same vector space as `acts_india`; vectors from a
-different model are not comparable.
+chunks would mean a 167.25 GB download and a 32 GB-RAM box. Re-embedding is dramatically
+cheaper and yields exactly the wanted slice. Measured on the English-only chunks the
+filter actually keeps: **~917 tokens/chunk, ~340M tokens total**. Voyage grants the first
+200M tokens of the voyage-4 generation free, so the billable remainder is ~140M at
+$0.06/M — **~$8**. Embedding **must** use the voyage-4 series to stay in the same vector
+space as `acts_india`; vectors from a different model are not comparable.
+
+**Token counts are language-bound.** The same Voyage tokenizer yields ~4.0 characters per
+token on English but ~0.94 on the court's regional-language translations, which shred into
+byte-level pieces. Indexing those would cost ~4x more per chunk on top of tripling the
+chunk count — an independent reason for the English-only corpus (§4.1).
 
 **High Courts are deferred to phase 2.** When they are added, the source should be
 **`legal_corpus_v2` (167.25 GB, carries citations), not `legal_corpus_v1`
@@ -379,7 +386,8 @@ user question (any supported language)
   ├─ classifier model  → intent, complexity, crisis detection
   ├─ translator model  → query translated to English
   │
-  ├─ hybrid retrieval  → voyage-4 dense + published sparse BM25
+  ├─ query embedding   → voyage-4-nano, run LOCALLY (no API key, no per-query cost)
+  ├─ hybrid retrieval  → voyage-4 dense + rebuilt sparse BM25 (§8.1)
   │                      Qdrant payload filters (court, year, in_force, jurisdiction)
   ├─ graph expansion   → cited sections, referenced Acts, related provisions
   ├─ rerank            → cross-encoder
@@ -440,6 +448,66 @@ text is the authoritative one and a translated statute is not the statute.
 ---
 
 ## 8. Model configuration — per role
+
+### 8.1 Embedding: cloud for documents, local for queries
+
+Embedding is split by where the cost falls. Documents are embedded **once**; queries are
+embedded on **every request, forever**.
+
+| Role | Model | Where | Cost |
+|---|---|---|---|
+| Statute vectors | `voyage-4` (published) | already restored | free |
+| SC document vectors | `voyage-4` via Voyage API | one-off build | ~$8 |
+| **Query vectors** | **`voyage-4-nano`** (Apache 2.0) | **locally, on CPU/GPU** | **free, no key** |
+
+This works only because the whole voyage-4 family shares one embedding space, which was
+verified against the live collection rather than taken from the vendor's claim:
+
+- same text, nano vs stored voyage-4: **0.951 mean cosine** (p05 0.92, min 0.836) at 1024
+  dims; unrelated text scores 0.362, so the alignment is real, not an artefact
+- nano query → voyage-4 documents: **65% top-1, 85% top-10**, matching nano → nano
+  (67.5% / 85%). Mixing the two costs nothing measurable
+- `voyage-4` API output reproduces the publisher's own vectors at **0.9886 mean cosine**
+  with `input_type="document"` (0.9825 without it — so the parameter is load-bearing), and
+  already returns 1024 dims
+
+**Consequence for self-hosting (§12.7):** no API key is needed to *run* OpenLaw.in. A
+self-hoster embeds queries locally with nano, and either restores published vectors or
+embeds the SC corpus locally with nano — measured at 20 chunks/s on an Apple M4 Max,
+so ~5 hours for the 371,247 SC chunks. Slower hardware scales that up proportionally.
+
+### 8.2 Sparse vectors must be rebuilt, not trusted
+
+The published sparse vectors are **internally inconsistent**. Sampling 5,000 random
+`acts_india` points found two incompatible weighting schemes mixed together:
+
+| Weighting | Share |
+|---|---:|
+| BM25-saturated (values capped ≈2.2) | 51.7% |
+| Raw term counts (values to 16+) | 47.6% |
+| Indeterminate (short chunks) | 0.7% |
+
+The split does not follow jurisdiction or document type, so it looks like a mid-ingestion
+change the publisher never backfilled. Because hybrid search sums these weights, a
+raw-count chunk can outscore a BM25 chunk by ~7x for reasons unrelated to relevance, and
+the collection sets no IDF modifier, so common words weigh as much as rare ones.
+
+Sparse vectors are therefore **regenerated from payload text** under one consistent BM25
+scheme with IDF. This needs no model and no API: it is a CPU pass of roughly an hour over
+1.1M chunks. SC points are written dense-only and receive their sparse vectors in the same
+pass.
+
+### 8.3 Operational traps (measured, not theoretical)
+
+- **Pin `transformers`.** `voyage-4-nano` ships modelling code written against 4.51 and
+  fails on 5.x twice: no `config_class` on the custom class, then a renamed
+  `create_causal_mask` argument.
+- **Never set `PYTORCH_ENABLE_MPS_FALLBACK=1`.** It silently relocates work to the CPU and
+  ran **26x slower** (2.0 vs 52 chunks/s).
+- **Set `HF_HUB_DISABLE_XET=1`.** Hugging Face's Xet transfer backend stalled indefinitely
+  on a normal home connection; plain HTTPS downloads worked immediately.
+
+### 8.4 Generation models
 
 Models are configurable **per pipeline role**, not globally. Translation does not need
 the reasoning capability that grounded legal answering needs, and paying frontier prices
@@ -603,8 +671,14 @@ standards.
 1. **The evaluation set is the hard, unglamorous prerequisite.** ~200 real citizen legal
    problems with known-correct answers are the only way to know whether any of this
    works. Sourcing them — ideally with legal-aid clinics — is on the critical path.
-2. **voyage-4 is a hard vendor dependency** for query embedding, since the published
-   vectors live in its space. Escaping it means re-embedding the corpus.
+2. ~~**voyage-4 is a hard vendor dependency** for query embedding~~ — **resolved**, see
+   §8.1. `voyage-4-nano` is open-weights (Apache 2.0) and shares the voyage-4 embedding
+   space, so query embedding runs locally with no API key. Measured, not assumed: nano
+   vectors match the stored voyage-4 vectors for the same text at **0.951 mean cosine**
+   (p05 0.92) once truncated to 1024 dims, and nano queries retrieve from voyage-4
+   document vectors as well as from nano's own (**85% top-10 either way**). What remains
+   is a *build-time* dependency only: a one-off ~$8 to embed the SC corpus, which a
+   self-hoster can avoid entirely by embedding locally with nano instead.
 3. **Upstream documentation is unreliable and must be cross-checked.** The dataset
    README mislabels both judgment collections (§3.1), and an earlier draft of this spec
    built a whole corpus tier on that error. Trust the `open-india-law` repository's

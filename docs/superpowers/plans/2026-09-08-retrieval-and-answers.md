@@ -69,6 +69,18 @@ tests/retrieval/, tests/answers/, tests/evaluation/
 
 ## Task 1: Query embedding
 
+> **Decided (measured, see spec §8.1): queries are embedded LOCALLY with
+> `voyage-4-nano`, not through the Voyage API.** Nano is Apache-2.0 open weights and
+> shares the voyage-4 embedding space, so it queries the `voyage-4` document vectors
+> directly: 0.951 mean cosine for the same text, and 85% top-10 either way. That removes
+> the API key, the per-query cost and the vendor dependency from the serving path.
+>
+> `LocalNanoQueryEmbedder` is therefore the default and `VoyageQueryEmbedder` (API) stays
+> as a configurable alternative — both must emit **1024 dims** (truncate nano's 2048 and
+> **renormalise**, or MRL truncation breaks unit norm) and use `input_type="query"` /
+> nano's query prompt. Pin `transformers`, never set `PYTORCH_ENABLE_MPS_FALLBACK=1`, and
+> set `HF_HUB_DISABLE_XET=1` when fetching weights (spec §8.3).
+
 **Files:**
 - Create: `src/openlaw/retrieval/__init__.py`, `src/openlaw/retrieval/query.py`
 - Create: `tests/retrieval/__init__.py`, `tests/retrieval/test_query.py`
