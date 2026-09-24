@@ -72,6 +72,31 @@ class Settings(BaseSettings):
     # Supabase auth (email + Google). Left unset in self-hosted/dev use.
     supabase_url: str | None = None
     supabase_jwt_secret: str | None = None
+    # Reverse-proxy trust (Task 4 review, C1). `openlaw.api.routes._client_key`
+    # uses the raw TCP peer address (`request.client.host`) UNLESS that peer
+    # is listed here, in which case it walks `X-Forwarded-For` from the right
+    # and returns the first hop NOT in this set. Empty (the default) means
+    # trust nothing -- every request's peer is used as-is.
+    #
+    # This matters because every self-hosted deployment of this product sits
+    # behind a reverse proxy (nginx/Caddy/Traefik/Docker Compose's bridge
+    # network) by design. Left at the default behind such a proxy, EVERY
+    # request's peer address is the proxy itself -- one constant value -- so
+    # the per-caller rate limit and (pre-fix) the anonymous quota collapse
+    # into one shared bucket for the whole deployment; see the Task 4 review,
+    # finding C1, for the concrete failure ("the fourth visitor ever gets
+    # blocked"). The fix is NOT to trust `X-Forwarded-For` unconditionally --
+    # that header is attacker-supplied, and honouring it with no configured
+    # trust turns both controls into a single spoofable header, i.e.
+    # unbounded model spend on what is meant to be a free, capped service.
+    # An operator running behind a known proxy MUST set this to that proxy's
+    # address (its Docker Compose service IP, or `127.0.0.1` for a local
+    # nginx) for per-caller accounting to work at all.
+    trusted_proxy_ips: tuple[str, ...] = ()
+    # Where a quota/rate-limit refusal tells the caller to sign up. Relative
+    # by default so it works unmodified in dev; a real deployment should
+    # override it with the frontend's actual URL.
+    signup_url: str = "/signup"
 
 
 @lru_cache

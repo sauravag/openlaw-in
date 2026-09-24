@@ -62,6 +62,22 @@ def current_period(today: date | None = None) -> date:
     return date(reference.year, reference.month, 1)
 
 
+def next_period_start(today: date | None = None) -> date:
+    """Return the first day of the month AFTER `today`'s.
+
+    Used to tell a quota-refused caller *when* their allowance comes back --
+    a bare "limit reached" with no date is a dead end (Task 4 review, M6).
+    Kept alongside `current_period` since both are the same month-boundary
+    arithmetic and a caller (`openlaw.api.routes`) needs both: the current
+    period to check/consume against, and the next one to report as the reset
+    date.
+    """
+    period = current_period(today)
+    if period.month == 12:
+        return date(period.year + 1, 1, 1)
+    return date(period.year, period.month + 1, 1)
+
+
 def check_quota(used: int, limit: int, enabled: bool) -> QuotaDecision:
     """Return the quota decision for a user who has used `used` questions."""
     if not enabled:

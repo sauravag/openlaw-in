@@ -14,7 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from openlaw.db.models import Base, QuotaUsage, User
-from openlaw.db.quota import check_quota, consume_quota, current_period
+from openlaw.db.quota import check_quota, consume_quota, current_period, next_period_start
 from openlaw.db.session import session_scope
 
 
@@ -33,6 +33,14 @@ def _user(session: Session) -> User:
 
 def test_current_period_is_the_first_of_the_month() -> None:
     assert current_period(date(2026, 9, 8)) == date(2026, 9, 1)
+
+
+def test_next_period_start_is_the_first_of_next_month() -> None:
+    assert next_period_start(date(2026, 9, 8)) == date(2026, 10, 1)
+
+
+def test_next_period_start_rolls_over_the_year_in_december() -> None:
+    assert next_period_start(date(2026, 12, 15)) == date(2027, 1, 1)
 
 
 def test_allows_a_user_below_the_limit() -> None:

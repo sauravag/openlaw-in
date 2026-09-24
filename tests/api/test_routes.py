@@ -14,7 +14,9 @@ rendered in `AskResponse.answer`, since that is the only content
 """
 
 import time
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import jwt
 from fastapi.testclient import TestClient
@@ -258,29 +260,35 @@ def test_quota_refusal_has_no_crisis_response_for_an_ordinary_question() -> None
     assert blocked.json()["crisis_response"] is None
 
 
-# --- Requirement 4: auth failures never leak detail ------------------------
+# --- Requirement 4 + review ruling H1/M4: auth failures never leak detail,
+# and never leave the caller worse off than sending no token at all ---------
 
 
-def test_invalid_bearer_token_returns_a_generic_401_without_leaking_detail() -> None:
-    client = _client()
+def test_invalid_bearer_token_falls_back_to_the_anonymous_allowance() -> None:
+    """A malformed token used to return a bare 401. The review's H1/M4 ruling:
+    fall back to the anonymous path instead -- a stale token is the ordinary
+    state of a returning user on a shared device, and refusing outright left
+    them worse off than sending no token at all."""
+    client = _client(settings=_settings(anonymous_quota=3))
     response = client.post(
         "/ask",
         json={"question": "q"},
         headers={"Authorization": "Bearer not-a-real-token"},
     )
-    assert response.status_code == 401
-    # The generic, fixed string only -- never PyJWT internals or claim content.
-    assert response.json()["detail"] == "authentication failed"
+    assert response.status_code == 200
+    # 2, not 1 (monthly_quota - 1) -- proves the anonymous allowance was
+    # used, not a (nonexistent, for this bad token) authenticated identity.
+    assert response.json()["quota_remaining"] == 2
 
 
-def test_expired_bearer_token_returns_a_generic_401() -> None:
-    client = _client()
+def test_expired_bearer_token_falls_back_to_the_anonymous_allowance() -> None:
+    client = _client(settings=_settings(anonymous_quota=3))
     expired = _bearer_token(exp=int(time.time()) - 10)
     response = client.post(
         "/ask", json={"question": "q"}, headers={"Authorization": f"Bearer {expired}"}
     )
-    assert response.status_code == 401
-    assert response.json()["detail"] == "authentication failed"
+    assert response.status_code == 200
+    assert response.json()["quota_remaining"] == 2
 
 
 # --- Requirement 6: the authenticated path meters its own (larger) quota ---
@@ -406,6 +414,254 @@ def test_rate_limit_trips_after_the_burst_cap_and_recovers_outside_the_window() 
     client.app.state.rate_limit_hits["testclient"] = [
         now - routes_module._RATE_LIMIT_WINDOW_SECONDS - 1
     ] * routes_module._RATE_LIMIT_MAX_REQUESTS
+    recovered = client.post("/ask", json={"question": "q"})
+    assert recovered.status_code == 200
+
+
+# --- Review finding H2: state/language are allowlisted, not free text ------
+
+
+def test_rejects_a_state_that_is_not_a_real_jurisdiction() -> None:
+    """The reviewer's own proof string: unvalidated `state` let a
+    <script> tag and a phishing URL land inside `escalation_footer`, the one
+    sentence that tells a citizen who to call for help."""
+    proof = "<script>alert(1)</script> Send money to hxxp://evil"
+    response = _client().post("/ask", json={"question": "q", "state": proof})
+    assert response.status_code == 422
+
+
+def test_rejects_an_unsupported_language_code() -> None:
+    # Short enough to pass the length check, so this actually exercises the
+    # allowlist validator rather than the length constraint ahead of it.
+    response = _client().post("/ask", json={"question": "q", "language": "fr"})
+    assert response.status_code == 422
+
+
+def test_rejects_an_overlong_language_code() -> None:
+    response = _client().post("/ask", json={"question": "q", "language": "xx-not-real"})
+    assert response.status_code == 422
+
+
+def test_accepts_a_real_state_and_a_supported_language() -> None:
+    response = _client().post(
+        "/ask", json={"question": "q", "state": "Delhi", "language": "hi"}
+    )
+    assert response.status_code == 200
+
+
+# --- Review finding H3: a crisis turn is never marked unanswerable ---------
+
+
+def test_unanswerable_non_crisis_turn_gets_the_fixed_no_verifiable_answer_message() -> (
+    None
+):
+    """The legitimate "we searched and found nothing citable" case -- not a
+    crisis, just nothing survived validation. Distinct from H3, which is
+    about the crisis case specifically."""
+    client = _client(_localised(answer=_UNANSWERABLE))
+    body = client.post("/ask", json={"question": "q"}).json()
+
+    assert body["is_answerable"] is False
+    assert "could not find a verifiable answer" in body["answer"].lower()
+
+
+def test_crisis_turn_is_not_marked_unanswerable() -> None:
+    client = _client(_localised(crisis=CrisisKind.DOMESTIC_VIOLENCE))
+    body = client.post("/ask", json={"question": "my husband beats me"}).json()
+
+    assert body["is_answerable"] is True
+    assert "could not find a verifiable answer" not in body["answer"].lower()
+    assert "181" in body["answer"] or "1091" in body["answer"]
+
+
+# --- Review finding C1/C1b: rate limiting is IP-keyed, anonymous quota is
+# token-keyed, and the two must not collapse into one shared bucket --------
+
+
+def _shared_app(settings: Settings | None = None):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+
+    def session_factory() -> Session:
+        return Session(engine)
+
+    def answer_fn(question: str, language: str | None, state: str | None):
+        return _localised()
+
+    return create_app(answer_fn, session_factory, settings or _settings())
+
+
+def test_two_anonymous_callers_behind_the_same_ip_get_separate_quota_buckets() -> None:
+    """Regression for C1/C1b/M5: two distinct browsers behind one shared IP
+    (the common case behind CGNAT, or two TestClient instances that both
+    report the same "testclient" peer) must not share one allowance."""
+    app = _shared_app(settings=_settings(anonymous_quota=1))
+    client_a = TestClient(app, raise_server_exceptions=False)
+    client_b = TestClient(app, raise_server_exceptions=False)
+
+    assert client_a.post("/ask", json={"question": "q"}).status_code == 200
+    assert client_a.post("/ask", json={"question": "q"}).status_code == 429
+    # A different caller, same IP, still has their own allowance.
+    assert client_b.post("/ask", json={"question": "q"}).status_code == 200
+
+
+def test_client_key_uses_the_peer_address_when_no_proxy_is_trusted() -> None:
+    from openlaw.api.routes import _client_key
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.9"), headers={"x-forwarded-for": "1.2.3.4"}
+    )
+    assert _client_key(request, _settings(trusted_proxy_ips=())) == "203.0.113.9"
+
+
+def test_client_key_uses_the_rightmost_untrusted_forwarded_for_hop() -> None:
+    from openlaw.api.routes import _client_key
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="172.18.0.1"),
+        headers={"x-forwarded-for": "203.0.113.5, 172.18.0.1"},
+    )
+    settings = _settings(trusted_proxy_ips=("172.18.0.1",))
+    assert _client_key(request, settings) == "203.0.113.5"
+
+
+def test_client_key_falls_back_to_the_peer_when_every_hop_is_trusted() -> None:
+    from openlaw.api.routes import _client_key
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="172.18.0.1"),
+        headers={"x-forwarded-for": "172.18.0.1"},
+    )
+    settings = _settings(trusted_proxy_ips=("172.18.0.1",))
+    assert _client_key(request, settings) == "172.18.0.1"
+
+
+# --- Review finding M3: the refusal path's crisis check must not be blind
+# to Devanagari and other Indic scripts --------------------------------------
+
+
+def test_quota_refusal_gives_a_safety_note_for_devanagari_the_regex_cannot_match() -> (
+    None
+):
+    """The regex layer (`detect_crisis`) only matches English/Hinglish
+    Latin-script phrasing -- it cannot fire on Devanagari at all. The
+    refusal path must still surface something rather than silence."""
+    client = _client(settings=_settings(anonymous_quota=0))
+    blocked = client.post("/ask", json={"question": "मेरे पति मुझे पीटते हैं"})
+
+    assert blocked.status_code == 429
+    assert blocked.json()["crisis_response"] is not None
+    assert "112" in blocked.json()["crisis_response"]
+
+
+def test_quota_refusal_crisis_response_is_none_for_an_ordinary_latin_question() -> None:
+    client = _client(settings=_settings(anonymous_quota=0))
+    blocked = client.post("/ask", json={"question": "an ordinary question"})
+    assert blocked.json()["crisis_response"] is None
+
+
+# --- Review findings M6 + "refusal text is English-only" -------------------
+
+
+def test_quota_refusal_carries_reset_date_signup_url_and_retry_after() -> None:
+    client = _client(
+        settings=_settings(anonymous_quota=0, signup_url="https://openlaw.in/signup")
+    )
+    blocked = client.post("/ask", json={"question": "q"})
+
+    assert blocked.status_code == 429
+    body = blocked.json()
+    assert body["quota_reset_at"] is not None
+    assert body["signup_url"] == "https://openlaw.in/signup"
+    assert "Retry-After" in blocked.headers
+
+
+def test_rate_limit_refusal_carries_retry_after_and_signup_url() -> None:
+    from openlaw.api import routes as routes_module
+
+    client = _client(
+        settings=_settings(quota_enabled=False, signup_url="https://openlaw.in/signup")
+    )
+    now = routes_module.time.monotonic()
+    client.app.state.rate_limit_hits["testclient"] = (
+        [now] * routes_module._RATE_LIMIT_MAX_REQUESTS
+    )
+
+    limited = client.post("/ask", json={"question": "q"})
+
+    assert limited.status_code == 429
+    assert "Retry-After" in limited.headers
+    body = limited.json()
+    assert body["signup_url"] == "https://openlaw.in/signup"
+    assert body["quota_reset_at"] is None
+
+
+def test_quota_refusal_detail_defaults_to_english() -> None:
+    client = _client(settings=_settings(anonymous_quota=0))
+    blocked = client.post("/ask", json={"question": "q"})
+    assert blocked.json()["detail"] == "Free allowance used for this period."
+
+
+def test_quota_refusal_detail_is_localised_to_hindi() -> None:
+    client = _client(settings=_settings(anonymous_quota=0))
+    blocked = client.post("/ask", json={"question": "q", "language": "hi"})
+    assert blocked.json()["detail"] != "Free allowance used for this period."
+    assert "अवधि" in blocked.json()["detail"]
+
+
+def test_500_response_also_carries_the_escalation_footer() -> None:
+    """Review finding M4: an outage is the failure most likely to be
+    sustained ("try again" alone is misleading), so it must not be a dead
+    end either."""
+
+    def broken_answer_fn(question: str, language: str | None, state: str | None):
+        raise RuntimeError("boom")
+
+    client = _client(answer_fn=broken_answer_fn)
+    response = client.post("/ask", json={"question": "q"})
+
+    assert response.status_code == 500
+    assert "15100" in response.json()["escalation_footer"]
+
+
+# --- Review finding M1: both in-process dicts are actually pruned ----------
+
+
+def test_prune_rate_limit_hits_removes_keys_with_no_recent_activity() -> None:
+    from openlaw.api.routes import _prune_rate_limit_hits
+
+    hits = {"stale": [0.0, 1.0], "fresh": [100.0]}
+    _prune_rate_limit_hits(hits, window_start=50.0)
+    assert hits == {"fresh": [100.0]}
+
+
+def test_prune_anonymous_counts_drops_entries_from_a_past_period() -> None:
+    from openlaw.api.routes import _prune_anonymous_counts
+
+    counts = {
+        "old-token": (date(2026, 8, 1), 3),
+        "current-token": (date(2026, 9, 1), 1),
+    }
+    _prune_anonymous_counts(counts, period=date(2026, 9, 1))
+    assert counts == {"current-token": (date(2026, 9, 1), 1)}
+
+
+# --- Review finding M2: the anonymous allowance actually resets ------------
+
+
+def test_anonymous_quota_resets_for_a_new_billing_period() -> None:
+    client = _client(settings=_settings(anonymous_quota=1))
+    first = client.post("/ask", json={"question": "q"})
+    assert first.status_code == 200
+
+    token = client.cookies.get("openlaw_anon_id")
+    assert token is not None
+    # Poison the stored count as if this token had already blown far past
+    # the limit -- but in a stale (long-past) billing period.
+    client.app.state.anonymous_used[token] = (date(2020, 1, 1), 999)
+
     recovered = client.post("/ask", json={"question": "q"})
     assert recovered.status_code == 200
 
