@@ -86,6 +86,32 @@ def test_expand_chunks_excludes_stub_judgments() -> None:
     assert "related.case_id IS NOT NULL" in expand_chunks_cypher()
 
 
+def test_expand_chunks_excludes_every_stub_by_label() -> None:
+    """The not-null key checks below are per-label and easy to get wrong as
+    labels grow. `NOT related:Stub` is the one check that holds for all of
+    them, because a placeholder is never anything else."""
+    assert "NOT related:Stub" in expand_chunks_cypher()
+
+
+def test_expand_chunks_cannot_traverse_the_legal_subject_supernode() -> None:
+    """`legal_subject` is 62% 'general' — 336,224 of 544,078 provisions — so
+    at full scale `LegalSubject {name: 'general'}` is a ~336k-degree node. An
+    untyped undirected `*1..2` walk goes Section -> that node -> 336k
+    Sections, which no 100ms request-path budget survives. HAS_SUBJECT and
+    DEFINES are therefore excluded from the traversal: both lead only to
+    nodes this query filters out anyway, so nothing retrievable is lost."""
+    statement = expand_chunks_cypher()
+    assert ":PART_OF|REFERENCES|INTERPRETS*1..2" in statement
+    assert "HAS_SUBJECT" not in statement
+    assert "DEFINES" not in statement
+
+
+def test_judgments_interpreting_can_be_narrowed_to_one_act() -> None:
+    """'Section 302' means nothing on its own — every act has sections with
+    low numbers. A caller that knows the act must be able to say so."""
+    assert "$act_id" in judgments_interpreting_cypher()
+
+
 def test_expand_chunks_is_anchored_on_the_indexed_chunk_id() -> None:
     """The anchor lookup must use Section.chunk_id, which carries a constraint
     (and therefore an index) — this is what keeps the query index-backed."""
@@ -167,10 +193,11 @@ def test_precedent_lineage_rejects_invalid_depth_before_opening_a_session() -> N
 
 @pytest.mark.integration
 def test_expand_chunks_never_returns_a_stub(live_driver: neo4j.Driver) -> None:
-    """Assert on behaviour that holds regardless of how much data is loaded:
-    every row `expand_chunks` returns must carry a non-null id, because a
-    null id there could only come from a stub node (see the module
-    docstring)."""
+    """Asserting only `label in {Section, Act, Judgment}` was vacuous — every
+    stub carries one of those labels too. What actually distinguishes a stub
+    is that it lacks its label's uniqueness-constrained key, and that it is
+    labelled `:Stub`. Both are asserted per returned node, against the real
+    node, not against the projected row."""
     with live_driver.session() as session:
         chunk_ids = [
             record["chunk_id"]
@@ -186,8 +213,65 @@ def test_expand_chunks_never_returns_a_stub(live_driver: neo4j.Driver) -> None:
 
     assert len(rows) <= 40
     for row in rows:
-        assert row["id"] is not None
+        assert row["id"] is not None, "a null id could only come from a stub"
         assert row["label"] in {"Section", "Act", "Judgment"}
+
+    with live_driver.session() as session:
+        stubs = session.run(
+            "MATCH (n:Stub) WHERE n.chunk_id IN $ids OR n.act_id IN $ids "
+            "OR n.case_id IN $ids RETURN count(n) AS n",
+            ids=[row["id"] for row in rows],
+        ).single()["n"]
+    assert stubs == 0
+
+
+@pytest.mark.integration
+def test_a_judgment_is_reachable_from_a_real_section(
+    live_driver: neo4j.Driver,
+) -> None:
+    """The product feature the whole graph exists for: given a statutory
+    provision a citizen's question matched, surface the case law interpreting
+    it. No test asserted this before, which is how a defect that made it
+    either wrong or impossible survived seven scoped reviews.
+
+    Wrong: INTERPRETS keyed on the non-unique `section_number` fanned every
+    judgment onto every same-numbered section of every act. Impossible: on a
+    clean build the judgments phase ran first, so INTERPRETS attached only to
+    placeholders, real Sections received none, and `expand_chunks` — which
+    filters placeholders — could never return a Judgment at all."""
+    with live_driver.session() as session:
+        record = session.run(
+            "MATCH (j:Judgment)-[:INTERPRETS]->(s:Section) "
+            "WHERE j.case_id IS NOT NULL AND s.chunk_id IS NOT NULL "
+            "AND NOT s:Stub RETURN s.chunk_id AS chunk_id LIMIT 1"
+        ).single()
+    if record is None:
+        pytest.skip("no INTERPRETS edge onto a real Section is loaded")
+
+    rows = expand_chunks(live_driver, [record["chunk_id"]], limit=40)
+
+    judgments = [row for row in rows if row["label"] == "Judgment"]
+    assert judgments, "the statute-to-case-law bridge returned nothing"
+    assert all(row["id"] is not None for row in judgments)
+
+
+@pytest.mark.integration
+def test_interprets_edges_reach_real_sections_not_only_placeholders(
+    live_driver: neo4j.Driver,
+) -> None:
+    """A whole-graph invariant, independent of which chunk is sampled: if any
+    INTERPRETS edge exists at all, some of them must land on real Sections.
+    An all-placeholder INTERPRETS population is the silent-empty failure."""
+    with live_driver.session() as session:
+        counts = session.run(
+            "MATCH (:Judgment)-[:INTERPRETS]->(s:Section) "
+            "RETURN sum(CASE WHEN s:Stub THEN 1 ELSE 0 END) AS stubs, "
+            "sum(CASE WHEN s:Stub THEN 0 ELSE 1 END) AS real"
+        ).single()
+    if (counts["stubs"] or 0) + (counts["real"] or 0) == 0:
+        pytest.skip("no INTERPRETS edges are loaded")
+
+    assert counts["real"] > 0
 
 
 @pytest.mark.integration

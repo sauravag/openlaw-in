@@ -1,5 +1,6 @@
 from openlaw.graph.extract import (
     SectionReference,
+    citation_key_for,
     extract_case_citations,
     extract_section_references,
 )
@@ -130,3 +131,73 @@ def test_does_not_extract_messrs_abbreviation_even_when_a_number_follows() -> No
 def test_does_not_extract_number_across_sentence_boundary() -> None:
     text = "he counted the words. 138 of them were relevant"
     assert extract_section_references(text) == ()
+
+
+# --- Task 2 whole-plan review: two verified-unmatched real-world forms ---------
+
+
+def test_section_reference_matches_the_u_slash_s_abbreviation() -> None:
+    """'u/s 302' (under section 302) is extremely common in Indian judgments
+    and was matched by nothing before — the period-less form is the point."""
+    assert extract_section_references("convicted u/s 302 IPC") == (
+        SectionReference(number="302", act_hint=None),
+    )
+
+
+def test_section_reference_matches_the_plural_u_slash_ss_abbreviation() -> None:
+    numbers = [ref.number for ref in extract_section_references("charged u/ss 302 and 34")]
+    assert numbers == ["302", "34"]
+
+
+def test_section_reference_matches_u_slash_s_with_a_trailing_period() -> None:
+    assert [ref.number for ref in extract_section_references("u/s. 138")] == ["138"]
+
+
+def test_u_slash_s_still_carries_an_act_hint_when_the_text_gives_one() -> None:
+    refs = extract_section_references("u/s 138 of the Negotiable Instruments Act")
+    assert refs == (SectionReference(number="138", act_hint="Negotiable Instruments Act"),)
+
+
+def test_a_bare_slash_s_is_not_a_section_reference() -> None:
+    """'M/s 302' (messieurs) must not become a section reference."""
+    assert extract_section_references("M/s 302 Traders Pvt Ltd") == ()
+
+
+def test_scc_citation_matches_the_parenthesised_volume_form() -> None:
+    """'1979 (2) SCC 82' — the year-first, bracketed-volume form. SCC was 166
+    of 629 citations in a real 400-chunk sample, so a missed form costs real
+    PageRank signal."""
+    assert extract_case_citations("see 1979 (2) SCC 82") == ("1979SCC82",)
+
+
+def test_scc_citation_still_matches_the_leading_bracket_form() -> None:
+    assert extract_case_citations("(2016) 8 SCC 984") == ("2016SCC984",)
+
+
+def test_scc_citation_still_matches_the_bare_form() -> None:
+    assert extract_case_citations("2016 SCC 984") == ("2016SCC984",)
+
+
+def test_both_scc_spellings_of_one_reference_collapse_to_one_key() -> None:
+    """The whole point of normalisation: the printed forms of one reference
+    must produce a single node key, not two."""
+    assert extract_case_citations("1979 (2) SCC 82 and (1979) 2 SCC 82") == (
+        "1979SCC82",
+    )
+
+
+# --- a judgment's own citation, normalised the same way ----------------------
+
+
+def test_citation_key_for_extracts_the_normalised_reporter_citation() -> None:
+    """Case 1979_INSC_59's own citation '[1979] 3 S.C.R. 453' must normalise
+    to '1979SCR453' — the same form CITES edges from other judgments target."""
+    assert citation_key_for("[1979] 3 S.C.R. 453") == "1979SCR453"
+
+
+def test_citation_key_for_none_when_citation_is_absent() -> None:
+    assert citation_key_for(None) is None
+
+
+def test_citation_key_for_none_when_citation_does_not_match_a_known_reporter() -> None:
+    assert citation_key_for("an unparseable citation string") is None

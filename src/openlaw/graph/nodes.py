@@ -12,6 +12,7 @@ never mutating the record or anything nested inside it.
 from typing import Any
 
 from openlaw.corpus.schema import JudgmentChunk, Provision
+from openlaw.graph.extract import citation_key_for
 
 
 def judgment_node(chunk: JudgmentChunk) -> dict[str, Any]:
@@ -20,10 +21,18 @@ def judgment_node(chunk: JudgmentChunk) -> dict[str, Any]:
     Keyed on `case_id` per the `judgment_id` constraint. `join_key` and
     `court_code` back the `judgment_join_key` and `judgment_court` indexes;
     `decision_year` backs `judgment_year`.
+
+    `citation_key` is the judgment's own reporter citation in the normalised
+    form other judgments cite it by, and it is what the CITES merge resolves
+    against (see `openlaw.graph.loader`). It belongs here, not in a caller:
+    the Judgment MERGE SETs `row.citation_key` unconditionally, so a row
+    without it writes a null over the property and silently un-resolves every
+    citation to that judgment.
     """
     return {
         "case_id": chunk.case_id,
         "join_key": chunk.join_key,
+        "citation_key": citation_key_for(chunk.citation),
         "court_code": chunk.court_code,
         "decision_date": (
             chunk.decision_date.isoformat() if chunk.decision_date else None

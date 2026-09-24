@@ -147,3 +147,46 @@ def test_edges_from_sibling_chunks_of_one_case_need_a_further_dedup_pass() -> No
     in_court = [edge for edge in combined if edge.kind is EdgeKind.IN_COURT]
     assert len(in_court) == 2
     assert len(set(in_court)) == 1
+
+
+# --- Task 2 whole-plan review: the act hint must survive into the edge --------
+
+
+def test_interprets_edge_carries_the_act_hint_the_text_gave() -> None:
+    """`extract_section_references` already produces the act hint, and it is
+    the only deterministic signal that says WHICH act's section 302 a
+    judgment means. Discarding it here is what forced every judgment-to-
+    section link onto a bare-number placeholder."""
+    edges = judgment_edges(
+        _chunk("an offence under Section 138 of the Negotiable Instruments Act")
+    )
+    interprets = [edge for edge in edges if edge.kind is EdgeKind.INTERPRETS]
+    assert interprets == [
+        Edge(
+            "2016_INSC_1151",
+            "138",
+            EdgeKind.INTERPRETS,
+            hint="Negotiable Instruments Act",
+        )
+    ]
+
+
+def test_interprets_edge_hint_is_none_when_the_text_names_no_act() -> None:
+    edges = judgment_edges(_chunk("an offence under Section 302"))
+    interprets = [edge for edge in edges if edge.kind is EdgeKind.INTERPRETS]
+    assert interprets == [Edge("2016_INSC_1151", "302", EdgeKind.INTERPRETS)]
+
+
+def test_edges_default_to_no_hint_so_existing_callers_are_unaffected() -> None:
+    assert Edge("a", "b", EdgeKind.CITES).hint is None
+
+
+def test_the_same_section_with_and_without_a_hint_are_distinct_edges() -> None:
+    """One chunk can name 'Section 138' bare and 'Section 138 of the X Act';
+    only the second can resolve, so they must not collapse into one edge."""
+    edges = judgment_edges(
+        _chunk("Section 138 applies. See Section 138 of the Negotiable Instruments Act.")
+    )
+    interprets = [edge for edge in edges if edge.kind is EdgeKind.INTERPRETS]
+    assert len(interprets) == 2
+    assert {edge.hint for edge in interprets} == {None, "Negotiable Instruments Act"}

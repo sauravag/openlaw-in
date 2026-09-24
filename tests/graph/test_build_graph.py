@@ -20,6 +20,9 @@ from types import ModuleType
 import pytest
 
 from openlaw.config import Settings
+from openlaw.graph.edges import EdgeKind
+from openlaw.graph.loader import drop_graph
+from openlaw.graph.resolve import EMPTY_ACT_INDEX
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "build_graph.py"
 _FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "vaquill"
@@ -51,7 +54,7 @@ def _record_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
         calls.append(("node", label, len(rows)))
         return len(rows)
 
-    def fake_load_edges(driver, kind, edges, batch_size=10_000):  # noqa: ANN001
+    def fake_load_edges(driver, kind, edges, batch_size=10_000, act_index=None):  # noqa: ANN001
         calls.append(("edge", kind, len(edges)))
         return len(edges)
 
@@ -70,7 +73,7 @@ def test_read_checkpoint_returns_none_when_missing(tmp_path: Path) -> None:
 def test_write_then_read_checkpoint_round_trips(tmp_path: Path) -> None:
     path = tmp_path / "checkpoint.json"
     state = build_graph.default_state(CORPUS_VERSION)
-    state["provision_files_done"].append("in_central_legislation.parquet")
+    state["provision_node_files_done"].append("in_central_legislation.parquet")
 
     build_graph.write_checkpoint(path, state)
 
@@ -128,9 +131,18 @@ def test_default_state_starts_with_nothing_loaded() -> None:
     state = build_graph.default_state(CORPUS_VERSION)
     assert state == {
         "corpus_version": CORPUS_VERSION,
+        "provision_node_files_done": [],
+        "provision_edge_files_done": [],
         "judgments_loaded": False,
-        "provision_files_done": [],
     }
+
+
+def test_provision_nodes_and_reference_edges_are_checkpointed_separately() -> None:
+    """They are two passes over the same files — the second cannot start until
+    every Act node exists, so a resume must know which pass it is in."""
+    state = build_graph.default_state(CORPUS_VERSION)
+    assert "provision_node_files_done" in state
+    assert "provision_edge_files_done" in state
 
 
 def test_load_state_returns_a_fresh_default_when_no_checkpoint_exists(tmp_path: Path) -> None:
@@ -255,107 +267,153 @@ def test_judgments_phase_respects_the_limit(
     assert judgment_rows <= 1
 
 
-# --- provisions phase state transitions ----------------------------------------
+# --- provisions phases: state transitions -------------------------------------
 
 
-def test_provisions_phase_skips_files_already_recorded_as_done(
+def _run_nodes_phase(state, checkpoint_path, settings, limit=None):  # noqa: ANN001
+    build_graph.run_provision_phase(
+        driver=None, state=state, checkpoint_path=checkpoint_path,
+        settings=settings, limit=limit,
+        done_key="provision_node_files_done",
+        handle=build_graph.load_provision_nodes,
+    )
+
+
+def _run_edges_phase(state, checkpoint_path, settings, limit=None):  # noqa: ANN001
+    build_graph.run_provision_phase(
+        driver=None, state=state, checkpoint_path=checkpoint_path,
+        settings=settings, limit=limit,
+        done_key="provision_edge_files_done",
+        handle=lambda d, p, s, n: build_graph.load_reference_edges(
+            d, p, s, n, EMPTY_ACT_INDEX
+        ),
+    )
+
+
+def test_provision_nodes_phase_skips_files_already_recorded_as_done(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = _record_calls(monkeypatch)
     state = build_graph.default_state(CORPUS_VERSION)
-    state["provision_files_done"] = ["in_central_legislation.parquet"]
+    state["provision_node_files_done"] = ["in_central_legislation.parquet"]
     checkpoint_path = tmp_path / "checkpoint.json"
 
-    build_graph.run_provisions_phase(
-        driver=None,
-        state=state,
-        checkpoint_path=checkpoint_path,
-        settings=_settings(_FIXTURE_DIR),
-        limit=None,
-    )
+    _run_nodes_phase(state, checkpoint_path, _settings(_FIXTURE_DIR))
 
     assert calls == []
-    assert state["provision_files_done"] == ["in_central_legislation.parquet"]
+    assert state["provision_node_files_done"] == ["in_central_legislation.parquet"]
 
 
-def test_provisions_phase_loads_an_unfinished_file_then_records_it_done(
+def test_provision_nodes_phase_loads_a_file_then_records_it_done(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = _record_calls(monkeypatch)
     state = build_graph.default_state(CORPUS_VERSION)
     checkpoint_path = tmp_path / "checkpoint.json"
 
-    build_graph.run_provisions_phase(
-        driver=None,
-        state=state,
-        checkpoint_path=checkpoint_path,
-        settings=_settings(_FIXTURE_DIR),
-        limit=None,
-    )
+    _run_nodes_phase(state, checkpoint_path, _settings(_FIXTURE_DIR))
 
-    assert state["provision_files_done"] == ["in_central_legislation.parquet"]
+    assert state["provision_node_files_done"] == ["in_central_legislation.parquet"]
     assert build_graph.read_checkpoint(checkpoint_path) == state
     node_labels = {label for kind, label, _ in calls if kind == "node"}
     assert node_labels == {"Act", "Section", "DefinedTerm", "LegalSubject"}
 
 
-def test_provisions_phase_stops_once_the_limit_is_exhausted(
+def test_provision_nodes_phase_writes_no_reference_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REFERENCES must wait for the second pass: an act referenced from one
+    file is usually defined in another, so resolving it in the first pass
+    would depend on which file happened to load first."""
+    calls = _record_calls(monkeypatch)
+
+    _run_nodes_phase(
+        build_graph.default_state(CORPUS_VERSION),
+        tmp_path / "checkpoint.json",
+        _settings(_FIXTURE_DIR),
+    )
+
+    edge_kinds = {kind_value for kind, kind_value, _ in calls if kind == "edge"}
+    assert EdgeKind.REFERENCES not in edge_kinds
+    assert EdgeKind.PART_OF in edge_kinds
+
+
+def test_provision_edges_phase_writes_only_reference_edges(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _record_calls(monkeypatch)
+
+    _run_edges_phase(
+        build_graph.default_state(CORPUS_VERSION),
+        tmp_path / "checkpoint.json",
+        _settings(_FIXTURE_DIR),
+    )
+
+    assert {kind_value for kind, kind_value, _ in calls if kind == "edge"} == {
+        EdgeKind.REFERENCES
+    }
+    assert not any(kind == "node" for kind, _, _ in calls)
+
+
+def test_provision_phase_stops_once_the_limit_is_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With two files and a limit smaller than the first file's row count, the
     second file must never be touched — the loop must stop, not just cap rows."""
-    calls = _record_calls(monkeypatch)
-    fixtures = tmp_path / "vaquill"
-    fixtures.mkdir()
-    shutil.copy(
-        _FIXTURE_DIR / "in_central_legislation.parquet",
-        fixtures / "in_aaa_legislation.parquet",
-    )
-    shutil.copy(
-        _FIXTURE_DIR / "in_central_legislation.parquet",
-        fixtures / "in_bbb_legislation.parquet",
-    )
+    _record_calls(monkeypatch)
+    fixtures = _two_fixture_files(tmp_path)
     state = build_graph.default_state(CORPUS_VERSION)
 
-    build_graph.run_provisions_phase(
-        driver=None,
-        state=state,
-        checkpoint_path=tmp_path / "checkpoint.json",
-        settings=_settings(fixtures),
-        limit=100,
-    )
+    _run_nodes_phase(state, tmp_path / "checkpoint.json", _settings(fixtures), limit=100)
 
-    assert state["provision_files_done"] == ["in_aaa_legislation.parquet"]
-    assert all(name != "in_bbb_legislation.parquet" for name in state["provision_files_done"])
+    assert state["provision_node_files_done"] == ["in_aaa_legislation.parquet"]
 
 
-def test_provisions_phase_resumes_at_the_next_unfinished_file(
+def test_provision_phase_resumes_at_the_next_unfinished_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = _record_calls(monkeypatch)
-    fixtures = tmp_path / "vaquill"
-    fixtures.mkdir()
-    shutil.copy(
-        _FIXTURE_DIR / "in_central_legislation.parquet",
-        fixtures / "in_aaa_legislation.parquet",
-    )
-    shutil.copy(
-        _FIXTURE_DIR / "in_central_legislation.parquet",
-        fixtures / "in_bbb_legislation.parquet",
-    )
+    fixtures = _two_fixture_files(tmp_path)
     state = build_graph.default_state(CORPUS_VERSION)
-    state["provision_files_done"] = ["in_aaa_legislation.parquet"]
+    state["provision_node_files_done"] = ["in_aaa_legislation.parquet"]
 
-    build_graph.run_provisions_phase(
-        driver=None,
-        state=state,
-        checkpoint_path=tmp_path / "checkpoint.json",
-        settings=_settings(fixtures),
-        limit=None,
-    )
+    _run_nodes_phase(state, tmp_path / "checkpoint.json", _settings(fixtures))
 
-    assert state["provision_files_done"] == [
+    assert state["provision_node_files_done"] == [
         "in_aaa_legislation.parquet",
         "in_bbb_legislation.parquet",
     ]
     assert len(calls) > 0
+
+
+def _two_fixture_files(tmp_path: Path) -> Path:
+    fixtures = tmp_path / "vaquill"
+    fixtures.mkdir()
+    for name in ("in_aaa_legislation.parquet", "in_bbb_legislation.parquet"):
+        shutil.copy(_FIXTURE_DIR / "in_central_legislation.parquet", fixtures / name)
+    return fixtures
+
+
+# --- the drop that makes "rebuilt from scratch per release" true ---------------
+
+
+def test_a_fresh_run_has_no_checkpoint_to_resume_from(tmp_path: Path) -> None:
+    """`main` drops the graph exactly when `read_checkpoint` returns None, so
+    that predicate is the contract the drop hangs on."""
+    assert build_graph.read_checkpoint(tmp_path / "checkpoint.json") is None
+
+
+def test_restart_makes_the_next_run_a_fresh_one(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.json"
+    build_graph.write_checkpoint(path, build_graph.default_state(CORPUS_VERSION))
+    assert build_graph.read_checkpoint(path) is not None
+
+    build_graph.clear_checkpoint(path)
+
+    assert build_graph.read_checkpoint(path) is None
+
+
+def test_the_docstring_promise_of_a_drop_is_backed_by_an_import() -> None:
+    """The module docstring claims the graph is dropped and rebuilt per corpus
+    release. Nothing in src/ or scripts/ deleted anything before this fix."""
+    assert build_graph.drop_graph is drop_graph

@@ -4,24 +4,29 @@ Edges come from two sources: columns that already exist (`acts_referenced`,
 `defined_terms`, `judges`, `legal_subject`) and regexes over judgment text
 (`extract_case_citations`, `extract_section_references`). No LLM extraction.
 
-Two edge kinds intentionally target a value that is not itself a node's key
-property in `openlaw.graph.nodes`:
+Three edge kinds name a target that is not itself a node key, because the
+source text does not say which node it means:
 
-- `CITES` targets the normalised citation string produced by
-  `extract_case_citations` (e.g. `1979SCR453`), not a `case_id` such as
-  `2016_INSC_1151`. Resolving a citation to the `Judgment` it names requires a
-  citation-to-`case_id` lookup that does not exist in this corpus; until that
-  join is built, Task 5 will `MERGE` a placeholder `Judgment` node keyed on the
-  citation string for any citation that is not itself a `case_id`.
-- `INTERPRETS` targets a bare section number (e.g. `302`), not a `Section`'s
-  `chunk_id` (e.g. `IND_central_45_302`), because judgment text names a
-  section without saying which Act's `chunk_id` it belongs to. Task 5 will
-  `MERGE` a placeholder `Section`-like node keyed on the bare number.
+- `CITES` names a normalised citation string (e.g. `1979SCR453`), not a
+  `case_id` such as `2016_INSC_1151`.
+- `INTERPRETS` names a bare section number (e.g. `302`) plus, when the text
+  gives one, an act hint (e.g. `"Negotiable Instruments Act"`) carried on
+  `Edge.hint`.
+- `REFERENCES` names an act's free-text title (e.g. `"Companies Act, 1956"`),
+  not an `act_id`.
 
-Both are accepted trade-offs of deterministic, LLM-free extraction: the plan
-counts ~200,000 deduped case citations and ~120,000 judgment-to-section links
-on this basis. A future task may resolve these placeholders against real
-`case_id`/`chunk_id` keys once a citation index exists.
+Resolving those names to real nodes needs the graph, so it happens in
+`openlaw.graph.loader` (with `openlaw.graph.resolve.ActIndex` for act titles),
+not here — these builders stay pure and database-free. What matters here is
+that `Edge.hint` is *carried* rather than discarded: it is the only
+deterministic signal distinguishing "section 302 of the Indian Penal Code"
+from "section 302 of a state municipal act", and dropping it (as this module
+previously did) left every judgment-to-section link pointing at a bare number.
+
+`Edge.hint` participates in equality, so "Section 138" and "Section 138 of the
+Negotiable Instruments Act" in one chunk stay two distinct edges: only the
+second can resolve to a real Section, and collapsing them would silently throw
+the resolvable one away.
 """
 
 from collections import defaultdict
@@ -49,11 +54,21 @@ class EdgeKind(Enum):
 
 @dataclass(frozen=True)
 class Edge:
-    """A directed relationship between two node keys."""
+    """A directed relationship from a source node key to a named target.
+
+    `target` is a node key for edge kinds whose endpoints are both known
+    (`PART_OF`, `IN_COURT`, ...), and a free-text name the loader must resolve
+    for `CITES`, `INTERPRETS` and `REFERENCES` — see the module docstring.
+
+    `hint` is the optional disambiguating context the source text supplied
+    alongside `target`: for `INTERPRETS`, the act a section reference named.
+    It defaults to None so every existing two-endpoint call site is unchanged.
+    """
 
     source: str
     target: str
     kind: EdgeKind
+    hint: str | None = None
 
 
 def _deduplicate(edges: list[Edge]) -> tuple[Edge, ...]:
@@ -90,7 +105,12 @@ def judgment_edges(chunk: JudgmentChunk) -> tuple[Edge, ...]:
         if normalise_identifier(citation) != own_key
     )
     edges.extend(
-        Edge(chunk.case_id, reference.number, EdgeKind.INTERPRETS)
+        Edge(
+            chunk.case_id,
+            reference.number,
+            EdgeKind.INTERPRETS,
+            hint=reference.act_hint,
+        )
         for reference in extract_section_references(chunk.text)
     )
 

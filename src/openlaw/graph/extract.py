@@ -13,6 +13,12 @@ sentence-ending period followed by an unrelated number — see the regression
 tests in `tests/graph/test_extract.py`. These two regexes therefore supply the
 citation network and the judgment-to-statute links at no LLM cost.
 
+Two further printed forms were verified unmatched during the whole-plan review
+and are now covered: the period-less "u/s 302" shorthand for "under section
+302", and the year-first parenthesised-volume citation "1979 (2) SCC 82". Both
+are common, and SCC alone was 166 of 629 citations in the sample above, so
+each missed form cost real citation-network signal.
+
 Citations are normalised to `<year><reporter><number>` so the several printed
 forms of one reference collapse to a single node key. Extraction is pure regex
 over the given text — no I/O, no network calls, no model calls — so results are
@@ -26,8 +32,14 @@ from dataclasses import dataclass
 _SCR = re.compile(r"\[?(\d{4})\]?\s*\d*\s*S\.?\s?C\.?\s?R\.?\s*(\d+)", re.IGNORECASE)
 # 2019 INSC 398  ->  2019INSC398
 _INSC = re.compile(r"(\d{4})\s*_?\s*INSC\s*_?\s*(\d+)", re.IGNORECASE)
-# (2016) 8 SCC 984  ->  2016SCC984
-_SCC = re.compile(r"\(?(\d{4})\)?\s*\d*\s*SCC\s*(\d+)", re.IGNORECASE)
+# (2016) 8 SCC 984 / 1979 (2) SCC 82 / 2016 SCC 984  ->  2016SCC984, 1979SCC82
+# The volume may precede the reporter either bare ("8 SCC") or parenthesised
+# after the year ("1979 (2) SCC") — the second form was verified unmatched
+# before this group was made optional-and-bracket-tolerant, and it is common:
+# SCC was 166 of 629 citations in a random 400-chunk sample.
+_SCC = re.compile(
+    r"\(?(\d{4})\)?\s*(?:\(?\s*\d+\s*\)?\s*)?SCC\s*(\d+)", re.IGNORECASE
+)
 # AIR 1979 SC 123  ->  1979AIR123
 _AIR = re.compile(r"AIR\s*(\d{4})\s*[A-Z]{2,4}\s*(\d+)", re.IGNORECASE)
 
@@ -41,13 +53,19 @@ _CITATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 
 # Section 302 / Sections 138 and 141 / Section 304B / s. 138 / ss. 34 and 149
-# / Secs. 34. The `\b` before each abbreviation requires a non-word character
-# (or string start) immediately before it, which is what keeps this from
-# matching the trailing "s."/"ss." inside "Rs.", "Exs.", or "Messrs." — in all
-# three, the letter before the final s/ss is itself a word character, so no
-# boundary exists there.
+# / Secs. 34 / u/s 302 / u/ss 302 and 34. The `\b` before each abbreviation
+# requires a non-word character (or string start) immediately before it, which
+# is what keeps this from matching the trailing "s."/"ss." inside "Rs.",
+# "Exs.", or "Messrs." — in all three, the letter before the final s/ss is
+# itself a word character, so no boundary exists there.
+#
+# `u/ss?\.?` covers the "under section" shorthand. The period is optional
+# there because the overwhelmingly common printed form is "u/s 302" with no
+# period, which the `[Ss]\.` alternative could never match — verified
+# unmatched against real judgment text. Requiring the literal "u/" is what
+# keeps it from swallowing "M/s 302" (messieurs, a company name).
 _SECTION = re.compile(
-    r"\b(?:Sections?|[Ss]\.|[Ss]s\.|Secs\.)\s+"
+    r"\b(?:Sections?|u/ss?\.?|[Ss]\.|[Ss]s\.|Secs\.)\s+"
     r"(\d+[A-Z]{0,2}(?:\s*(?:,|and)\s*\d+[A-Z]{0,2})*)"
     r"(?:\s+of\s+the\s+([A-Z][A-Za-z\s]{3,60}?Act))?",
     re.IGNORECASE,
@@ -112,3 +130,17 @@ def extract_section_references(text: str) -> tuple[SectionReference, ...]:
             ordered.append(SectionReference(number=number.upper(), act_hint=act_hint))
 
     return tuple(ordered)
+
+
+def citation_key_for(citation: str | None) -> str | None:
+    """Return the normalised `citation_key` for a judgment's own citation.
+
+    Uses the same normalisation as CITES edge targets (`extract_case_citations`)
+    so a judgment's own reporter citation lines up with how other judgments
+    cite it. Returns None when `citation` is absent or matches no known
+    reporter pattern — such judgments are only reachable via a stub.
+    """
+    if not citation:
+        return None
+    keys = extract_case_citations(citation)
+    return keys[0] if keys else None

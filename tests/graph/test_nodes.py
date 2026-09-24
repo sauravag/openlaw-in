@@ -117,3 +117,51 @@ def test_builders_do_not_mutate_their_input() -> None:
     section_node(provision)
     term_nodes(provision)
     assert provision.defined_terms == ("Executor", "administrator")
+
+
+# --- Task 2 whole-plan review: citation_key must not depend on the caller -----
+
+
+def test_judgment_node_carries_the_citation_key_the_cites_merge_needs() -> None:
+    """The Judgment MERGE SETs `citation_key`, so a builder that omits it
+    silently nulls the property for every caller that is not the one script
+    that happened to add it back."""
+    chunk = JudgmentChunk.from_row(
+        {
+            "chunk_id": "1979_INSC_59_001", "case_id": "1979_INSC_59", "chunk_index": 0,
+            "text": "t", "text_original": "t", "court_code": "SCI", "judges": [],
+            "decision_date": "1979-02-27", "language_code": "en",
+            "citation": "[1979] 3 S.C.R. 453",
+        },
+        corpus_version="v2026.08",
+    )
+    assert judgment_node(chunk)["citation_key"] == "1979SCR453"
+
+
+def test_judgment_node_citation_key_is_none_when_the_corpus_has_no_citation() -> None:
+    assert judgment_node(_chunk())["citation_key"] is None
+
+
+def test_judgment_node_citation_key_is_none_for_an_unparseable_citation() -> None:
+    chunk = JudgmentChunk.from_row(
+        {
+            "chunk_id": "c", "case_id": "2016_INSC_2", "chunk_index": 0,
+            "text": "t", "text_original": "t", "court_code": "SCI", "judges": [],
+            "decision_date": "", "language_code": "en",
+            "citation": "an unparseable citation string",
+        },
+        corpus_version="v2026.08",
+    )
+    assert judgment_node(chunk)["citation_key"] is None
+
+
+def test_judgment_node_row_matches_the_judgment_merge_properties() -> None:
+    """Every property the MERGE SETs must be present on the row, or Neo4j
+    writes a null over it."""
+    from openlaw.graph.loader import NODE_MERGE_CYPHER
+
+    row = judgment_node(_chunk())
+    for field in ("join_key", "citation_key", "court_code", "decision_date",
+                  "decision_year", "corpus_version"):
+        assert f"row.{field}" in NODE_MERGE_CYPHER["Judgment"]
+        assert field in row

@@ -5,9 +5,11 @@ from openlaw.graph.algorithms import (
     CITATION_PROJECTION,
     LOUVAIN_PROPERTY,
     PAGERANK_PROPERTY,
+    authority_label,
     drop_projection,
     louvain_cypher,
     most_authoritative,
+    most_authoritative_cypher,
     pagerank_cypher,
     project_citation_graph,
     projection_cypher,
@@ -109,11 +111,14 @@ def test_gds_pipeline_ranks_the_most_cited_judgment_highest(
         score_d = properties["TASK6_TEST_D"]["pagerank"]
         assert score_a > score_d
 
-        # most_authoritative itself still needs a smoke test: non-empty and
-        # sorted by descending pagerank.
+        # most_authoritative itself still needs a smoke test: non-empty, capped
+        # at the limit, and sorted by descending pagerank. It must not assert
+        # exactly `limit` rows — that depends on how much unrelated data
+        # happens to be loaded, which is ambient state, not behaviour.
         ranked = most_authoritative(live_driver, limit=10)
-        assert len(ranked) == 10
+        assert 0 < len(ranked) <= 10
         assert ranked == sorted(ranked, key=lambda row: row["pagerank"], reverse=True)
+        assert all(authority_label(row) for row in ranked)
     finally:
         drop_projection(live_driver, CITATION_PROJECTION)
         _cleanup(live_driver, case_ids)
@@ -166,3 +171,40 @@ def test_full_cycle_is_safe_to_run_twice_back_to_back(
     finally:
         drop_projection(live_driver, CITATION_PROJECTION)
         _cleanup(live_driver, case_ids)
+
+
+# --- Task 2 whole-plan review: stub rows must be legible, not a crash ---------
+
+
+def test_most_authoritative_cypher_reports_whether_a_row_is_a_stub() -> None:
+    """`most_authoritative` deliberately returns stubs — they are the most
+    cited nodes — and the release-verification script formatted `case_id` with
+    `:<24`, which raises TypeError on the None every stub carries. The rows
+    must say what they are so a caller can render them."""
+    statement = most_authoritative_cypher()
+    assert "AS is_stub" in statement
+    assert "join_key" in statement
+
+
+def test_most_authoritative_cypher_orders_by_authority_and_is_bounded() -> None:
+    statement = most_authoritative_cypher()
+    assert "ORDER BY j.pagerank DESC" in statement
+    assert "LIMIT $limit" in statement
+
+
+def test_authority_label_names_a_real_judgment_by_its_case_id() -> None:
+    assert authority_label({"case_id": "2016_INSC_1151", "join_key": "X",
+                            "is_stub": False}) == "2016_INSC_1151"
+
+
+def test_authority_label_marks_a_stub_row_as_a_stub() -> None:
+    """The formatting crash, fixed at the source: a stub has no case_id."""
+    assert authority_label(
+        {"case_id": None, "join_key": "1979SCR453", "is_stub": True}
+    ) == "1979SCR453 (stub)"
+
+
+def test_authority_label_survives_a_stub_with_no_join_key_either() -> None:
+    assert authority_label({"case_id": None, "join_key": None, "is_stub": True}) == (
+        "unidentified (stub)"
+    )

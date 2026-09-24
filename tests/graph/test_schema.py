@@ -56,3 +56,22 @@ def test_apply_schema_is_safe_to_rerun_against_live_neo4j(
 
     assert first_run == len(CONSTRAINTS) + len(INDEXES)
     assert second_run == first_run
+
+
+# --- Task 2 whole-plan review: the stub namespace needs its own constraint ----
+
+
+def test_stub_nodes_have_a_uniqueness_constraint_on_their_namespaced_key() -> None:
+    """Fan-out must be structurally impossible, not merely unlikely: the
+    constraint is what guarantees one stub node per namespaced key."""
+    joined = " ".join(CONSTRAINTS)
+    assert ":Stub" in joined
+    assert "stub_key IS UNIQUE" in joined
+
+
+def test_sections_are_indexed_on_act_and_number_together() -> None:
+    """INTERPRETS resolves a section by (act_id, section_number) as a pair —
+    one composite index seek per edge row, at ~120,000 rows."""
+    assert any(
+        "s.act_id, s.section_number" in statement for statement in INDEXES
+    )
