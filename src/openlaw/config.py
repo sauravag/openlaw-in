@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     voyage_api_key: str | None = None
     corpus_version: str = "v2026.08"
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "openlawdev"
 
 
 @lru_cache
