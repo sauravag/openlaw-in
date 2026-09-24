@@ -5,29 +5,35 @@ Order is load-bearing::
     detect language
     -> crisis-check the ORIGINAL text (regex, then classifier)
     -> translate the query to English
-    -> crisis-check the TRANSLATED text (regex, then classifier, again)
+    -> crisis-check the TRANSLATED text (regex ONLY -- no second classifier call)
     -> retrieve
     -> generate
     -> VALIDATE
     -> translate the answer
 
-**Crisis routing runs twice, and both times before `retriever.retrieve` is
+**Crisis routing runs first, and both times before `retriever.retrieve` is
 ever called.** `openlaw.answers.generate`'s module docstring establishes why
 crisis routing must run before retrieval and generation at all: a citizen in
 danger should never wait on a round trip whose output would be discarded
 anyway. Checking the original text once is not enough here, though. The
 regex layer in `openlaw.answers.escalation` matches English and
 transliterated Hinglish, but misses Devanagari and every other Indic script
-entirely (see that module's docstring) -- so a Hindi message typed in
-Devanagari reaches only the CLASSIFIER-role model on its first pass, never
-the free regex. Translating the query to English and re-running the exact
-same two-layer check (`detect_crisis_with_classifier`) on the result gives
-the regex layer a second, free chance on every language -- and gives the
-classifier a second, independent read too. Running that second check BEFORE
-`retriever.retrieve` (rather than relying on `generate_answer`'s own
-built-in check, which would only run after this module had already called
-the retriever) is what keeps "before retrieval" true for both languages a
-question might end up expressed in, original and translated. A failed
+entirely (see that module's docstring). The CLASSIFIER-role model, asked on
+the original text as the first check's second layer, already covers
+non-Latin scripts and other languages -- its own docstring in
+`openlaw.answers.crisis_classifier` says so explicitly. So the second check,
+after translation, deliberately calls only the bare, free
+`openlaw.answers.escalation.detect_crisis` -- NOT
+`detect_crisis_with_classifier` again. Re-running the classifier on the
+translated text would buy no new coverage (it already read the original
+text in whatever script or language it was written in) while doubling
+classifier cost on every ordinary turn. What the second pass DOES add is a
+second, free chance for the regex layer, now reading English -- a language
+it can actually match -- which is the entire, narrow point of checking
+twice. Running it BEFORE `retriever.retrieve` (rather than relying on
+`generate_answer`'s own built-in check, which would only run after this
+module had already called the retriever) is what keeps "before retrieval"
+true even for a crisis the regex only catches after translation. A failed
 translation can never suppress a helpline either way: `translate_query`
 degrades to the original text on any failure, which the first check has
 already cleared.
@@ -35,12 +41,32 @@ already cleared.
 Once both checks pass, generation is handed to
 `openlaw.answers.generate._generate_from_context` rather than the public
 `generate_answer` -- the same trick `answer_question` uses in that module,
-and for the same reason (see its own docstring): the text about to be
-generated from (`english_query`) has already been run through
-`detect_crisis_with_classifier` twice above, so calling the public entry
-point a third time would ask the CLASSIFIER-role model again on text that
-cannot have changed, for no benefit -- exactly the double-cost pattern that
-module's own docstring warns against.
+and for the same reason (see its own docstring): `english_query` has
+already been cleared by the classifier once (on the original text) and by
+the regex once more (on the translation), so calling the public entry point
+would ask the CLASSIFIER-role model a second time on text that cannot have
+changed, for no benefit -- exactly the double-cost pattern that module's own
+docstring warns against. Consequently an ordinary, non-crisis question costs
+at most one classifier call per turn, not two.
+
+**A classifier failure on the original-text check must still reach the
+caller.** `detect_crisis_with_classifier` never raises; on a failed or
+unparseable classifier call it proceeds on the regex verdict (already "no
+crisis") and returns the failure as `CrisisDetection.failure` instead (see
+that module's docstring). Dropping that failure here -- as an earlier
+version of this module did, having nowhere to put it once
+`_generate_from_context`'s `AnswerResult.classifier_failures` was discarded
+at the final `LocalisedAnswer` construction -- would silently defeat the
+Plan 3 ruling that a classifier outage must be discoverable and countable
+after the fact (see `openlaw.answers.generate.persist_answer_events`, which
+exists for exactly that). `LocalisedAnswer.classifier_failures` carries it
+through instead: built here, on every returned object (crisis or not), and
+left for the caller to persist -- this function takes no `Settings` and
+writes nothing itself, the same "build now, persist later" split
+`generate_answer` uses for `HallucinationEvent`/`ClassifierFailureEvent`.
+The second, regex-only check can never itself produce a classifier failure
+(it never calls a model), so the only source is the one classifier call on
+the original text.
 
 **Translation of the ANSWER happens strictly after generation returns**,
 which is strictly after `openlaw.answers.validate.validate_answer` has run
@@ -76,6 +102,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from openlaw.answers.crisis_classifier import (
+    ClassifierFailureEvent,
     CrisisDetection,
     detect_crisis_with_classifier,
 )
@@ -83,6 +110,7 @@ from openlaw.answers.escalation import (
     CrisisKind,
     HallucinationEvent,
     crisis_response,
+    detect_crisis,
     escalation_footer,
 )
 from openlaw.answers.generate import _failures_of, _generate_from_context
@@ -115,6 +143,14 @@ class LocalisedAnswer(BaseModel):
     `translate_answer` produced: `unverified_summary` is `None` whenever
     `is_answerable` is False, and the only content ever safe to render is
     `claims` and `sources` -- see the module docstring.
+
+    `classifier_failures` carries any `ClassifierFailureEvent` recorded by
+    the original-text crisis check (see the module docstring for why the
+    second, translated-text check can never itself produce one). It is
+    build-only, same as `openlaw.answers.generate.AnswerResult
+    .classifier_failures` -- this model carries no `Settings` and this
+    module writes nothing; a caller holding a `Settings` persists it via
+    `openlaw.answers.crisis_classifier.append_classifier_failure_events`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -125,6 +161,7 @@ class LocalisedAnswer(BaseModel):
     crisis: CrisisKind | None = None
     footer: str = ""
     events: tuple[HallucinationEvent, ...] = ()
+    classifier_failures: tuple[ClassifierFailureEvent, ...] = ()
 
 
 #: The fixed, generation-free answer returned on a crisis short-circuit --
@@ -136,7 +173,11 @@ _UNANSWERABLE = ValidatedAnswer(unverified_summary=None, is_answerable=False)
 
 
 def _crisis_answer(
-    crisis: CrisisKind, language: str, english_query: str, state: str | None
+    crisis: CrisisKind,
+    language: str,
+    english_query: str,
+    state: str | None,
+    classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
 ) -> LocalisedAnswer:
     """Return the immediate, generation-free result for a crisis question.
 
@@ -145,7 +186,9 @@ def _crisis_answer(
     standard `escalation_footer`, never the standard footer alone. Left in
     English regardless of `language` -- these are phone numbers and a short,
     fixed set of instructions, not content a translation failure should ever
-    be allowed to hold hostage.
+    be allowed to hold hostage. `classifier_failures` is forwarded
+    unconditionally -- a crisis found by the translated-text regex does not
+    erase a classifier failure the original-text check already recorded.
     """
     footer = f"{crisis_response(crisis)}\n\n{escalation_footer(state)}"
     return LocalisedAnswer(
@@ -154,6 +197,7 @@ def _crisis_answer(
         english_query=english_query,
         crisis=crisis,
         footer=footer,
+        classifier_failures=classifier_failures,
     )
 
 
@@ -163,35 +207,38 @@ def _clear_crisis_and_translate(
     adapter: LLMAdapter,
     registry: ModelRegistry,
     state: str | None,
-) -> LocalisedAnswer | tuple[str, CrisisDetection]:
+) -> LocalisedAnswer | tuple[str, tuple[ClassifierFailureEvent, ...]]:
     """Run both crisis checks and, if neither fires, translate the query.
 
+    The first check is the full two-layer `detect_crisis_with_classifier` on
+    `question` itself. The second, on the translated `english_query`, is the
+    bare regex `detect_crisis` -- see the module docstring for why the
+    classifier is not asked a second time.
+
     Returns a crisis `LocalisedAnswer` the moment either check fires --
-    before `translate_query` is even called for the first check, and before
-    the caller may touch `retriever.retrieve` for either. Otherwise returns
-    `(english_query, translated_detection)`, the second detection kept so
-    the caller can forward any classifier failure it recorded onto
-    generation without asking the classifier a third time. See the module
-    docstring for why the check runs on both the original and translated
-    text.
+    before `translate_query` is even called for the first, and before the
+    caller may touch `retriever.retrieve` for either. Otherwise returns
+    `(english_query, classifier_failures)`, where `classifier_failures` is
+    whatever the (only possible) classifier call above recorded, so the
+    caller can forward it onto generation and, eventually, the returned
+    `LocalisedAnswer` without asking the classifier again.
     """
     original_detection: CrisisDetection = detect_crisis_with_classifier(
         question, adapter, registry
     )
+    failures = _failures_of(original_detection)
     if original_detection.crisis is not None:
-        return _crisis_answer(original_detection.crisis, language, "", state)
+        return _crisis_answer(original_detection.crisis, language, "", state, failures)
 
     english_query = translate_query(question, language, adapter, registry)
 
-    translated_detection: CrisisDetection = detect_crisis_with_classifier(
-        english_query, adapter, registry
-    )
-    if translated_detection.crisis is not None:
+    translated_crisis = detect_crisis(english_query)
+    if translated_crisis is not None:
         return _crisis_answer(
-            translated_detection.crisis, language, english_query, state
+            translated_crisis, language, english_query, state, failures
         )
 
-    return english_query, translated_detection
+    return english_query, failures
 
 
 def answer_in_language(
@@ -204,26 +251,22 @@ def answer_in_language(
 ) -> LocalisedAnswer:
     """Answer `question` in the language it was asked in.
 
-    See the module docstring for why crisis routing runs twice -- once on
-    `question` itself, once on its English translation -- and both times
-    before `retriever.retrieve` is ever called.
+    See the module docstring for why crisis routing runs twice -- the full
+    classifier check on `question` itself, then a regex-only check on its
+    English translation -- and both times before `retriever.retrieve` is
+    ever called.
     """
     language = detect_language(question)
 
     cleared = _clear_crisis_and_translate(question, language, adapter, registry, state)
     if isinstance(cleared, LocalisedAnswer):
         return cleared
-    english_query, translated_detection = cleared
+    english_query, classifier_failures = cleared
 
     context = retriever.retrieve(english_query)
     footer = escalation_footer(state)
     result = _generate_from_context(
-        english_query,
-        context,
-        adapter,
-        registry,
-        footer,
-        _failures_of(translated_detection),
+        english_query, context, adapter, registry, footer, classifier_failures
     )
     localised = translate_answer(result.answer, language, adapter, registry, glossary)
 
@@ -234,4 +277,5 @@ def answer_in_language(
         crisis=result.crisis,
         footer=result.footer,
         events=result.events,
+        classifier_failures=result.classifier_failures,
     )

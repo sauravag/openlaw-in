@@ -8,12 +8,16 @@ the full accounting):
     question, and only after `retriever.retrieve` had already run. That
     means crisis routing there would have happened AFTER retrieval, not
     before it -- exactly backwards from what
-    `openlaw.answers.generate`'s module docstring requires. This module
-    instead runs `detect_crisis_with_classifier` itself, twice (original
-    text, then the English translation), both times before the retriever is
-    ever touched, and only then calls `generate._generate_from_context`
-    directly (mirroring `generate.answer_question`'s own trick) so the
-    already-cleared `english_query` is not classified a third time.
+    `openlaw.answers.generate`'s module docstring requires.
+  * Crisis routing runs twice, but only the FIRST check (on the original
+    text) uses the full `detect_crisis_with_classifier`. The second check
+    (on the English translation) is the bare, free `detect_crisis` regex --
+    the CLASSIFIER-role model already covers non-Latin scripts on the first
+    pass (see its own module docstring), so asking it again on a
+    translation of text it already read buys no new coverage and doubles
+    cost. An ordinary, non-crisis question therefore costs at most one
+    classifier call per turn (plus one translator call for the query, and
+    one generator call).
   * `translate_query` no longer skips its model call when the detected
     language is `"en"` (see `openlaw.language.translate`'s module
     docstring) -- so every non-crisis turn queues one translator call even
@@ -24,12 +28,17 @@ the full accounting):
     `openlaw.answers.validate`'s module docstring). Tests here assert on
     `.claims[].text`, never on summary text, matching the "compose the
     displayed answer from claims and sources only" binding requirement.
+  * `LocalisedAnswer.classifier_failures` carries any failure the
+    original-text classifier call recorded through to the caller, matching
+    the "build now, persist later" split `generate_answer` uses for the
+    same event type.
 """
 
 import json
+from typing import Any
 
 from openlaw.answers.escalation import CrisisKind
-from openlaw.answers.models import ModelRegistry, StubAdapter
+from openlaw.answers.models import Completion, ModelRegistry, StubAdapter
 from openlaw.language.glossary import Glossary, GlossaryTerm
 from openlaw.language.pipeline import answer_in_language
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
@@ -100,6 +109,30 @@ class _RaisingRetriever:
         )
 
 
+class _ClassifierFailsAdapter:
+    """Simulates a classifier outage: any crisis-classifier call raises;
+    every other call pops the next response off a queue, in order. Mirrors
+    `tests/answers/test_generate.py`'s
+    `_ClassifierFailsThenGeneratorSucceedsAdapter`.
+
+    Distinguished by the system prompt, not the model name: the
+    TRANSLATOR and CLASSIFIER roles share the same default model
+    (`claude-haiku-4-5`), so `kwargs["model"]` alone cannot tell them apart.
+    `CLASSIFIER_SYSTEM_PROMPT` is the only system prompt containing "safety
+    classifier".
+    """
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, **kwargs: Any) -> Completion:
+        self.calls.append(kwargs)
+        if "safety classifier" in kwargs["system"]:
+            raise RuntimeError("simulated classifier outage")
+        return Completion(text=self._responses.pop(0))
+
+
 def _generation() -> str:
     return json.dumps(
         {
@@ -122,7 +155,6 @@ def test_english_question_answer_is_not_translated() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,  # crisis check on the original text
             "my landlord kept my deposit",  # translate_query (no-op echo)
-            _SAFE_CLASSIFIER_RESPONSE,  # crisis check on the translated text
             _generation(),
         ]
     )
@@ -139,12 +171,32 @@ def test_english_question_answer_is_not_translated() -> None:
     assert result.answer.claims[0].text == "A refund is required."
 
 
+def test_an_ordinary_question_costs_at_most_one_classifier_call() -> None:
+    """The second, translated-text crisis check is regex-only (free) -- it
+    must not consume an adapter call, so an ordinary turn needs exactly 3
+    calls: classifier, translator (query), generator."""
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            "my landlord kept my deposit",
+            _generation(),
+        ]
+    )
+    answer_in_language(
+        "my landlord kept my deposit",
+        _Retriever(),
+        adapter,
+        ModelRegistry(),
+        _glossary(),
+    )
+    assert len(adapter.calls) == 3
+
+
 def test_footer_is_present_in_every_localised_answer() -> None:
     adapter = StubAdapter(
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "my landlord kept my deposit",
-            _SAFE_CLASSIFIER_RESPONSE,
             _generation(),
         ]
     )
@@ -166,7 +218,6 @@ def test_unanswerable_result_never_carries_unverified_summary_prose() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "my landlord kept my deposit",
-            _SAFE_CLASSIFIER_RESPONSE,
             _insufficient_generation(),
         ]
     )
@@ -183,6 +234,25 @@ def test_unanswerable_result_never_carries_unverified_summary_prose() -> None:
     assert result.answer.claims == ()
 
 
+def test_classifier_failure_on_original_text_survives_into_the_result() -> None:
+    """Binding requirement: a classifier outage must be discoverable and
+    countable after the fact -- dropping the failure here would silently
+    defeat `openlaw.answers.generate.persist_answer_events`'s whole purpose."""
+    adapter = _ClassifierFailsAdapter(["my landlord kept my deposit", _generation()])
+    result = answer_in_language(
+        "my landlord kept my deposit",
+        _Retriever(),
+        adapter,
+        ModelRegistry(),
+        _glossary(),
+    )
+
+    assert result.crisis is None
+    assert result.answer.is_answerable is True
+    assert len(result.classifier_failures) == 1
+    assert result.classifier_failures[0].question == "my landlord kept my deposit"
+
+
 # --- Hindi: translated before retrieval, validated before translation --
 
 
@@ -192,7 +262,6 @@ def test_hindi_question_is_translated_before_retrieval() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "my landlord is not returning my deposit",
-            _SAFE_CLASSIFIER_RESPONSE,
             _generation(),
             TRANSLATED,
         ]
@@ -215,7 +284,6 @@ def test_retrieval_always_receives_english() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "english query",
-            _SAFE_CLASSIFIER_RESPONSE,
             _generation(),
             TRANSLATED,
         ]
@@ -231,7 +299,6 @@ def test_answer_is_returned_in_the_users_language() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "english query",
-            _SAFE_CLASSIFIER_RESPONSE,
             _generation(),
             TRANSLATED,
         ]
@@ -248,7 +315,6 @@ def test_citations_survive_the_round_trip() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "english query",
-            _SAFE_CLASSIFIER_RESPONSE,
             _generation(),
             TRANSLATED,
         ]
@@ -266,7 +332,6 @@ def test_the_english_query_is_reported_for_debugging() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "english query",
-            _SAFE_CLASSIFIER_RESPONSE,
             _generation(),
             TRANSLATED,
         ]
@@ -285,7 +350,6 @@ def test_a_broken_translation_falls_back_to_the_english_answer() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "english query",
-            _SAFE_CLASSIFIER_RESPONSE,
             _generation(),
             broken,
         ]
@@ -303,7 +367,6 @@ def test_glossary_is_wired_into_the_answer_translation_call() -> None:
         [
             _SAFE_CLASSIFIER_RESPONSE,
             "english query",
-            _SAFE_CLASSIFIER_RESPONSE,
             _generation(),
             TRANSLATED,
         ]
@@ -354,7 +417,8 @@ def test_crisis_found_only_after_translation_short_circuits_before_retrieval() -
     None
 ):
     """The cheapest way to cover a script the regex cannot match: translate,
-    then give the regex layer a second, free chance on the English result."""
+    then give the regex layer a second, free chance on the English result.
+    Only 2 adapter calls total -- the second check never touches the model."""
     adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, "he beats me"])
     result = answer_in_language(
         "कुछ और सवाल",
