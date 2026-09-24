@@ -25,6 +25,53 @@ no relationship metadata to distinguish it. That imprecision is accepted
 rather than attempting a general relevance ordering on graph-expanded rows —
 no principled one exists without re-embedding them against the query, which
 is retrieval again at higher cost.
+
+**Graph expansion is OFF the request path by default (fix round 2, Plan 3
+Task 3).** `Settings.graph_expansion_enabled` (env `OPENLAW_GRAPH_EXPANSION_
+ENABLED`) defaults to `False`. This is not "the graph was a mistake" — the
+knowledge graph, `expand_chunks`, and everything in this module are correct
+code serving a data condition that does not hold yet. Two measured facts
+drove the default:
+
+- **The statute-to-case-law bridge is too sparse to add signal.** Only
+  ~4% of `INTERPRETS` edges reach a real `Section` (10,525 of 248,411 on the
+  full corpus). Live-tested on three real citizen questions across two fix
+  rounds, `INTERPRETS` fired zero times. A caller enabling expansion today
+  is, in practice, only ever getting `REFERENCES` hits.
+- **`REFERENCES` has its own supernode failure mode, so it is not the safe
+  fallback it looks like.** Round 1 restricted expansion to
+  `INTERPRETS`/`REFERENCES` (removing `PART_OF`) on the theory that a real
+  cross-document legal link would be high-precision even if rare. Round 2's
+  live measurement falsified that: one marginal primary hit that happened to
+  reference the IT Act 2000 (6,405 other sections reference it) pulled in
+  unrelated SEBI/TRAI regulatory noise two hops away, and a different query
+  fanned out through *unresolved stub Acts* — ambiguous titles like
+  `"establishments act 1953"` shared by 139 unrelated sections — because
+  stub exclusion only guards the final hop, not an intermediate one. This is
+  the same supernode pathology `expand_chunks_cypher` already documents for
+  `LegalSubject`/`DefinedTerm`, just showing up through `REFERENCES` instead.
+
+Under the answer contract every chunk `merge_chunks` adds becomes citable, so
+until the data changes, an uncapped *or* capped-but-noisy addition is a real
+risk (a validly-cited, legally wrong answer), and a missed citation is not.
+The safe default is therefore to call `search()` alone and never call
+`expand_chunks`/`merge_chunks` at all in the ordinary request path.
+
+**When to turn it back on.** Flip `graph_expansion_enabled` only once one of
+these becomes true, and re-verify against real queries before shipping the
+flip, not just on the strength of a corpus-wide count:
+1. `INTERPRETS` density on retrieved sections becomes measurably non-trivial
+   (i.e. a meaningful share of real queries' primary hits have at least one
+   real interpreting judgment) — the corpus needs better section-act
+   resolution for judgment citations, not a code change here; or
+2. `expand_chunks` can be restricted to links that provably do not traverse
+   a supernode (e.g. capping by target-node degree, or dropping the second
+   hop), so a `REFERENCES` hit is reliably precise rather than occasionally
+   catastrophic.
+
+`ScoreReranker` and `AuthorityReranker` are unaffected by this default and
+stay fully in the request path — reranking what the retriever already found
+is independently useful regardless of whether expansion ever runs.
 """
 
 from typing import Protocol

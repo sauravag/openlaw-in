@@ -44,3 +44,22 @@ def test_nano_model_dir_reads_a_configured_local_path(monkeypatch) -> None:
     monkeypatch.setenv("OPENLAW_NANO_MODEL_DIR", "/models/voyage-4-nano")
 
     assert Settings().nano_model_dir == Path("/models/voyage-4-nano")
+
+
+def test_graph_expansion_is_disabled_by_default(monkeypatch) -> None:
+    """Binding decision (Plan 3 T3, fix round 2, measured): the statute-to-
+    case-law bridge is too sparse and REFERENCES fans out through shared-Act
+    supernodes, so every added chunk being citable makes ON the unsafe
+    default -- see openlaw.retrieval.rerank's module docstring."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+
+    assert Settings().graph_expansion_enabled is False
+
+
+def test_graph_expansion_can_be_enabled_via_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+    monkeypatch.setenv("OPENLAW_GRAPH_EXPANSION_ENABLED", "true")
+
+    assert Settings().graph_expansion_enabled is True

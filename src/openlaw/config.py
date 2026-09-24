@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # API stays available as a configurable alternative.
     query_embedder_backend: str = "local_nano"
     nano_model_dir: Path | None = None
+    # Graph expansion (Plan 3 T3, fix round 2): OFF by default. Everything
+    # expansion adds becomes citable, and live measurement showed it is
+    # mostly filler today -- see the full reasoning and the specific
+    # re-enable condition in `openlaw.retrieval.rerank`'s module docstring.
+    graph_expansion_enabled: bool = False
 
 
 @lru_cache
