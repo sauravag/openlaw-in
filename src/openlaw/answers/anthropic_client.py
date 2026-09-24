@@ -64,6 +64,42 @@ def _supports_adaptive_thinking(model: str) -> bool:
     return model.startswith(ADAPTIVE_THINKING_FAMILIES)
 
 
+#: `response.usage` fields worth carrying into `Completion.raw` for
+#: downstream cost metering. `cache_creation_input_tokens` and
+#: `cache_read_input_tokens` are priced far below plain `input_tokens`, so
+#: dropping them would overstate spend on every cache hit.
+_USAGE_FIELDS: tuple[str, ...] = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _usage_raw(response: Any, requested_model: str) -> dict[str, Any]:
+    """Return per-call token usage plus the model that actually served the
+    request, for `Completion.raw` -- the field quota metering reads.
+
+    Reads named attributes with `getattr` rather than requiring a
+    `model_dump()` method, so this works against both the real Anthropic SDK
+    response and a lightweight test double. `response.model` can differ from
+    `requested_model` when a server-side refusal fallback (see
+    `build_request`) re-routes the call to a different model -- cost
+    tracking must key off what actually ran, not what was requested.
+    """
+    raw: dict[str, Any] = {"model": getattr(response, "model", requested_model)}
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        usage_values = {
+            field: value
+            for field in _USAGE_FIELDS
+            if (value := getattr(usage, field, None)) is not None
+        }
+        if usage_values:
+            raw["usage"] = usage_values
+    return raw
+
+
 def build_request(
     model: str,
     system: str,
@@ -118,13 +154,16 @@ class AnthropicAdapter:
         response = self._client.beta.messages.create(
             **build_request(model, system, messages, output_schema, max_tokens)
         )
+        raw = _usage_raw(response, model)
 
         if response.stop_reason == "refusal":
-            return Completion(text="", stop_reason="refusal")
+            return Completion(text="", stop_reason="refusal", raw=raw)
 
         text = "".join(
             block.text
             for block in response.content
             if getattr(block, "type", "") == "text"
         )
-        return Completion(text=text, stop_reason=response.stop_reason or "end_turn")
+        return Completion(
+            text=text, stop_reason=response.stop_reason or "end_turn", raw=raw
+        )

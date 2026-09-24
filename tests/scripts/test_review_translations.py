@@ -15,9 +15,11 @@ import importlib.util
 import json
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
-from openlaw.answers.models import ModelRegistry, StubAdapter
+from openlaw.answers.models import Completion, ModelRegistry, StubAdapter
 from openlaw.answers.validate import Claim, Source, ValidatedAnswer
+from openlaw.config import Settings
 from openlaw.evaluation.dataset import EvalQuestion
 from openlaw.language.glossary import Glossary, GlossaryTerm
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
@@ -96,6 +98,45 @@ def _glossary() -> Glossary:
             ),
         )
     )
+
+
+def _marathi_glossary() -> Glossary:
+    return Glossary(
+        (
+            GlossaryTerm(
+                term="anticipatory bail",
+                preserve_english=True,
+                translations={"hi": "अग्रिम जमानत", "mr": "अटकपूर्व जामीन"},
+            ),
+        )
+    )
+
+
+class _GhostCitationAdapter:
+    """A classifier outage AND a hallucinated citation in one turn -- the two
+    event kinds `persist_answer_events` exists to write. Mirrors
+    `tests/language/test_pipeline.py`'s `_ClassifierFailsAdapter`."""
+
+    def __init__(self) -> None:
+        self._responses = [
+            "my landlord kept my deposit",
+            json.dumps(
+                {
+                    "summary": "The deposit must be refunded.",
+                    "claims": [
+                        {"text": "A refund is required.", "chunk_ids": ["a"]},
+                        {"text": "The landlord goes to prison.", "chunk_ids": ["ghost"]},
+                    ],
+                    "sufficient": True,
+                }
+            ),
+            _translation_response(),
+        ]
+
+    def complete(self, **kwargs: Any) -> Completion:
+        if "safety classifier" in kwargs["system"]:
+            raise RuntimeError("simulated classifier outage")
+        return Completion(text=self._responses.pop(0))
 
 
 # --- _load_verified ---------------------------------------------------------
@@ -183,25 +224,70 @@ def test_glossary_coverage_counts_translations_per_language(tmp_path: Path) -> N
         encoding="utf-8",
     )
     coverage = review_translations._glossary_coverage(path)
-    assert coverage == {"hi": 2, "mr": 1}
+    assert coverage["hi"] == review_translations.LanguageCoverage(
+        translated=1, bracket_glossed=1
+    )
+    assert coverage["mr"] == review_translations.LanguageCoverage(
+        translated=0, bracket_glossed=1
+    )
+
+
+def test_glossary_coverage_does_not_count_a_bracket_gloss_as_a_translation(
+    tmp_path: Path,
+) -> None:
+    """A `preserve_english` term is kept in English with the local rendering
+    beside it in brackets -- counting those as "an accepted rendering" told a
+    reviewer the term was translated when by design it never is."""
+    path = tmp_path / "glossary.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "term": "anticipatory bail",
+                    "preserve_english": True,
+                    "translations": {"mr": "अटकपूर्व जामीन"},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    coverage = review_translations._glossary_coverage(path)
+    assert coverage["mr"].translated == 0
+    assert coverage["mr"].bracket_glossed == 1
 
 
 # --- _coverage_note -----------------------------------------------------------
 
 
+def _coverage(translated: int = 0, bracket_glossed: int = 0):
+    return review_translations.LanguageCoverage(
+        translated=translated, bracket_glossed=bracket_glossed
+    )
+
+
 def test_coverage_note_flags_a_language_with_zero_glossary_terms() -> None:
-    note = review_translations._coverage_note("te", {"hi": 12}, 12)
+    note = review_translations._coverage_note("te", {"hi": _coverage(3, 9)}, 12)
     assert "0 of 12" in note
     assert "No glossary backs this language" in note
 
 
 def test_coverage_note_reports_partial_coverage() -> None:
-    note = review_translations._coverage_note("mr", {"mr": 2, "hi": 12}, 12)
-    assert "2 of 12" in note
+    note = review_translations._coverage_note("hi", {"hi": _coverage(3, 9)}, 12)
+    assert "3 of 12" in note
+
+
+def test_coverage_note_counts_bracket_glosses_separately() -> None:
+    """Marathi pins two terms, both `preserve_english`: neither is ever
+    translated, so a reviewer must be told they stay in English with a
+    Marathi gloss in brackets -- not that Marathi has 2 of 12 renderings."""
+    note = review_translations._coverage_note("mr", {"mr": _coverage(0, 2)}, 12)
+    assert "0 of 12" in note
+    assert "2" in note
+    assert "brackets" in note
 
 
 def test_coverage_note_uses_the_language_display_name() -> None:
-    note = review_translations._coverage_note("hi", {"hi": 12}, 12)
+    note = review_translations._coverage_note("hi", {"hi": _coverage(3, 9)}, 12)
     assert "Hindi" in note
 
 
@@ -231,7 +317,39 @@ def test_render_claims_never_reads_unverified_summary() -> None:
 # --- _question_section --------------------------------------------------------
 
 
-def test_question_section_with_no_adapter_says_not_generated_and_invents_nothing() -> None:
+def _settings(tmp_path: Path) -> Settings:
+    """Settings whose two event logs land in `tmp_path`, never in `data/`."""
+    return Settings(
+        vaquill_root="/tmp/v",
+        kanoongpt_root="/tmp/k",
+        hallucination_log_path=tmp_path / "hallucinations.jsonl",
+        classifier_failure_log_path=tmp_path / "classifier_failures.jsonl",
+    )
+
+
+def _generation(
+    tmp_path: Path, adapter: Any, retriever: Any = None
+):
+    return review_translations.Generation(
+        adapter=adapter,
+        registry=ModelRegistry(),
+        retriever=retriever or _Retriever(),
+        settings=_settings(tmp_path),
+    )
+
+
+def _working_adapter() -> StubAdapter:
+    return StubAdapter(
+        [
+            _safe_classifier_response(),
+            "my landlord kept my deposit",  # translate_query
+            _generation_response(),
+            _translation_response(),  # translate_answer
+        ]
+    )
+
+
+def test_question_section_with_no_generation_says_not_generated_and_invents_nothing() -> None:
     lines = review_translations._question_section(
         question="मेरा मकान मालिक जमा राशि वापस नहीं कर रहा है।",
         language="hi",
@@ -240,9 +358,7 @@ def test_question_section_with_no_adapter_says_not_generated_and_invents_nothing
         coverage={},
         total_terms=12,
         glossary=_glossary(),
-        adapter=None,
-        registry=None,
-        retriever=None,
+        generation=None,
     )
     text = "\n".join(lines)
     assert "NOT GENERATED" in text
@@ -251,26 +367,18 @@ def test_question_section_with_no_adapter_says_not_generated_and_invents_nothing
     assert "वापसी आवश्यक है" not in text
 
 
-def test_question_section_with_a_working_adapter_renders_the_translated_claim() -> None:
-    adapter = StubAdapter(
-        [
-            _safe_classifier_response(),
-            "my landlord kept my deposit",  # translate_query
-            _generation_response(),
-            _translation_response(),  # translate_answer
-        ]
-    )
+def test_question_section_with_a_working_adapter_renders_the_translated_claim(
+    tmp_path: Path,
+) -> None:
     lines = review_translations._question_section(
         question="मेरा मकान मालिक जमा राशि वापस नहीं कर रहा है।",
         language="hi",
         category="tenancy",
         source_label="verified",
-        coverage={"hi": 12},
+        coverage={"hi": review_translations.LanguageCoverage(3, 9)},
         total_terms=12,
         glossary=_glossary(),
-        adapter=adapter,
-        registry=ModelRegistry(),
-        retriever=_Retriever(),
+        generation=_generation(tmp_path, _working_adapter()),
     )
     text = "\n".join(lines)
     assert "वापसी आवश्यक है" in text  # translated answer
@@ -280,7 +388,9 @@ def test_question_section_with_a_working_adapter_renders_the_translated_claim() 
     assert "GENERATION FAILED" not in text
 
 
-def test_question_section_reports_a_per_question_failure_without_crashing() -> None:
+def test_question_section_reports_a_per_question_failure_without_crashing(
+    tmp_path: Path,
+) -> None:
     lines = review_translations._question_section(
         question="मेरा मकान मालिक जमा राशि वापस नहीं कर रहा है।",
         language="hi",
@@ -289,12 +399,78 @@ def test_question_section_reports_a_per_question_failure_without_crashing() -> N
         coverage={},
         total_terms=12,
         glossary=_glossary(),
-        adapter=StubAdapter([_safe_classifier_response()]),
-        registry=ModelRegistry(),
-        retriever=_RaisingRetriever(),
+        generation=_generation(
+            tmp_path,
+            StubAdapter([_safe_classifier_response()]),
+            _RaisingRetriever(),
+        ),
     )
     text = "\n".join(lines)
     assert "GENERATION FAILED" in text
+
+
+def test_question_section_asks_for_the_declared_language_explicitly(
+    tmp_path: Path,
+) -> None:
+    """The sheet labels each row with the language its source file declares.
+    Passing that choice into `answer_in_language` is what makes the label
+    true: detection maps all Devanagari to Hindi, so a Marathi row would
+    otherwise be reviewed as Marathi while holding a Hindi answer."""
+    adapter = StubAdapter(
+        [
+            _safe_classifier_response(),
+            "my landlord kept my deposit",
+            _generation_response(),
+            json.dumps(
+                {"summary": "ठेव.", "claims": [{"id": 0, "text": "परतावा आवश्यक आहे."}]},
+                ensure_ascii=False,
+            ),
+        ]
+    )
+    lines = review_translations._question_section(
+        question="माझ्या घरमालकाने ठेव परत केली नाही",
+        language="mr",
+        category="tenancy",
+        source_label="backlog -- no gold citation",
+        coverage={},
+        total_terms=12,
+        glossary=_marathi_glossary(),
+        generation=_generation(tmp_path, adapter),
+    )
+    text = "\n".join(lines)
+
+    assert "Marathi" in adapter.calls[-1]["system"]  # Marathi glossary rules
+    assert "परतावा आवश्यक आहे." in text
+    assert "**Answer language:** Marathi" in text
+
+
+def test_question_section_persists_the_events_the_turn_produced(
+    tmp_path: Path,
+) -> None:
+    """Binding requirement: a run of hallucinations or a classifier outage on
+    the multilingual path must be discoverable after the fact. The events are
+    built inside the pipeline and persisted here, at the boundary that holds
+    the `Settings`."""
+    settings = _settings(tmp_path)
+    generation = review_translations.Generation(
+        adapter=_GhostCitationAdapter(),
+        registry=ModelRegistry(),
+        retriever=_Retriever(),
+        settings=settings,
+    )
+    review_translations._question_section(
+        question="मेरा मकान मालिक जमा राशि वापस नहीं कर रहा है।",
+        language="hi",
+        category="tenancy",
+        source_label="verified",
+        coverage={},
+        total_terms=12,
+        glossary=_glossary(),
+        generation=generation,
+    )
+
+    assert settings.hallucination_log_path.read_text(encoding="utf-8").strip()
+    assert settings.classifier_failure_log_path.read_text(encoding="utf-8").strip()
 
 
 # --- build_sheet ----------------------------------------------------------
@@ -313,9 +489,7 @@ def test_build_sheet_states_the_verified_and_backlog_counts_honestly() -> None:
         coverage={},
         total_terms=12,
         glossary=_glossary(),
-        adapter=None,
-        registry=None,
-        retriever=None,
+        generation=None,
     )
     assert "Verified evaluation questions: 1" in sheet
     assert "0 are in a language other than English" in sheet
@@ -328,9 +502,7 @@ def test_build_sheet_says_so_plainly_when_there_is_nothing_non_english_to_review
         coverage={},
         total_terms=12,
         glossary=_glossary(),
-        adapter=None,
-        registry=None,
-        retriever=None,
+        generation=None,
     )
     assert "No non-English question is available to review" in sheet
 
@@ -347,9 +519,7 @@ def test_build_sheet_includes_a_backlog_row_labelled_as_unverified() -> None:
         coverage={},
         total_terms=12,
         glossary=_glossary(),
-        adapter=None,
-        registry=None,
-        retriever=None,
+        generation=None,
     )
     assert "backlog" in sheet.lower()
     assert "दहेज के लिए मुझे परेशान किया जा रहा है।" in sheet
@@ -365,8 +535,6 @@ def test_build_sheet_notes_when_no_api_key_is_configured() -> None:
         coverage={},
         total_terms=12,
         glossary=_glossary(),
-        adapter=None,
-        registry=None,
-        retriever=None,
+        generation=None,
     )
     assert "OPENLAW_ANTHROPIC_API_KEY" in sheet

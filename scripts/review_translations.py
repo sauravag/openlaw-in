@@ -52,28 +52,52 @@ field is unchecked model prose; `openlaw.answers.validate.ValidatedAnswer`'s
 own docstring says the only content ever safe to show a user is built from
 `claims` and `sources`. `_render_claims` reads only `claims`.
 
-**Glossary coverage per language.** The glossary is deliberately uneven --
-Hindi has all 12 terms pinned, Marathi/Bengali/Tamil have 2 each, and
-several supported languages (Telugu, Gujarati, Kannada, Malayalam, Punjabi,
-Odia, Urdu, Assamese) have none, falling through to preserving the English
-term untranslated. `_glossary_coverage` reads the raw glossary JSON directly
-rather than adding an enumeration method to the shipped `Glossary` class,
-which has no need for one outside this report. Every question's section
-states its language's coverage plainly, so a reviewer of, say, Telugu output
-knows going in that no glossary backs it.
+**Glossary coverage per language, counted the way the glossary actually
+works.** The glossary is deliberately uneven -- Hindi pins all 12 terms,
+Marathi/Bengali/Tamil 2 each, and several supported languages (Telugu,
+Gujarati, Kannada, Malayalam, Punjabi, Odia, Urdu, Assamese) none at all,
+falling through to the English term untranslated. Nine of the twelve terms
+are `preserve_english`, which means their pinned rendering is a bracket
+gloss beside the English term, never a replacement for it: an earlier
+version of this report counted those as "an accepted rendering", which told
+a Marathi reviewer that 2 of 12 terms were translated into Marathi when in
+fact none are and never will be. `LanguageCoverage` therefore counts
+translations and bracket glosses separately and every section states both.
+`_glossary_coverage` reads the raw glossary JSON directly rather than adding
+an enumeration method to the shipped `Glossary` class, which has no need for
+one outside this report.
+
+**Why each row asks for its language explicitly.** Every row is labelled
+with the language its source file declares, and `answer_in_language` is
+given that same language rather than being left to detect one: detection
+maps all Devanagari to Hindi and all Bengali script to Bengali, so a Marathi
+or Assamese row would otherwise be reviewed as Marathi while holding Hindi
+output with Hindi-pinned terms -- the single hardest error for a reviewer to
+attribute. The answer's own reported language is printed next to it so the
+label can be checked rather than trusted.
+
+**Why this script persists the pipeline's events.** `answer_in_language`
+builds `HallucinationEvent`s and `ClassifierFailureEvent`s and writes
+neither -- it holds no `Settings` by design (see its module docstring's
+"build now, persist later" split). This script holds one, so it calls
+`openlaw.answers.generate.persist_answer_events` on every generated row,
+exactly as `answer_question` does on the English path. Without it a review
+run -- the one time the multilingual path is exercised in bulk -- would
+discard every hallucination and classifier failure it uncovered.
 
 Run: python scripts/review_translations.py
 """
 
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
-from openlaw.answers.generate import build_retrieval_context
+from openlaw.answers.generate import build_retrieval_context, persist_answer_events
 from openlaw.answers.models import LLMAdapter, ModelRegistry
 from openlaw.answers.validate import ValidatedAnswer
 from openlaw.config import Settings, get_settings
@@ -120,6 +144,42 @@ class _QdrantRetriever:
         return build_retrieval_context(english_query, self._settings, self._client)
 
 
+@dataclass(frozen=True)
+class Generation:
+    """Everything one row needs to actually generate (and record) an answer.
+
+    Bundled rather than threaded through as four more parameters, and carried
+    as one `None`-able value so "no API key" stays a single check. `settings`
+    is here for one reason: `answer_in_language` builds hallucination and
+    classifier-failure events and deliberately persists neither (it holds no
+    `Settings` and writes nothing -- see its module docstring's "build now,
+    persist later" split). This script is the boundary that holds one, so it
+    does the persisting, exactly as `answer_question` does on the English
+    path.
+    """
+
+    adapter: LLMAdapter
+    registry: ModelRegistry
+    retriever: Retriever
+    settings: Settings
+
+
+@dataclass(frozen=True)
+class LanguageCoverage:
+    """How many pinned glossary terms one language actually covers.
+
+    Split in two because the glossary means two different things by a
+    "rendering". A `preserve_english` term is never translated by design --
+    the English term is kept and the local rendering appears beside it in
+    brackets -- so counting those as coverage told a reviewer the term was
+    translated when it structurally cannot be. Nine of the twelve shipped
+    terms are `preserve_english`.
+    """
+
+    translated: int = 0
+    bracket_glossed: int = 0
+
+
 def _load_verified(path: Path) -> tuple[EvalQuestion, ...]:
     """Return every verified eval question, or () if the file is missing."""
     try:
@@ -153,9 +213,10 @@ def _glossary_term_count(path: Path) -> int:
     return len(json.loads(path.read_text(encoding="utf-8")))
 
 
-def _glossary_coverage(path: Path) -> dict[str, int]:
-    """Return, per language code, how many glossary terms have a pinned
-    local rendering in that language, or {} if the file is missing.
+def _glossary_coverage(path: Path) -> dict[str, LanguageCoverage]:
+    """Return, per language code, how many glossary terms that language
+    actually translates and how many it only glosses in brackets, or {} if
+    the file is missing.
 
     Reads the raw glossary JSON directly -- see the module docstring for why
     this is not a method on `Glossary` itself.
@@ -163,28 +224,49 @@ def _glossary_coverage(path: Path) -> dict[str, int]:
     if not path.exists():
         return {}
     raw = json.loads(path.read_text(encoding="utf-8"))
-    coverage: dict[str, int] = {}
+    translated: dict[str, int] = {}
+    glossed: dict[str, int] = {}
     for entry in raw:
+        counts = glossed if entry.get("preserve_english") else translated
         for language in entry.get("translations", {}):
-            coverage[language] = coverage.get(language, 0) + 1
-    return coverage
-
-
-def _coverage_note(language: str, coverage: dict[str, int], total_terms: int) -> str:
-    """Return the glossary-coverage line a reviewer of `language` should see."""
-    covered = coverage.get(language, 0)
-    language_name = SUPPORTED_LANGUAGES.get(language, language)
-    if covered == 0:
-        return (
-            f"**Glossary coverage:** 0 of {total_terms} pinned legal terms have "
-            f"an accepted {language_name} rendering. No glossary backs this "
-            "language yet -- every pinned term falls through to the English "
-            "original. Read statutory-term choices with extra care."
+            counts[language] = counts.get(language, 0) + 1
+    return {
+        language: LanguageCoverage(
+            translated=translated.get(language, 0),
+            bracket_glossed=glossed.get(language, 0),
         )
-    return (
-        f"**Glossary coverage:** {covered} of {total_terms} pinned legal terms "
-        f"have an accepted {language_name} rendering."
+        for language in set(translated) | set(glossed)
+    }
+
+
+def _coverage_note(
+    language: str, coverage: dict[str, LanguageCoverage], total_terms: int
+) -> str:
+    """Return the glossary-coverage line a reviewer of `language` should see.
+
+    Counts a bracket gloss separately from a translation: a
+    `preserve_english` term stays in English however many renderings the
+    glossary pins for it.
+    """
+    covered = coverage.get(language, LanguageCoverage())
+    language_name = SUPPORTED_LANGUAGES.get(language, language)
+    note = (
+        f"**Glossary coverage:** {covered.translated} of {total_terms} pinned "
+        f"legal terms are translated into {language_name}"
     )
+    if covered.bracket_glossed:
+        note += (
+            f", and {covered.bracket_glossed} more are kept in English with a "
+            f"{language_name} rendering in brackets"
+        )
+    note += "."
+    if covered.translated == 0 and covered.bracket_glossed == 0:
+        note += (
+            " No glossary backs this language yet -- every pinned term falls "
+            "through to the English original. Read statutory-term choices "
+            "with extra care."
+        )
+    return note
 
 
 def _render_claims(answer: ValidatedAnswer) -> str:
@@ -200,26 +282,44 @@ def _render_claims(answer: ValidatedAnswer) -> str:
 
 
 def _generation_lines(
-    question: str,
-    glossary: Glossary,
-    adapter: LLMAdapter,
-    registry: ModelRegistry,
-    retriever: Retriever,
+    question: str, language: str, glossary: Glossary, generation: Generation
 ) -> list[str]:
     """Return the Markdown lines for one question's actual (or failed)
-    generation, assuming an adapter/registry/retriever are all available.
+    generation.
+
+    `language` is passed to `answer_in_language` as an explicit choice, not
+    left to detection: the sheet labels each row with the language its source
+    file declares, and detection maps every Devanagari question to Hindi, so
+    a Marathi row would otherwise be reviewed as Marathi while holding a
+    Hindi answer with Hindi-pinned terms. The answer's own reported language
+    is printed alongside, so the label is checkable rather than asserted.
 
     Shows the English answer alongside the translated one -- a reviewer
     judging whether the legal meaning survived translation needs both, not
     just the translated text on its own (see `LocalisedAnswer.english_answer`'s
     docstring in `openlaw.language.pipeline`).
+
+    Persists whatever events the turn produced before returning: the pipeline
+    builds them and writes nothing itself (see `Generation`).
     """
     try:
-        result = answer_in_language(question, retriever, adapter, registry, glossary)
+        result = answer_in_language(
+            question,
+            generation.retriever,
+            generation.adapter,
+            generation.registry,
+            glossary,
+            language=language,
+        )
     except Exception as exc:  # noqa: BLE001 -- one bad question must not sink the sheet
         return [f"**Translated answer:** GENERATION FAILED -- {exc}", ""]
+
+    persist_answer_events(result, generation.settings)
+    answer_language = SUPPORTED_LANGUAGES.get(result.language, result.language)
     return [
         f"**English used for retrieval:** {result.english_query}",
+        "",
+        f"**Answer language:** {answer_language}",
         "",
         "**English answer:**",
         _render_claims(result.english_answer),
@@ -235,12 +335,10 @@ def _question_section(
     language: str,
     category: str,
     source_label: str,
-    coverage: dict[str, int],
+    coverage: dict[str, LanguageCoverage],
     total_terms: int,
     glossary: Glossary,
-    adapter: LLMAdapter | None,
-    registry: ModelRegistry | None,
-    retriever: Retriever | None,
+    generation: Generation | None,
 ) -> list[str]:
     """Return the Markdown lines for one question's review row."""
     language_name = SUPPORTED_LANGUAGES.get(language, language)
@@ -253,7 +351,7 @@ def _question_section(
         "",
     ]
 
-    if adapter is None or registry is None or retriever is None:
+    if generation is None:
         lines.extend(
             [
                 "**Translated answer:** NOT GENERATED -- no "
@@ -265,7 +363,7 @@ def _question_section(
             ]
         )
     else:
-        lines.extend(_generation_lines(question, glossary, adapter, registry, retriever))
+        lines.extend(_generation_lines(question, language, glossary, generation))
 
     lines.extend(["**Verdict:** ( ) OK  ( ) WRONG -- notes:", "", "---", ""])
     return lines
@@ -319,12 +417,10 @@ def _sheet_header(
 def build_sheet(
     verified: tuple[EvalQuestion, ...],
     backlog: tuple[BacklogQuestion, ...],
-    coverage: dict[str, int],
+    coverage: dict[str, LanguageCoverage],
     total_terms: int,
     glossary: Glossary,
-    adapter: LLMAdapter | None,
-    registry: ModelRegistry | None,
-    retriever: Retriever | None,
+    generation: Generation | None,
 ) -> str:
     """Return the full Markdown review sheet for `verified` and `backlog`."""
     verified_non_english = tuple(q for q in verified if q.language != "en")
@@ -336,41 +432,26 @@ def build_sheet(
         len(backlog),
         len(backlog_non_english),
         MINIMUM_QUESTIONS,
-        adapter is not None,
+        generation is not None,
     )
 
-    for question in verified_non_english:
+    rows = [(q, "verified") for q in verified_non_english]
+    rows.extend((q, "backlog -- no gold citation") for q in backlog_non_english)
+    for question, source_label in rows:
         lines.extend(
             _question_section(
                 question.question,
                 question.language,
                 question.category,
-                "verified",
+                source_label,
                 coverage,
                 total_terms,
                 glossary,
-                adapter,
-                registry,
-                retriever,
-            )
-        )
-    for question in backlog_non_english:
-        lines.extend(
-            _question_section(
-                question.question,
-                question.language,
-                question.category,
-                "backlog -- no gold citation",
-                coverage,
-                total_terms,
-                glossary,
-                adapter,
-                registry,
-                retriever,
+                generation,
             )
         )
 
-    if not verified_non_english and not backlog_non_english:
+    if not rows:
         lines.append(
             "No non-English question is available to review yet, in either "
             "the verified evaluation set or the backlog."
@@ -388,20 +469,21 @@ def main() -> int:
     verified = _load_verified(VERIFIED_EVAL_PATH)
     backlog = _load_backlog(BACKLOG_EVAL_PATH)
 
-    adapter: LLMAdapter | None = None
-    registry: ModelRegistry | None = None
-    retriever: Retriever | None = None
+    generation: Generation | None = None
     client: httpx.Client | None = None
 
     if settings.anthropic_api_key:
-        adapter = AnthropicAdapter(settings.anthropic_api_key)
-        registry = ModelRegistry.from_settings(settings)
         client = httpx.Client(timeout=60)
-        retriever = _QdrantRetriever(settings, client)
+        generation = Generation(
+            adapter=AnthropicAdapter(settings.anthropic_api_key),
+            registry=ModelRegistry.from_settings(settings),
+            retriever=_QdrantRetriever(settings, client),
+            settings=settings,
+        )
 
     try:
         sheet = build_sheet(
-            verified, backlog, coverage, total_terms, glossary, adapter, registry, retriever
+            verified, backlog, coverage, total_terms, glossary, generation
         )
     finally:
         if client is not None:
@@ -411,7 +493,7 @@ def main() -> int:
     OUTPUT.write_text(sheet, encoding="utf-8")
 
     print(f"[Review] wrote sheet to {OUTPUT}")
-    if adapter is None:
+    if generation is None:
         print(
             "[Review] OPENLAW_ANTHROPIC_API_KEY is not set -- translated "
             "answers were not generated; re-run with it configured"

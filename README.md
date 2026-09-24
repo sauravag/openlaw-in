@@ -64,6 +64,23 @@ Stated plainly, because a legal tool that overstates its coverage is dangerous:
 **This is legal information, not legal advice.** Always verify against the official
 source before relying on anything here.
 
+## Application database
+
+`openlaw.db.models` is deliberately minimal on personal data — see its module
+docstring. One table needs a specific operational precondition before it is
+used:
+
+- **`hallucination_log`** holds verbatim, potentially sensitive rejected-claim
+  text — the same class of data as `openlaw.answers.escalation`'s JSONL
+  hallucination log, which earns the right to keep that text verbatim by
+  pairing it with `0600` file permissions and a 90-day purge
+  (`purge_stale_events`). This table carries the same obligation:
+  `openlaw.db.retention.purge_stale_hallucination_log` enforces the matching
+  90-day window and must be run periodically once anything writes here.
+  **Nothing may write to this table in production until it is reachable only
+  through a restricted database role** (not the general application
+  credential) — set that up first, not after.
+
 ## Setup
 
     cp .env.example .env
