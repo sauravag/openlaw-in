@@ -141,8 +141,15 @@ def precedent_lineage_cypher(depth: int) -> str:
     A stub still carries `join_key`, which is returned so a stub row is not
     entirely unidentifiable.
 
-    Raises ValueError when `depth` falls outside 1..MAX_DEPTH.
+    Raises ValueError when `depth` is not an `int` in 1..MAX_DEPTH. `depth` is
+    f-string-interpolated straight into the Cypher `CITES*1..{depth}` range,
+    so a non-integer must be rejected here rather than left for Neo4j to fail
+    on with an opaque syntax error: `2.5` would silently produce the malformed
+    `CITES*1..2.5`, and `bool` is rejected even though `isinstance(True, int)`
+    is `True` in Python — `depth=True` must not silently become `CITES*1..1`.
     """
+    if not isinstance(depth, int) or isinstance(depth, bool):
+        raise ValueError(f"depth must be an int, got {type(depth).__name__}")
     if depth < 1 or depth > MAX_DEPTH:
         raise ValueError(f"depth must be between 1 and {MAX_DEPTH}, got {depth}")
     return (

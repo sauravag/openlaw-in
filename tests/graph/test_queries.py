@@ -115,6 +115,28 @@ def test_precedent_lineage_rejects_negative_depth() -> None:
         precedent_lineage_cypher(depth=-1)
 
 
+def test_precedent_lineage_rejects_a_float_depth() -> None:
+    """A float would f-string-interpolate into a malformed `CITES*1..2.5`,
+    deferring failure to an opaque Neo4j syntax error — must be caught here."""
+    with pytest.raises(ValueError):
+        precedent_lineage_cypher(depth=2.5)  # type: ignore[arg-type]
+
+
+def test_precedent_lineage_rejects_a_bool_depth() -> None:
+    """bool is a subclass of int in Python, so `isinstance(True, int)` is
+    True — without an explicit bool check, depth=True would silently become
+    CITES*1..1 instead of raising."""
+    with pytest.raises(ValueError):
+        precedent_lineage_cypher(depth=True)  # type: ignore[arg-type]
+
+
+def test_precedent_lineage_rejects_a_string_depth_with_value_error() -> None:
+    """Must raise the documented ValueError, not an incidental TypeError from
+    the `depth < 1` comparison."""
+    with pytest.raises(ValueError):
+        precedent_lineage_cypher(depth="3")  # type: ignore[arg-type]
+
+
 def test_precedent_lineage_flags_stub_rows_rather_than_hiding_them() -> None:
     """The citation network is the point of this query, so a citation to a
     case outside the corpus is left in — but tagged, and identified by its
