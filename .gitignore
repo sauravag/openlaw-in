@@ -2,6 +2,10 @@
 __pycache__/
 *.egg-info/
 .venv/
-data/
+data/*
+# Curated, version-controlled reference data (small, hand-authored — unlike
+# the corpus/index artifacts the blanket data/* rule above is for).
+!data/glossary/
+!data/glossary/*.json
 .coverage
 .pytest_cache/
