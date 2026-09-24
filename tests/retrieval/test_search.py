@@ -26,10 +26,14 @@ from openlaw.retrieval.search import (
     ACTS_INDIA_V1,
     SC_COLLECTION,
     SEARCH_COLLECTIONS,
+    build_dense_only_request,
     build_hybrid_request,
+    build_sparse_only_request,
     build_sparse_query_vector,
     chunk_from_point,
     search,
+    search_dense_only,
+    search_sparse_only,
 )
 
 
@@ -278,6 +282,115 @@ def test_search_drops_unusable_points_silently() -> None:
     )
     result = search(client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=5)
     assert result == ()
+
+
+# --- dense-only / sparse-only search variants ----------------------------
+#
+# Added beyond the original brief: the evaluation harness (Task 9) needs to
+# measure dense-only vs sparse-only vs hybrid retrieval separately -- one of
+# the three open questions it must answer is whether the sparse signal helps
+# or hurts (see rulings-addendum.md: sparse noise took hybrid rank 1 above
+# the correct Rent Control Act on a real query). These are request-building
+# and search functions the request path never calls; production traffic
+# always goes through hybrid `search`.
+
+
+def test_dense_only_request_has_no_prefetch_or_fusion() -> None:
+    request = build_dense_only_request([0.1] * 1024, limit=10, court_codes=None)
+    assert "prefetch" not in request
+    assert "fusion" not in request.get("query", {})
+    assert request["using"] == "dense"
+    assert request["query"] == [0.1] * 1024
+
+
+def test_dense_only_request_applies_a_court_filter_when_given() -> None:
+    request = build_dense_only_request([0.1] * 1024, limit=10, court_codes=("SCI",))
+    assert request["filter"]["must"][0]["match"]["any"] == ["SCI"]
+
+
+def test_dense_only_request_omits_the_filter_when_no_courts_given() -> None:
+    request = build_dense_only_request([0.1] * 1024, limit=10, court_codes=None)
+    assert "filter" not in request
+
+
+def test_sparse_only_request_wraps_the_query_in_nearest() -> None:
+    sparse = build_sparse_query_vector("theft")
+    request = build_sparse_only_request(sparse, limit=10, court_codes=None)
+    assert request["using"] == "sparse"
+    assert request["query"] == {"nearest": sparse}
+    assert "prefetch" not in request
+
+
+def test_sparse_only_request_applies_a_court_filter_when_given() -> None:
+    sparse = build_sparse_query_vector("theft")
+    request = build_sparse_only_request(sparse, limit=10, court_codes=("SCI",))
+    assert request["filter"]["must"][0]["match"]["any"] == ["SCI"]
+
+
+def test_search_dense_only_queries_every_collection_and_merges_by_score() -> None:
+    client = _FakeClient(
+        {
+            ACTS_INDIA_V1: [
+                {
+                    "score": 0.4,
+                    "payload": {
+                        "chunk_id": "a1",
+                        "text": "provision text",
+                        "source_url": "https://indiacode.nic.in/a1",
+                    },
+                }
+            ],
+            SC_COLLECTION: [
+                {
+                    "score": 0.9,
+                    "payload": {
+                        "chunk_id": "j1",
+                        "case_id": "case1",
+                        "text": "judgment text",
+                        "source_url": "https://s3.amazonaws.com/j1",
+                    },
+                }
+            ],
+        }
+    )
+
+    result = search_dense_only(client, "http://127.0.0.1:6333", [0.1] * 1024, limit=10)
+
+    assert [chunk.chunk_id for chunk in result] == ["j1", "a1"]
+    for _, body in client.requests:
+        assert body["using"] == "dense"
+        assert "prefetch" not in body
+
+
+def test_search_sparse_only_builds_its_vector_from_the_query_text() -> None:
+    client = _FakeClient({ACTS_INDIA_V1: [], SC_COLLECTION: []})
+
+    search_sparse_only(client, "http://127.0.0.1:6333", "theft punishment", limit=5)
+
+    _, body = client.requests[0]
+    assert body["using"] == "sparse"
+    expected = build_sparse_query_vector("theft punishment")
+    assert body["query"] == {"nearest": expected}
+
+
+def test_search_sparse_only_respects_the_requested_limit() -> None:
+    many_points = [
+        {
+            "score": float(i),
+            "payload": {
+                "chunk_id": f"c{i}",
+                "text": "t",
+                "source_url": "https://indiacode.nic.in/x",
+            },
+        }
+        for i in range(20)
+    ]
+    client = _FakeClient({ACTS_INDIA_V1: many_points, SC_COLLECTION: []})
+
+    result = search_sparse_only(client, "http://127.0.0.1:6333", "theft", limit=3)
+
+    assert len(result) == 3
+    assert [chunk.score for chunk in result] == [19.0, 18.0, 17.0]
 
 
 @pytest.mark.integration

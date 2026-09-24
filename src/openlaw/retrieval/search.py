@@ -22,6 +22,13 @@ sparse `query` must be wrapped in `{"nearest": {...}}` -- a bare
 error". Querying both dense and sparse and fusing with reciprocal rank fusion
 recovers exact statutory references that pure dense retrieval misses -- a
 citizen asking about "Section 138" needs the lexical match.
+
+`search_dense_only` and `search_sparse_only` (with their matching
+`build_*_request` functions) are added for the Task 9 evaluation harness
+(`openlaw.evaluation.retrieval_eval`), which must measure whether the sparse
+signal helps or hurts on real queries rather than assume it -- see that
+module's docstring. Nothing on the production answer path calls them; the
+request path always uses hybrid `search`.
 """
 
 from typing import Any, Protocol
@@ -89,11 +96,57 @@ def build_hybrid_request(
         "with_payload": True,
         "with_vector": False,
     }
+    return _with_court_filter(request, court_codes)
+
+
+def _with_court_filter(
+    request: dict[str, Any], court_codes: tuple[str, ...] | None
+) -> dict[str, Any]:
+    """Return `request` with a `court_code` filter added when `court_codes` is
+    non-empty. Shared by every single-vector request builder below."""
     if court_codes:
         request["filter"] = {
             "must": [{"key": "court_code", "match": {"any": list(court_codes)}}]
         }
     return request
+
+
+def build_dense_only_request(
+    dense_vector: list[float], limit: int, court_codes: tuple[str, ...] | None
+) -> dict[str, Any]:
+    """Return the Qdrant query body for dense-vector-only retrieval.
+
+    No `prefetch`/fusion -- a single `query` against the `dense` vector name.
+    Evaluation-only: measures dense retrieval in isolation (see the module
+    docstring); the production request path never calls this.
+    """
+    request: dict[str, Any] = {
+        "query": dense_vector,
+        "using": "dense",
+        "limit": limit,
+        "with_payload": True,
+        "with_vector": False,
+    }
+    return _with_court_filter(request, court_codes)
+
+
+def build_sparse_only_request(
+    sparse_vector: dict[str, list], limit: int, court_codes: tuple[str, ...] | None
+) -> dict[str, Any]:
+    """Return the Qdrant query body for sparse-vector-only retrieval.
+
+    The sparse vector must be wrapped in `{"nearest": {...}}`, exactly as in
+    `build_hybrid_request`'s sparse prefetch -- a bare sparse vector at the
+    `query` key returns HTTP 400. Evaluation-only, see the module docstring.
+    """
+    request: dict[str, Any] = {
+        "query": {"nearest": sparse_vector},
+        "using": "sparse",
+        "limit": limit,
+        "with_payload": True,
+        "with_vector": False,
+    }
+    return _with_court_filter(request, court_codes)
 
 
 def chunk_from_point(point: dict[str, Any]) -> RetrievedChunk | None:
@@ -134,6 +187,24 @@ def _search_collection(
     return [chunk for chunk in chunks if chunk is not None]
 
 
+def _run_across_collections(
+    client: _PostClient,
+    qdrant_url: str,
+    request: dict[str, Any],
+    limit: int,
+) -> tuple[RetrievedChunk, ...]:
+    """Run `request` against every corpus collection and return the merged,
+    score-ordered, limit-capped hits. Shared by `search`, `search_dense_only`,
+    and `search_sparse_only` -- only the request body differs between them.
+    """
+    chunks: list[RetrievedChunk] = []
+    for collection in SEARCH_COLLECTIONS:
+        chunks.extend(_search_collection(client, qdrant_url, collection, request))
+
+    chunks.sort(key=lambda chunk: chunk.score, reverse=True)
+    return tuple(chunks[:limit])
+
+
 def search(
     client: _PostClient,
     qdrant_url: str,
@@ -151,10 +222,39 @@ def search(
     """
     sparse_vector = build_sparse_query_vector(text)
     request = build_hybrid_request(vector, sparse_vector, limit, court_codes)
+    return _run_across_collections(client, qdrant_url, request, limit)
 
-    chunks: list[RetrievedChunk] = []
-    for collection in SEARCH_COLLECTIONS:
-        chunks.extend(_search_collection(client, qdrant_url, collection, request))
 
-    chunks.sort(key=lambda chunk: chunk.score, reverse=True)
-    return tuple(chunks[:limit])
+def search_dense_only(
+    client: _PostClient,
+    qdrant_url: str,
+    vector: list[float],
+    limit: int = 10,
+    court_codes: tuple[str, ...] | None = None,
+) -> tuple[RetrievedChunk, ...]:
+    """Search using only the dense vector -- no sparse/lexical component.
+
+    Evaluation-only (see the module docstring): isolates dense retrieval's own
+    accuracy from hybrid fusion, so the evaluation harness can measure whether
+    the sparse signal is helping or hurting rather than assume it.
+    """
+    request = build_dense_only_request(vector, limit, court_codes)
+    return _run_across_collections(client, qdrant_url, request, limit)
+
+
+def search_sparse_only(
+    client: _PostClient,
+    qdrant_url: str,
+    text: str,
+    limit: int = 10,
+    court_codes: tuple[str, ...] | None = None,
+) -> tuple[RetrievedChunk, ...]:
+    """Search using only the sparse (BM25-style) vector built from `text`.
+
+    Evaluation-only (see the module docstring): isolates the lexical signal
+    that hybrid search fuses in, so its real contribution -- positive or
+    negative -- can be measured on real queries.
+    """
+    sparse_vector = build_sparse_query_vector(text)
+    request = build_sparse_only_request(sparse_vector, limit, court_codes)
+    return _run_across_collections(client, qdrant_url, request, limit)
