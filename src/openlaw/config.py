@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "openlawdev"
+    # Query embedding (Plan 3 T1): local voyage-4-nano is the default, per the
+    # measured decision in docs/superpowers/sdd/.../task-1-brief.md -- the Voyage
+    # API stays available as a configurable alternative.
+    query_embedder_backend: str = "local_nano"
+    nano_model_dir: Path | None = None
 
 
 @lru_cache

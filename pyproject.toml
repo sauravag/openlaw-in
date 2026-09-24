@@ -10,6 +10,15 @@ dependencies = [
     "voyageai>=0.3",
     "httpx>=0.27",
     "neo4j>=5.26",
+    "numpy>=2.0",
+    # Local query embedding (voyage-4-nano, Plan 3 T1) -- pinned exactly, not a
+    # range: nano's shipped remote code needed hand-patching for transformers 5.x
+    # (see openlaw.retrieval._nano_compat) and is only known to work with this
+    # combination. Bumping any of these three needs re-verifying that patch.
+    "transformers==5.17.0",
+    "sentence-transformers==6.1.0",
+    "torch==2.14.0",
+    "huggingface-hub>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -26,7 +35,7 @@ packages = ["src/openlaw"]
 testpaths = ["tests"]
 addopts = "--cov=openlaw --cov-report=term-missing --cov-fail-under=80"
 markers = [
-    "integration: requires a live Neo4j container (skips cleanly if unreachable)",
+    "integration: requires a live external dependency (Neo4j, Qdrant, or the voyage-4-nano model) -- skips cleanly if unavailable",
 ]
 
 [tool.coverage.run]
