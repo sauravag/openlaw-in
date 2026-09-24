@@ -17,6 +17,11 @@ already drops any chunk it cannot resolve a URL for before indexing. So for
 `sc_judgments_v1`, a missing URL or corpus_version is a real defect and FAILS
 the gate (exit 1).
 
+`hc_judgments_v1` (High Court judgments, scripts/build_hc_index.py) is held to
+the same strict standard as `sc_judgments_v1`: it drops any chunk it cannot
+resolve a government URL for before indexing, so a missing URL or
+corpus_version there is likewise a real defect, not an accepted gap.
+
 A collection that has not been built yet is reported as "not built yet" and
 skipped, rather than crashing the gate.
 
@@ -29,6 +34,7 @@ from dataclasses import dataclass
 import httpx
 
 from openlaw.config import get_settings
+from openlaw.index.hc_upsert import HC_COLLECTION
 from openlaw.index.upsert import SC_COLLECTION
 from openlaw.index.validation import ValidationReport, validate_payloads
 
@@ -47,6 +53,7 @@ class CollectionPolicy:
 POLICIES: tuple[CollectionPolicy, ...] = (
     CollectionPolicy(name=ACTS_INDIA_COLLECTION, strict=False),
     CollectionPolicy(name=SC_COLLECTION, strict=True),
+    CollectionPolicy(name=HC_COLLECTION, strict=True),
 )
 
 

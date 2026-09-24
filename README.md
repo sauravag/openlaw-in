@@ -44,6 +44,16 @@ Stated plainly, because a legal tool that overstates its coverage is dangerous:
   a stricter standard: every chunk that cannot resolve a government URL is
   dropped before indexing (`scripts/build_sc_index.py`), so any violation found
   there by the gate is a real defect, not an accepted gap.
+- `hc_judgments_v1` holds High Court judgments and is built to the same strict
+  standard as `sc_judgments_v1` (`scripts/build_hc_index.py`). It is a **shared**
+  collection designed to hold multiple High Courts, distinguished by the
+  `court_code` payload field — currently only **Punjab & Haryana High Court**
+  (Chandigarh; covers Punjab, Haryana, and the Chandigarh UT) is onboarded
+  (`openlaw.corpus.high_courts`). **Delhi High Court is deliberately NOT
+  included** — an explicit product decision, not an oversight. Its vectors are
+  embedded with `voyage-4-lite`, not `voyage-4` (a deliberate cost choice,
+  verified to share the voyage-4 embedding space closely enough for retrieval:
+  mean cosine 0.961 against stored voyage-4 vectors, min 0.932).
 
 **This is legal information, not legal advice.** Always verify against the official
 source before relying on anything here.
@@ -76,4 +86,11 @@ Calling the `local_nano` backend without the extra installed raises a clear
     python scripts/make_fixtures.py            # test fixtures (once)
     python scripts/restore_acts_india.py       # 1,098,269 provisions (~11.2 GB)
     python scripts/build_sc_index.py           # 371,247 Supreme Court chunks
+    python scripts/build_hc_index.py           # ~1.85M Punjab & Haryana HC chunks
     python scripts/validate_corpus.py          # the gate: all citations resolve
+
+`build_hc_index.py` streams and checkpoints per court (`data/hc_index_checkpoint_<court>.json`,
+git-ignored) so an interrupted multi-hour run resumes with `python scripts/build_hc_index.py`
+(no flag needed) rather than re-embedding from the start; `--restart` discards the
+checkpoint, and `--limit N` stops after N chunks to prove the pipeline on a
+bounded slice.

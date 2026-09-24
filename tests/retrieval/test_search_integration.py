@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from openlaw.retrieval.query import StubQueryEmbedder
-from openlaw.retrieval.search import ACTS_INDIA_V1, SC_COLLECTION, search
+from openlaw.retrieval.search import ACTS_INDIA_V1, HC_COLLECTION, SC_COLLECTION, search
 
 QDRANT_URL = "http://127.0.0.1:6333"
 
@@ -25,6 +25,22 @@ def live_client() -> Iterator[httpx.Client]:
                 client.get(f"{QDRANT_URL}/collections/{collection}").raise_for_status()
         except httpx.HTTPError as exc:
             pytest.skip(f"Qdrant is not reachable: {exc}")
+        yield client
+
+
+@pytest.fixture(scope="module")
+def hc_live_client() -> Iterator[httpx.Client]:
+    """A real HTTP client against Qdrant, skipping if `hc_judgments_v1` does not
+    exist yet. Unlike `acts_india_v1`/`sc_judgments_v1`, this collection is
+    populated incrementally by `scripts/build_hc_index.py` (see its checkpoint
+    scheme) and so may hold anywhere from a bounded proof slice to the full
+    corpus depending on the environment -- these tests only need it to exist
+    and to return citable, correctly-scoped hits, not to be complete."""
+    with httpx.Client(timeout=10) as client:
+        try:
+            client.get(f"{QDRANT_URL}/collections/{HC_COLLECTION}").raise_for_status()
+        except httpx.HTTPError as exc:
+            pytest.skip(f"{HC_COLLECTION} is not built yet: {exc}")
         yield client
 
 
@@ -74,3 +90,22 @@ def test_hybrid_search_never_writes_to_the_collection(live_client: httpx.Client)
         for name in (ACTS_INDIA_V1, SC_COLLECTION)
     }
     assert before == after
+
+
+@pytest.mark.integration
+def test_hybrid_search_can_scope_to_a_single_high_court(
+    hc_live_client: httpx.Client,
+) -> None:
+    """court_codes scopes hits to one jurisdiction -- a Punjab & Haryana query
+    must never surface another High Court's judgments."""
+    result = search(
+        hc_live_client,
+        QDRANT_URL,
+        "writ petition maintainability",
+        [0.05] * 1024,
+        limit=5,
+        court_codes=("3_22",),
+    )
+    for chunk in result:
+        assert chunk.court_code == "3_22"
+        assert chunk.source_url

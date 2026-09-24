@@ -29,18 +29,32 @@ citizen asking about "Section 138" needs the lexical match.
 signal helps or hurts on real queries rather than assume it -- see that
 module's docstring. Nothing on the production answer path calls them; the
 request path always uses hybrid `search`.
+
+`hc_judgments_v1` (High Court judgments, `openlaw.index.hc_upsert`) is a third
+collection searched alongside the two above. It shares one collection across
+every registered High Court (`openlaw.corpus.high_courts`) rather than one
+collection per court, and carries `court_code` in its payload so a caller can
+pass `court_codes` to `search()` to scope a query to a single jurisdiction --
+High Court judgments bind only within their own state(s), unlike Supreme Court
+judgments, so an unscoped search across every High Court can surface
+persuasive-but-non-binding authority alongside binding authority. Its vectors
+were embedded with `voyage-4-lite`, not `voyage-4` -- verified (mean cosine
+0.961 against stored voyage-4 vectors) to share the same embedding space
+closely enough to be searched together with `acts_india_v1` and
+`sc_judgments_v1` at retrieval time.
 """
 
 from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from openlaw.index.hc_upsert import HC_COLLECTION
 from openlaw.index.sparse import token_index, tokenise
 from openlaw.index.upsert import SC_COLLECTION
 from openlaw.retrieval.context import ChunkKind, RetrievedChunk
 
 ACTS_INDIA_V1 = "acts_india_v1"
-SEARCH_COLLECTIONS: tuple[str, ...] = (ACTS_INDIA_V1, SC_COLLECTION)
+SEARCH_COLLECTIONS: tuple[str, ...] = (ACTS_INDIA_V1, SC_COLLECTION, HC_COLLECTION)
 PREFETCH_MULTIPLIER = 4
 SPARSE_QUERY_WEIGHT = 1.0
 

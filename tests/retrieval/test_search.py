@@ -24,6 +24,7 @@ from openlaw.index.sparse import token_index, tokenise
 from openlaw.retrieval.context import ChunkKind
 from openlaw.retrieval.search import (
     ACTS_INDIA_V1,
+    HC_COLLECTION,
     SC_COLLECTION,
     SEARCH_COLLECTIONS,
     build_dense_only_request,
@@ -48,6 +49,25 @@ def test_searches_the_rebuilt_citable_acts_collection() -> None:
 def test_searches_the_supreme_court_collection() -> None:
     assert SC_COLLECTION == "sc_judgments_v1"
     assert SC_COLLECTION in SEARCH_COLLECTIONS
+
+
+def test_searches_the_high_court_collection() -> None:
+    """One shared collection across every registered High Court -- see
+    openlaw.corpus.high_courts -- not one collection per court."""
+    assert HC_COLLECTION == "hc_judgments_v1"
+    assert HC_COLLECTION in SEARCH_COLLECTIONS
+
+
+def test_hybrid_request_scopes_to_a_single_high_court_jurisdiction() -> None:
+    """A Punjab & Haryana judgment must never satisfy a query scoped to a
+    different High Court's jurisdiction -- court_code is the filter field."""
+    sparse = build_sparse_query_vector("theft")
+    request = build_hybrid_request(
+        [0.1] * 1024, sparse, limit=10, court_codes=("3_22",)
+    )
+    condition = request["filter"]["must"][0]
+    assert condition["key"] == "court_code"
+    assert condition["match"]["any"] == ["3_22"]
 
 
 def test_sparse_query_vector_weights_every_distinct_term_equally() -> None:
@@ -160,6 +180,24 @@ def test_chunk_from_point_maps_a_judgment_payload() -> None:
     assert chunk.headnote == "Contempt: scope of powers"
 
 
+def test_chunk_from_point_maps_a_high_court_judgment_payload() -> None:
+    point = {
+        "score": 0.6,
+        "payload": {
+            "chunk_id": "PHHC010641322019_001",
+            "case_id": "PHHC010641322019",
+            "text": "the writ petition is allowed",
+            "source_url": "https://phhc-example.gov.in/x.pdf",
+            "court_code": "3_22",
+            "decision_date": "2019-05-10",
+        },
+    }
+    chunk = chunk_from_point(point)
+    assert chunk is not None
+    assert chunk.kind is ChunkKind.JUDGMENT
+    assert chunk.court_code == "3_22"
+
+
 def test_chunk_from_point_rejects_a_payload_without_a_source_url() -> None:
     """Defence in depth -- such a point should never have been indexed."""
     point = {"score": 0.9, "payload": {"chunk_id": "x", "text": "t", "source_url": ""}}
@@ -234,7 +272,7 @@ def test_search_queries_every_collection_and_merges_by_score() -> None:
     result = search(client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=10)
 
     assert [chunk.chunk_id for chunk in result] == ["j1", "a1"]
-    assert len(client.requests) == 2
+    assert len(client.requests) == len(SEARCH_COLLECTIONS)
     urls = {url for url, _ in client.requests}
     assert any(ACTS_INDIA_V1 in url for url in urls)
     assert any(SC_COLLECTION in url for url in urls)

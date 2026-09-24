@@ -18,7 +18,7 @@ from openlaw.evaluation.retrieval_eval import (
     evaluate_retrieval_modes,
 )
 from openlaw.retrieval.query import StubQueryEmbedder
-from openlaw.retrieval.search import SC_COLLECTION, build_sparse_query_vector
+from openlaw.retrieval.search import HC_COLLECTION, SC_COLLECTION, build_sparse_query_vector
 
 
 class _FakeResponse:
@@ -62,7 +62,7 @@ class _ProgrammableClient:
 
     def post(self, url: str, json: dict[str, Any], timeout: float) -> _FakeResponse:
         self.requests.append((url, json))
-        if SC_COLLECTION in url:
+        if SC_COLLECTION in url or HC_COLLECTION in url:
             return _FakeResponse([])
         if "prefetch" in json:
             return _FakeResponse(self._hybrid_points)
