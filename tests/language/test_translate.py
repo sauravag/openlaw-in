@@ -22,6 +22,8 @@ and `test_genuinely_english_query_costs_a_noop_translator_call` below cover
 both halves of that decision explicitly.
 """
 
+import json
+
 import pytest
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
@@ -32,7 +34,13 @@ from openlaw.config import get_settings
 from openlaw.language.glossary import Glossary, GlossaryTerm
 from openlaw.language.translate import translate_answer, translate_query
 
-TRANSLATED = '{"summary": "जमा राशि वापस करनी होगी।", "claims": ["वापसी आवश्यक है।"]}'
+TRANSLATED = json.dumps(
+    {
+        "summary": "जमा राशि वापस करनी होगी।",
+        "claims": [{"id": 0, "text": "वापसी आवश्यक है।"}],
+    },
+    ensure_ascii=False,
+)
 
 
 def _glossary() -> Glossary:
@@ -57,6 +65,23 @@ def _answer() -> ValidatedAnswer:
                 source_url="https://www.indiacode.nic.in/handle/123456789/1",
                 title="Model Tenancy Act",
             ),
+        ),
+        is_answerable=True,
+    )
+
+
+def _two_claim_answer() -> ValidatedAnswer:
+    """An answer with two distinctly-cited claims, for reassembly tests where
+    a single claim can't distinguish "correct by luck" from "correct by id"."""
+    return ValidatedAnswer(
+        unverified_summary="Two things are true.",
+        claims=(
+            Claim(text="A refund is required.", chunk_ids=("a",)),
+            Claim(text="Notice must be given first.", chunk_ids=("b",)),
+        ),
+        sources=(
+            Source(chunk_id="a", source_url="https://example.gov.in/a"),
+            Source(chunk_id="b", source_url="https://example.gov.in/b"),
         ),
         is_answerable=True,
     )
@@ -188,10 +213,110 @@ def test_failed_answer_translation_falls_back_to_english() -> None:
 
 
 def test_claim_count_mismatch_falls_back_to_english() -> None:
-    """A translator returning the wrong number of claims cannot be aligned."""
+    """A translator returning the wrong number of claims is a missing id (the
+    required id 0 never appears) and cannot be reassembled."""
     adapter = StubAdapter(['{"summary": "अनुवादित", "claims": []}'])
     result = translate_answer(_answer(), "hi", adapter, ModelRegistry(), _glossary())
     assert result.unverified_summary == _answer().unverified_summary
+
+
+def test_reordered_claims_reassemble_onto_their_own_chunk_ids() -> None:
+    """The important case: a translator that returns claims out of order must
+    still pair each translated text with the `chunk_ids` of the claim it was
+    actually given -- not with whichever claim occupies that slot in the
+    reply. Written so it would FAIL under position-based (zip-by-index)
+    pairing: translated text for id 1 ("b"'s claim) is listed first in the
+    response, and translated text for id 0 ("a"'s claim) second. Under naive
+    positional pairing, response[0] ("id 1's" translated text) would be
+    zipped onto original claim 0 (chunk_ids=("a",)) -- attaching a claim to
+    a citation that does not support it."""
+    reordered = json.dumps(
+        {
+            "summary": "दो बातें सत्य हैं।",
+            "claims": [
+                {"id": 1, "text": "पहले सूचना देनी होगी।"},
+                {"id": 0, "text": "वापसी आवश्यक है।"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    adapter = StubAdapter([reordered])
+
+    result = translate_answer(
+        _two_claim_answer(), "hi", adapter, ModelRegistry(), _glossary()
+    )
+
+    assert result.claims[0].chunk_ids == ("a",)
+    assert result.claims[0].text == "वापसी आवश्यक है।"
+    assert result.claims[1].chunk_ids == ("b",)
+    assert result.claims[1].text == "पहले सूचना देनी होगी।"
+
+
+def test_missing_claim_id_falls_back_to_english() -> None:
+    """A response that drops one of the required ids cannot be reassembled --
+    there is no translated text to pair with that claim's chunk_ids."""
+    missing_one = json.dumps(
+        {
+            "summary": "दो बातें सत्य हैं।",
+            "claims": [{"id": 0, "text": "वापसी आवश्यक है।"}],
+        },
+        ensure_ascii=False,
+    )
+    adapter = StubAdapter([missing_one])
+
+    result = translate_answer(
+        _two_claim_answer(), "hi", adapter, ModelRegistry(), _glossary()
+    )
+
+    assert result.unverified_summary == _two_claim_answer().unverified_summary
+    assert result.claims == _two_claim_answer().claims
+
+
+def test_invented_claim_id_falls_back_to_english() -> None:
+    """A response carrying an id that was never sent cannot be trusted --
+    accepting it could silently attach translated text to an id the caller
+    never asked about."""
+    invented = json.dumps(
+        {
+            "summary": "दो बातें सत्य हैं।",
+            "claims": [
+                {"id": 0, "text": "वापसी आवश्यक है।"},
+                {"id": 7, "text": "पहले सूचना देनी होगी।"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    adapter = StubAdapter([invented])
+
+    result = translate_answer(
+        _two_claim_answer(), "hi", adapter, ModelRegistry(), _glossary()
+    )
+
+    assert result.unverified_summary == _two_claim_answer().unverified_summary
+    assert result.claims == _two_claim_answer().claims
+
+
+def test_duplicated_claim_id_falls_back_to_english() -> None:
+    """Two claims echoing the same id leave no way to tell which text is
+    authoritative for the claim that id maps to."""
+    duplicated = json.dumps(
+        {
+            "summary": "दो बातें सत्य हैं।",
+            "claims": [
+                {"id": 0, "text": "वापसी आवश्यक है।"},
+                {"id": 0, "text": "एक अलग अनुवाद।"},
+            ],
+        },
+        ensure_ascii=False,
+    )
+    adapter = StubAdapter([duplicated])
+
+    result = translate_answer(
+        _two_claim_answer(), "hi", adapter, ModelRegistry(), _glossary()
+    )
+
+    assert result.unverified_summary == _two_claim_answer().unverified_summary
+    assert result.claims == _two_claim_answer().claims
 
 
 def test_answer_translation_never_touches_dropped_claims_or_the_answerable_flag() -> (

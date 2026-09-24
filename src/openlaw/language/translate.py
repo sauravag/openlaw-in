@@ -7,11 +7,27 @@ out of English only after the citation validator has run
 finished by the time `translate_answer` is ever called, translation cannot
 introduce an unverified citation or change which sources an answer cites:
 `chunk_ids` and `source_url`s are copied onto the result verbatim and are
-never sent through the model as translatable prose, `sources` is passed
-through untouched, and a translator that returns the wrong number of claims
-(so its output cannot be aligned back to the original `chunk_ids`) is
-rejected outright in favour of the English answer -- see
-`test_claim_count_mismatch_falls_back_to_english`.
+never sent through the model as translatable prose, and `sources` is passed
+through untouched.
+
+**Claims are reassembled by identity, not position.** Each claim is sent to
+the translator tagged with a stable `id` (its index into `answer.claims`),
+and the translator is required to echo that same `id` back with its
+translated text. Reassembly looks up each original claim's `chunk_ids` by
+that `id`, never by the position of the item in the response array. A
+translator that reorders claims in its response is therefore handled
+correctly -- translated text still lands on the `chunk_ids` of the claim it
+was actually given, not on whichever claim happens to occupy that slot in
+the reply. Binding on position alone (matching purely by count, so index 0
+of the response paired with index 0 of the request regardless of content)
+would let a reordering translator silently attach a translated statement to
+citations that do not support it -- the same failure the citation validator
+exists to prevent, arriving through a different door. If the response is
+missing an `id`, invents one that was never sent, or duplicates one, the
+whole translation is rejected in favour of the English answer -- see
+`test_reordered_claims_reassemble_onto_their_own_chunk_ids`,
+`test_missing_claim_id_falls_back_to_english`, and
+`test_invented_claim_id_falls_back_to_english`.
 
 **Binding correction to query-translation gating (overrides the original
 task brief).** The brief gated `translate_query` on the caller-supplied
@@ -72,12 +88,15 @@ Rules:
 - Translate the meaning, not word by word. The reader must be able to act on it.
 - Keep statute names, section numbers, and case citations in English.
 - Never invent, add, or remove any legal content.
-- Return exactly the same number of claims you were given, in the same order.
+- Each claim you are given carries an "id". Return every claim, each paired \
+with its exact original "id" and its translated "text". Do not add, drop, \
+duplicate, renumber, or invent an "id" -- copy each one exactly as given. \
+You may return claims in any order.
 
 {glossary}
 
 Return only a JSON object of the form:
-{{"summary": "...", "claims": ["...", "..."]}}"""
+{{"summary": "...", "claims": [{{"id": 0, "text": "..."}}, ...]}}"""
 
 
 def translate_query(
@@ -109,22 +128,36 @@ def translate_query(
 
 
 def _parse_translation(
-    payload: str, expected_claims: int
-) -> tuple[str, list[str]] | None:
-    """Return `(summary, claim_texts)` parsed from `payload`, or None on any
-    failure -- malformed JSON, missing keys, wrong types, or a claim count
-    that does not match `expected_claims` and so cannot be aligned back to
-    the original claims' `chunk_ids`."""
+    payload: str, expected_ids: frozenset[int]
+) -> tuple[str, dict[int, str]] | None:
+    """Return `(summary, text_by_id)` parsed from `payload`, or None on any
+    failure.
+
+    Every claim in the response must carry an `id` from `expected_ids`, and
+    every id in `expected_ids` must appear exactly once -- a missing id, an
+    id that was never sent (invented), or a duplicate id all fail the parse.
+    This is what lets the caller reassemble translated text by identity
+    rather than by position: `text_by_id` can be looked up by each original
+    claim's own id regardless of what order the response listed claims in.
+    """
     try:
         translated = json.loads(payload)
         summary = str(translated["summary"])
-        claim_texts = [str(text) for text in translated["claims"]]
+        seen_ids: list[int] = []
+        text_by_id: dict[int, str] = {}
+        for item in translated["claims"]:
+            claim_id = int(item["id"])
+            seen_ids.append(claim_id)
+            text_by_id[claim_id] = str(item["text"])
     except (TypeError, KeyError, ValueError):
         return None
 
-    if len(claim_texts) != expected_claims:
-        return None
-    return summary, claim_texts
+    if len(seen_ids) != len(set(seen_ids)):
+        return None  # a duplicated id -- cannot say which text is authoritative
+    if set(seen_ids) != expected_ids:
+        return None  # a missing or invented id -- cannot fully reassemble
+
+    return summary, text_by_id
 
 
 def translate_answer(
@@ -141,10 +174,15 @@ def translate_answer(
     every `source_url`), `dropped` and `is_answerable` are copied onto the
     result verbatim -- translation runs strictly after validation
     (`openlaw.answers.validate.validate_answer`) and has no path to alter
-    which sources an answer cites. Any failure -- a refusal, malformed JSON,
-    or a claim count that cannot be aligned back to the original claims --
-    returns the English `answer` unchanged: a mangled translation is worse
-    than none.
+    which sources an answer cites.
+
+    Each claim is tagged with a stable `id` (its index into `answer.claims`)
+    and reassembled by that id, not by its position in the response -- see
+    the module docstring for why binding by position alone would let a
+    reordering translator attach translated text to the wrong `chunk_ids`.
+    Any failure -- a refusal, malformed JSON, or a response whose ids don't
+    exactly match the ids sent (missing, invented, or duplicated) -- returns
+    the English `answer` unchanged: a mangled translation is worse than none.
 
     A no-op when `language` is English or the answer has no claims (an
     unanswerable result carries no claims and a `None` summary, so there is
@@ -160,7 +198,10 @@ def translate_answer(
     payload = json.dumps(
         {
             "summary": answer.unverified_summary or "",
-            "claims": [claim.text for claim in answer.claims],
+            "claims": [
+                {"id": index, "text": claim.text}
+                for index, claim in enumerate(answer.claims)
+            ],
         },
         ensure_ascii=False,
     )
@@ -173,16 +214,17 @@ def translate_answer(
         max_tokens=MAX_TRANSLATION_TOKENS,
     )
 
-    parsed = _parse_translation(completion.text, len(answer.claims))
+    expected_ids = frozenset(range(len(answer.claims)))
+    parsed = _parse_translation(completion.text, expected_ids)
     if parsed is None:
         return answer
-    summary, claim_texts = parsed
+    summary, text_by_id = parsed
 
     return ValidatedAnswer(
         unverified_summary=summary,
         claims=tuple(
-            Claim(text=text, chunk_ids=claim.chunk_ids)
-            for text, claim in zip(claim_texts, answer.claims, strict=True)
+            Claim(text=text_by_id[index], chunk_ids=claim.chunk_ids)
+            for index, claim in enumerate(answer.claims)
         ),
         sources=answer.sources,
         dropped=answer.dropped,
