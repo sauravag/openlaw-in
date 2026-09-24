@@ -39,6 +39,7 @@ from collections.abc import Callable
 import httpx
 from fastapi import FastAPI
 from pydantic import ValidationError
+from pydantic_settings.exceptions import SettingsError
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.models import ModelRegistry
@@ -239,29 +240,53 @@ def build_answer_fn(settings: Settings) -> Callable[..., LocalisedAnswer]:
     return answer_fn
 
 
+def _describe_validation_error(exc: ValidationError) -> str:
+    """Return a human-readable summary of every field `exc` failed on.
+
+    Missing fields are named as their `OPENLAW_*` environment variable
+    (matching every other setting's documented name); anything else (a
+    malformed value pydantic could not coerce -- e.g. non-JSON
+    `OPENLAW_TRUSTED_PROXY_IPS`) is named with its field and pydantic's own
+    message, since there is no single canonical "what to set it to" for an
+    arbitrary bad value the way there is for a simply-missing one.
+    """
+    parts = [
+        f"OPENLAW_{str(error['loc'][0]).upper()}"
+        if error["type"] == "missing"
+        else f"{error['loc'][0]} ({error['msg']})"
+        for error in exc.errors()
+    ]
+    return ", ".join(parts)
+
+
 def _require_settings() -> Settings:
     """Return validated settings, or fail fast with a readable message.
 
-    `get_settings()` raises `pydantic.ValidationError` on a missing required
-    field (`vaquill_root`, `kanoongpt_root`) -- a multi-line, library-internal
-    message that is right for a developer running tests and wrong for an
-    operator starting the service: nothing in it says which `OPENLAW_*`
-    environment variable to set. This re-raises as one `RuntimeError` naming
-    every missing setting's environment variable, stopping the service
-    before it binds a port -- never a stack trace, and never a service that
-    starts and only fails once a real user asks it a question.
+    `get_settings()` can raise two different exceptions on bad configuration,
+    neither of which is right to show an operator directly: a missing
+    required field (`vaquill_root`, `kanoongpt_root`) raises
+    `pydantic.ValidationError`, a multi-line, library-internal message that
+    never says which `OPENLAW_*` environment variable to set; a malformed
+    value for a JSON-typed field (e.g. `OPENLAW_TRUSTED_PROXY_IPS` not being
+    valid JSON) instead raises `pydantic_settings.exceptions.SettingsError`
+    (a `ValueError`, not a `ValidationError`) before pydantic ever gets to
+    validate it. Both are re-raised here as one readable `RuntimeError`,
+    stopping the service before it binds a port -- never a stack trace, and
+    never a service that starts and only fails once a real user asks it a
+    question.
     """
     try:
         return get_settings()
     except ValidationError as exc:
-        missing = ", ".join(
-            f"OPENLAW_{str(error['loc'][0]).upper()}"
-            for error in exc.errors()
-            if error["type"] == "missing"
-        )
         raise RuntimeError(
-            f"missing required configuration: {missing}. Copy .env.example "
-            "to .env and fill these in before starting the service."
+            f"missing or invalid configuration: {_describe_validation_error(exc)}. "
+            "Copy .env.example to .env and fill these in before starting the "
+            "service."
+        ) from exc
+    except SettingsError as exc:
+        raise RuntimeError(
+            f"invalid configuration: {exc}. Check .env.example for the "
+            "expected format of every OPENLAW_* setting."
         ) from exc
 
 

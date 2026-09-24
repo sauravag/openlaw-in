@@ -202,6 +202,26 @@ def test_production_app_fails_fast_with_a_readable_message_when_config_is_missin
         get_settings.cache_clear()
 
 
+def test_production_app_fails_fast_with_a_readable_message_for_malformed_json_config(
+    monkeypatch,
+) -> None:
+    """`OPENLAW_TRUSTED_PROXY_IPS` (a JSON-typed field) failing to parse
+    raises `pydantic_settings.exceptions.SettingsError`, not
+    `pydantic.ValidationError` -- a different exception type that must be
+    caught separately or it reaches the operator as a raw stack trace."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_TRUSTED_PROXY_IPS", "not-json")
+    get_settings.cache_clear()
+
+    try:
+        with pytest.raises(RuntimeError, match="invalid configuration"):
+            production_app()
+    finally:
+        monkeypatch.delenv("OPENLAW_TRUSTED_PROXY_IPS", raising=False)
+        get_settings.cache_clear()
+
+
 def test_build_search_fn_forwards_the_question_and_vector_to_search(
     monkeypatch,
 ) -> None:
