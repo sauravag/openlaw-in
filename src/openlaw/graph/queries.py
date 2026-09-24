@@ -106,8 +106,9 @@ def expand_chunks_cypher() -> str:
     source. Depth is fixed at two.
 
     **Which relationships it walks, and why not all of them.** The traversal
-    names `PART_OF|REFERENCES|INTERPRETS` rather than walking every edge type.
-    Two reasons, and both matter:
+    names `REFERENCES|INTERPRETS` rather than walking every edge type. Three
+    reasons now, not two — `PART_OF` was removed after Plan 3 Task 3's live
+    verification (see task-3-report.md, fix round 1):
 
     - *Cost.* `HAS_SUBJECT` leads to `LegalSubject`, which at full corpus
       scale includes a ~336,000-degree `general` node (62% of provisions carry
@@ -117,14 +118,28 @@ def expand_chunks_cypher() -> str:
       measurement was taken at ~0.4% of corpus with 12 LegalSubject nodes, so
       it could not see this; a re-measurement on a partial build already
       showed a 51ms maximum against a 100ms budget.
-    - *Value.* Nothing is lost. `LegalSubject` and `DefinedTerm` nodes are
-      filtered out of the results anyway — they are not retrievable sources —
-      so those hops could only ever contribute by reaching sibling Sections,
-      and "shares the tag `general`" is not a relationship worth surfacing.
+    - *Value (LegalSubject/DefinedTerm).* Nothing is lost by excluding them.
+      Those nodes are filtered out of the results anyway — they are not
+      retrievable sources — so those hops could only ever contribute by
+      reaching sibling Sections, and "shares the tag `general`" is not a
+      relationship worth surfacing.
+    - *Citability (PART_OF).* Every row this query returns becomes citable —
+      it is merged straight into the set a model may cite (see
+      `openlaw.retrieval.rerank.merge_chunks`). A sibling Section of the same
+      Act (`PART_OF`) is a structural fact ("these two provisions live in the
+      same statute"), not evidence that the sibling is relevant to whatever
+      the citizen asked. Measured on three live citizen questions, `PART_OF`
+      was 100% of what expansion returned (39 of 40 rows each time, the other
+      being the Act itself) and looked like it — arbitrary same-Act sections,
+      unordered, with no relevance signal. Removing it trades that noise for
+      the rarer but precise `INTERPRETS`/`REFERENCES` hits: a judgment that
+      actually interprets this section, or an Act this section actually
+      references. `PART_OF` is still available via `sections_for_act` for
+      any non-request-path listing of an Act's sections.
 
-    What remains is exactly the retrievable neighbourhood: the Act a Section
-    belongs to, the Acts it cites, that Act's other Sections, and the
-    Judgments interpreting it — the statute-to-case-law bridge.
+    What remains is exactly the higher-precision retrievable neighbourhood:
+    the Acts a Section references, that Act's other referencing Sections, and
+    the Judgments interpreting it — the statute-to-case-law bridge.
 
     **Stub exclusion.** `NOT related:Stub` excludes every placeholder by
     label. The per-label key checks that follow are redundant with it by
@@ -137,7 +152,7 @@ def expand_chunks_cypher() -> str:
     """
     return (
         "MATCH (s:Section) WHERE s.chunk_id IN $chunk_ids "
-        "MATCH (s)-[:PART_OF|REFERENCES|INTERPRETS*1..2]-(related) "
+        "MATCH (s)-[:REFERENCES|INTERPRETS*1..2]-(related) "
         "WHERE NOT related:Stub AND ( "
         "      (related:Section AND related.chunk_id IS NOT NULL) "
         "   OR (related:Act AND related.act_id IS NOT NULL) "

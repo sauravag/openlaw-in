@@ -101,9 +101,20 @@ def test_expand_chunks_cannot_traverse_the_legal_subject_supernode() -> None:
     DEFINES are therefore excluded from the traversal: both lead only to
     nodes this query filters out anyway, so nothing retrievable is lost."""
     statement = expand_chunks_cypher()
-    assert ":PART_OF|REFERENCES|INTERPRETS*1..2" in statement
+    assert ":REFERENCES|INTERPRETS*1..2" in statement
     assert "HAS_SUBJECT" not in statement
     assert "DEFINES" not in statement
+
+
+def test_expand_chunks_excludes_part_of() -> None:
+    """`PART_OF` (sibling sections of the same Act) was removed from
+    request-path expansion (Plan 3 Task 3, fix round 1): everything this
+    query returns becomes citable, and "lives in the same statute" is a
+    structural fact, not evidence of relevance to a citizen's question. Live
+    verification found PART_OF was 100% of what expansion returned and
+    looked like unranked noise. It stays available via `sections_for_act`
+    for non-request-path use."""
+    assert "PART_OF" not in expand_chunks_cypher()
 
 
 def test_judgments_interpreting_can_be_narrowed_to_one_act() -> None:
