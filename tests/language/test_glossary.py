@@ -6,6 +6,34 @@ import pytest
 from openlaw.language.detect import SUPPORTED_LANGUAGES
 from openlaw.language.glossary import Glossary, GlossaryTerm, load_glossary
 
+# Unicode block each language's script occupies, mirroring the ranges in
+# openlaw.language.detect.SCRIPT_RANGES. Marathi shares Devanagari with Hindi
+# and Assamese shares its script with Bengali, exactly as noted there.
+_SCRIPT_RANGE_FOR_LANGUAGE: dict[str, tuple[int, int]] = {
+    "hi": (0x0900, 0x097F),
+    "mr": (0x0900, 0x097F),
+    "bn": (0x0980, 0x09FF),
+    "as": (0x0980, 0x09FF),
+    "pa": (0x0A00, 0x0A7F),
+    "gu": (0x0A80, 0x0AFF),
+    "or": (0x0B00, 0x0B7F),
+    "ta": (0x0B80, 0x0BFF),
+    "te": (0x0C00, 0x0C7F),
+    "kn": (0x0C80, 0x0CFF),
+    "ml": (0x0D00, 0x0D7F),
+    "ur": (0x0600, 0x06FF),
+}
+
+
+def _is_neutral_character(character: str) -> bool:
+    """Return True for a character allowed in any translation regardless of script.
+
+    A translation may legitimately preserve an ASCII word, digit, or ordinary
+    punctuation (a hyphen, for instance), so those do not count as script
+    violations.
+    """
+    return ord(character) < 128 or character.isspace()
+
 
 def _glossary() -> Glossary:
     return Glossary(
@@ -115,6 +143,30 @@ def test_shipped_glossary_translations_only_use_supported_language_codes() -> No
     for entry in raw:
         for code in entry["translations"]:
             assert code in SUPPORTED_LANGUAGES
+
+
+def test_every_glossary_translation_uses_its_language_expected_script() -> None:
+    """A single stray codepoint from another Indic script renders as visibly
+    broken text to a native reader, yet it survives a visual read-through of a
+    JSON file. Catch it mechanically instead: every non-neutral character in a
+    translation must fall inside that language's Unicode script block."""
+    raw = json.loads(
+        Path("data/glossary/legal_terms.json").read_text(encoding="utf-8")
+    )
+    for entry in raw:
+        for code, text in entry["translations"].items():
+            script_range = _SCRIPT_RANGE_FOR_LANGUAGE.get(code)
+            if script_range is None:
+                continue
+            start, end = script_range
+            for character in text:
+                if _is_neutral_character(character):
+                    continue
+                assert start <= ord(character) <= end, (
+                    f"{entry['term']!r} translation for {code!r} contains "
+                    f"{character!r} (U+{ord(character):04X}), outside the "
+                    f"expected script for {code!r}"
+                )
 
 
 def test_glossary_terms_are_immutable() -> None:

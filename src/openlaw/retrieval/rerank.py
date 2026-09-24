@@ -69,9 +69,31 @@ flip, not just on the strength of a corpus-wide count:
    hop), so a `REFERENCES` hit is reliably precise rather than occasionally
    catastrophic.
 
-`ScoreReranker` and `AuthorityReranker` are unaffected by this default and
-stay fully in the request path — reranking what the retriever already found
-is independently useful regardless of whether expansion ever runs.
+**What the default actually costs, stated precisely.** Two earlier claims in
+this docstring were wrong and are corrected here:
+
+- `ScoreReranker` and `AuthorityReranker` do *not* "stay in the request
+  path": no `Reranker` is constructed anywhere in `src/` or `scripts/`
+  today — only in this module's tests. They are unaffected by the expansion
+  default in the sense that they never depended on it, and they remain
+  ready to use: wiring one in means constructing it and calling `rerank` on
+  `search()`'s output (`AuthorityReranker` additionally needs the PageRank
+  map from `openlaw.graph.algorithms`). Until a call site does that,
+  retrieval order is whatever `search()` returned.
+- Re-enabling expansion is *not* "flipping one setting". Setting
+  `graph_expansion_enabled=True` only opens the gate in
+  `openlaw.answers.generate.build_retrieval_context`; that gate also
+  requires an `expand_fn`, and a production `ExpandFn` must return resolved
+  `RetrievedChunk`s — real text, real `source_url`, since everything it
+  returns becomes citable. Nothing in this repository can produce those:
+  `openlaw.graph.queries.expand_chunks` returns bare `(id, label,
+  source_url)` rows with no chunk text, and the evaluation harness's
+  `openlaw.evaluation.retrieval_eval.ExpandFn` is an id-only callable — a
+  different type that happens to share the name. Re-enabling therefore
+  needs new code: a resolver that fetches each expanded id's real chunk
+  text (from Qdrant or the corpus) and builds `RetrievedChunk`s from it,
+  plus a call site that injects it. The setting is the last step, not the
+  only one.
 """
 
 from typing import Protocol

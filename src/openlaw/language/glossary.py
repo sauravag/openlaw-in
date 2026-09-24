@@ -13,7 +13,7 @@ law, and any translation shown alongside it is illustrative only.
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 DEFAULT_GLOSSARY_PATH = Path("data/glossary/legal_terms.json")
 
@@ -25,7 +25,7 @@ class GlossaryTerm(BaseModel):
 
     term: str
     preserve_english: bool
-    translations: dict[str, str] = {}
+    translations: dict[str, str] = Field(default_factory=dict)
 
 
 class Glossary:
