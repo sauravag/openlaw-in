@@ -61,8 +61,11 @@ now proceeds on the regex verdict alone (which, having reached the
 classifier step at all, was already "no crisis found") rather than
 declaring a crisis it has no evidence for. The failure is never silently
 swallowed, though: it is logged at `ERROR` (loud enough for an operator
-watching ordinary logs to notice) and returned as a `ClassifierFailureEvent`
-so a caller can persist it via `append_classifier_failure_events` — mirroring
+watching ordinary logs to notice) and returned as a `ClassifierFailureEvent`,
+which `openlaw.answers.generate.persist_answer_events` (called by
+`answer_question` on every turn) appends to
+`Settings.classifier_failure_log_path` via
+`append_classifier_failure_events` — mirroring
 `openlaw.answers.escalation.HallucinationEvent`'s "build now, persist later"
 shape, so that a silent, sustained outage is countable and discoverable
 after the fact even if nobody was watching the logs in the moment.
@@ -114,8 +117,13 @@ a real crisis is far worse than one unnecessary helpline."""
 
 _CRISIS_BY_VALUE: dict[str, CrisisKind] = {kind.value: kind for kind in CrisisKind}
 
-#: Small and cheap: the classifier's entire job is to pick one of five words.
-MAX_CLASSIFIER_TOKENS = 32
+#: The classifier only ever emits one short JSON object, but 32 tokens (the
+#: previous value) sat below the documented ~256 guidance for a
+#: classification call and left no headroom: a truncated response is
+#: unparseable, and `detect_crisis_with_classifier` reads an unparseable
+#: response as a failure -- i.e. as "no crisis". Cheap insurance against a
+#: silent miss on the one call path that routes a person in danger.
+MAX_CLASSIFIER_TOKENS = 256
 
 CRISIS_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",

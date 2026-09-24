@@ -10,6 +10,7 @@ import pytest
 
 import openlaw.answers.anthropic_client as anthropic_client_module
 from openlaw.answers.anthropic_client import FALLBACK_BETA, AnthropicAdapter
+from openlaw.answers.models import ModelRegistry, ModelRole
 from openlaw.config import get_settings
 
 
@@ -190,3 +191,94 @@ def test_adapter_completes_against_the_live_anthropic_api() -> None:
     )
 
     assert completion.text
+
+
+# --- per-role request shaping ----------------------------------------------
+#
+# The regression these cover: one unconditional request shape (adaptive
+# thinking + the Opus-tier refusal-fallback beta) was sent for every role,
+# including the CLASSIFIER role, whose default model is `claude-haiku-4-5`.
+# Haiku rejects all of it, so every crisis-classifier call raised in
+# production and the second layer of crisis routing was dead on arrival --
+# silently, because `detect_crisis_with_classifier` falls back to the regex
+# verdict. Nothing in the suite caught it: the only live test skips without
+# an API key. These assert the request SHAPE per role instead.
+
+
+def _capture_request(
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    output_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the request the adapter would send for `model`."""
+    response = SimpleNamespace(stop_reason="end_turn", content=[_text_block("ok")])
+    fake = _install_fake_client(monkeypatch, response)
+    adapter = AnthropicAdapter(api_key="k")
+
+    adapter.complete(model, "sys", [], output_schema, 256)
+
+    assert fake.messages.captured is not None
+    return fake.messages.captured
+
+
+@pytest.mark.parametrize("role", [ModelRole.CLASSIFIER, ModelRole.TRANSLATOR])
+def test_haiku_class_roles_send_no_thinking_no_betas_and_no_fallbacks(
+    monkeypatch: pytest.MonkeyPatch, role: ModelRole
+) -> None:
+    model = ModelRegistry().for_role(role)
+
+    request = _capture_request(monkeypatch, model)
+
+    assert model == "claude-haiku-4-5"
+    assert "thinking" not in request
+    assert "betas" not in request
+    assert "fallbacks" not in request
+
+
+@pytest.mark.parametrize("role", [ModelRole.CLASSIFIER, ModelRole.TRANSLATOR])
+def test_haiku_class_roles_never_send_output_config_effort(
+    monkeypatch: pytest.MonkeyPatch, role: ModelRole
+) -> None:
+    schema = {"type": "object", "properties": {"crisis": {"type": "string"}}}
+
+    request = _capture_request(monkeypatch, ModelRegistry().for_role(role), schema)
+
+    assert request["output_config"] == {
+        "format": {"type": "json_schema", "schema": schema}
+    }
+    assert "effort" not in request["output_config"]
+
+
+def test_the_generator_role_keeps_adaptive_thinking_and_the_fallback_beta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = ModelRegistry().for_role(ModelRole.GENERATOR)
+
+    request = _capture_request(monkeypatch, model)
+
+    assert model == "claude-opus-5"
+    assert request["thinking"] == {"type": "adaptive"}
+    assert request["betas"] == [FALLBACK_BETA]
+    assert request["fallbacks"] == "default"
+
+
+def test_every_role_still_sends_the_cache_breakpoint_and_the_bare_essentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for role in ModelRole:
+        request = _capture_request(monkeypatch, ModelRegistry().for_role(role))
+
+        assert request["system"][0]["cache_control"] == {"type": "ephemeral"}
+        assert request["max_tokens"] == 256
+        assert request["messages"] == []
+
+
+def test_an_unrecognised_model_gets_the_plain_shape_every_model_accepts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The capability check is an allowlist: an unknown model must not be
+    assumed to accept frontier-only parameters."""
+    request = _capture_request(monkeypatch, "some-future-cheap-model")
+
+    assert "thinking" not in request
+    assert "betas" not in request

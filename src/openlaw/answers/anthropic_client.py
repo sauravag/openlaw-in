@@ -1,13 +1,39 @@
 """Anthropic implementation of the LLM adapter.
 
-Details that are load-bearing on current models:
+**Request shaping is per-model, not one shape for all roles.** This module
+serves three roles (see `openlaw.answers.models.ModelRole`) that resolve to
+models of different tiers: the GENERATOR runs on an Opus-tier model, while
+the CLASSIFIER and TRANSLATOR default to `claude-haiku-4-5`. A single
+unconditional request shape cannot be correct for both — Haiku rejects
+adaptive thinking, rejects `output_config.effort`, and has no server-side
+refusal-fallback behaviour to enable. Sending the frontier shape to it made
+**every** crisis-classifier call raise in production, which
+`detect_crisis_with_classifier` then absorbed by falling back to the regex
+verdict: the entire second layer of crisis routing was dead on arrival, and
+silently so. A woman typing "मुझे मारता है" — Devanagari, which the regex
+cannot match — got a statutory citation instead of a helpline.
+
+`_supports_adaptive_thinking` is therefore an **allowlist** of model families
+known to accept the frontier parameters. An unrecognised model gets the plain
+shape, which every current model accepts; the failure direction of a wrong
+guess is then a slightly less capable request, not a 400 on every call.
+
+Other details that are load-bearing on current models:
 
 - Structured outputs use `output_config={"format": ...}`, not the deprecated
-  `output_format`.
-- Thinking is `{"type": "adaptive"}`; `budget_tokens` is rejected on Opus 5.
-- Assistant prefill returns a 400 and is not used — shape comes from the schema.
-- Server-side refusal fallbacks are enabled by default on Opus 5, and
-  `stop_reason == "refusal"` is checked before reading content.
+  `output_format`. `output_config.effort` is never sent: it errors on
+  Haiku-class models, and the default (`high`) is what the generator wants.
+- Adaptive thinking is `{"type": "adaptive"}` on Opus-tier models;
+  `budget_tokens` is rejected there. Haiku 4.5 is the inverse — it takes
+  `{"type": "enabled", "budget_tokens": N}` and rejects adaptive — but this
+  module sends no thinking parameter at all for it: the Haiku-role calls
+  here are a five-word classification and a translation, neither of which
+  needs reasoning tokens paid for on every question.
+- Assistant prefill returns a 400 and is not used — shape comes from the
+  schema.
+- Server-side refusal fallbacks are an Opus-5/Fable feature, enabled by
+  default for those models, and `stop_reason == "refusal"` is checked before
+  reading content.
 - Prompt caching: the system prompt carries the cache breakpoint; per-turn
   retrieved chunks live in `messages` after it, so they never invalidate it.
 """
@@ -19,6 +45,59 @@ from anthropic import Anthropic
 from openlaw.answers.models import Completion
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+#: Model-family prefixes that accept `thinking={"type": "adaptive"}` together
+#: with the server-side refusal-fallback beta. Deliberately an allowlist and
+#: deliberately prefix-based: it is a capability question ("is this a
+#: frontier-tier model?"), not an identity one, so a version bump inside a
+#: family needs no code change, while a new cheap family is treated as
+#: plain until someone verifies otherwise. See the module docstring.
+ADAPTIVE_THINKING_FAMILIES: tuple[str, ...] = (
+    "claude-opus-",
+    "claude-fable-",
+    "claude-mythos-",
+)
+
+
+def _supports_adaptive_thinking(model: str) -> bool:
+    """Return whether `model` accepts adaptive thinking and refusal fallbacks."""
+    return model.startswith(ADAPTIVE_THINKING_FAMILIES)
+
+
+def build_request(
+    model: str,
+    system: str,
+    messages: list[dict[str, Any]],
+    output_schema: dict[str, Any] | None,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Return the request body for `model`, shaped to what it accepts.
+
+    Everything every model accepts goes in unconditionally; the frontier-only
+    parameters are added only for the families in
+    `ADAPTIVE_THINKING_FAMILIES`. Returns a new dict — no argument is mutated.
+    """
+    request: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        "messages": messages,
+    }
+    if _supports_adaptive_thinking(model):
+        request["thinking"] = {"type": "adaptive"}
+        request["betas"] = [FALLBACK_BETA]
+        request["fallbacks"] = "default"
+    if output_schema is not None:
+        request["output_config"] = {
+            "format": {"type": "json_schema", "schema": output_schema}
+        }
+    return request
 
 
 class AnthropicAdapter:
@@ -35,28 +114,10 @@ class AnthropicAdapter:
         output_schema: dict[str, Any] | None,
         max_tokens: int,
     ) -> Completion:
-        """Return a completion, with caching, adaptive thinking and fallbacks."""
-        request: dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "system": [
-                {
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            "messages": messages,
-            "thinking": {"type": "adaptive"},
-            "betas": [FALLBACK_BETA],
-            "fallbacks": "default",
-        }
-        if output_schema is not None:
-            request["output_config"] = {
-                "format": {"type": "json_schema", "schema": output_schema}
-            }
-
-        response = self._client.beta.messages.create(**request)
+        """Return a completion, with caching and per-model request shaping."""
+        response = self._client.beta.messages.create(
+            **build_request(model, system, messages, output_schema, max_tokens)
+        )
 
         if response.stop_reason == "refusal":
             return Completion(text="", stop_reason="refusal")

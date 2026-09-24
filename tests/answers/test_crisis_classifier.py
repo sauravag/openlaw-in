@@ -19,6 +19,7 @@ import pytest
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.crisis_classifier import (
+    MAX_CLASSIFIER_TOKENS,
     ClassifierFailureEvent,
     append_classifier_failure_events,
     build_classifier_failure_event,
@@ -69,6 +70,19 @@ def test_classify_crisis_requests_structured_output() -> None:
     adapter = StubAdapter([_classifier_says(None)])
     classify_crisis("q", adapter, ModelRegistry())
     assert adapter.calls[0]["output_schema"] is not None
+
+
+def test_classify_crisis_asks_for_enough_tokens_to_answer() -> None:
+    """32 tokens was below the documented ~256 guidance for a classification
+    call and risked truncating the JSON response into an unparseable one --
+    which `detect_crisis_with_classifier` treats as a failure, i.e. no
+    crisis."""
+    adapter = StubAdapter([_classifier_says(None)])
+
+    classify_crisis("q", adapter, ModelRegistry())
+
+    assert adapter.calls[0]["max_tokens"] == MAX_CLASSIFIER_TOKENS
+    assert MAX_CLASSIFIER_TOKENS >= 256
 
 
 # --- classify_crisis: never guesses on a bad response ------------------------
