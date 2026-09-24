@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from openlaw.index.embed import EMBEDDING_DIMENSIONS
+from openlaw.index.qdrant_http import call_with_retry
 
 MIRROR_ROOT = "https://oss-data-in.vaquill.ai/qdrant"
 # Same 1024 dimensions as `EMBEDDING_DIMENSIONS` — imported, not duplicated, so the
@@ -67,14 +68,22 @@ def ensure_collection(spec: CollectionSpec, qdrant_url: str, client: httpx.Clien
 
     Idempotent and safe to re-run after an interrupted run: if the collection
     already exists (Qdrant returns 409), that is treated as success rather than
-    an error. Any other error status is raised.
+    an error. Any other error status is raised. Retries transient connection
+    failures (see `openlaw.index.qdrant_http`) -- this is the first Qdrant
+    call several build scripts make each run, so a stale pooled connection
+    from a previous process must not kill the run before it starts.
     """
-    response = client.put(
-        f"{qdrant_url}/collections/{spec.name}",
-        json=build_collection_payload(spec),
-    )
-    if response.status_code != COLLECTION_ALREADY_EXISTS:
-        response.raise_for_status()
+
+    def _create() -> httpx.Response:
+        response = client.put(
+            f"{qdrant_url}/collections/{spec.name}",
+            json=build_collection_payload(spec),
+        )
+        if response.status_code != COLLECTION_ALREADY_EXISTS:
+            response.raise_for_status()
+        return response
+
+    call_with_retry(_create, description=f"PUT collections/{spec.name}")
 
 
 def restore_collection(

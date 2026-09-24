@@ -231,3 +231,54 @@ def test_upsert_hc_points_raises_on_a_server_error() -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         upsert_hc_points(points, "http://qdrant.test", client)
+
+
+# --- Robustness against transient connection drops (idle-keepalive fix) -----
+#
+# A multi-hour build spends minutes per batch embedding between Qdrant calls,
+# so a pooled connection going stale and dying on the next write is expected,
+# not exceptional. `upsert_hc_points` must recover from it via
+# `openlaw.index.qdrant_http.call_with_retry`, and a genuine 4xx must still
+# fail on the first attempt -- never silently retried.
+
+
+class FlakyThenOkClient(FakeClient):
+    """A stub that drops the connection on the first PUT, then succeeds --
+    the exact shape of the incident this fix targets."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=200)
+        self.attempts = 0
+
+    def put(self, url: str, **kwargs: object) -> FakeResponse:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response"
+            )
+        return super().put(url, **kwargs)
+
+
+def test_upsert_hc_points_recovers_from_one_dropped_connection(monkeypatch) -> None:
+    """A transport failure followed by success must complete the batch, not
+    crash the build."""
+    monkeypatch.setattr("openlaw.index.qdrant_http.time.sleep", lambda seconds: None)
+    client = FlakyThenOkClient()
+    points = [build_hc_point(_chunk(), [0.1] * 1024, _sparse(), PDF_URL, headnote=None)]
+
+    upsert_hc_points(points, "http://qdrant.test", client)  # must not raise
+
+    assert client.attempts == 2
+    assert client.put_calls[0]["json"] == {"points": points}
+
+
+def test_upsert_hc_points_does_not_retry_a_bad_request() -> None:
+    """A malformed request (4xx) must fail loudly and immediately, never
+    disappear into a retry loop."""
+    client = FakeClient(status_code=400)
+    points = [build_hc_point(_chunk(), [0.1] * 1024, _sparse(), PDF_URL, headnote=None)]
+
+    with pytest.raises(httpx.HTTPStatusError):
+        upsert_hc_points(points, "http://qdrant.test", client)
+
+    assert len(client.put_calls) == 1

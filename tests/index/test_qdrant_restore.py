@@ -172,3 +172,43 @@ def test_ensure_collection_is_fine_on_a_fresh_create() -> None:
     ensure_collection(ACTS_INDIA, "http://qdrant.test", client)  # must not raise
 
     assert len(client.put_calls) == 1
+
+
+# --- Robustness against transient connection drops (idle-keepalive fix) -----
+
+
+class FlakyThenOkClient(FakeClient):
+    """Drops the connection on the first create-collection PUT, then
+    succeeds -- this is often the very first Qdrant call a build script
+    makes, so a stale connection left over from a previous process must not
+    kill the run before it starts."""
+
+    def __init__(self, create_status: int = 200) -> None:
+        super().__init__(create_status=create_status)
+        self.attempts = 0
+
+    def put(self, url: str, json: dict | None = None, timeout: float | None = None) -> FakeResponse:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response"
+            )
+        return super().put(url, json=json, timeout=timeout)
+
+
+def test_ensure_collection_recovers_from_one_dropped_connection(monkeypatch) -> None:
+    monkeypatch.setattr("openlaw.index.qdrant_http.time.sleep", lambda seconds: None)
+    client = FlakyThenOkClient(create_status=200)
+
+    ensure_collection(ACTS_INDIA, "http://qdrant.test", client)  # must not raise
+
+    assert client.attempts == 2
+
+
+def test_ensure_collection_does_not_retry_a_bad_request() -> None:
+    client = FakeClient(create_status=400)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        ensure_collection(ACTS_INDIA, "http://qdrant.test", client)
+
+    assert len(client.put_calls) == 1

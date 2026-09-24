@@ -26,8 +26,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import httpx
-
 from openlaw.config import get_settings
 from openlaw.corpus.filters import deduplicate, english_only
 from openlaw.corpus.join import build_metadata_index
@@ -39,6 +37,7 @@ from openlaw.index.embed import (
     VoyageEmbedder,
     batched_by_tokens,
 )
+from openlaw.index.qdrant_http import build_index_client
 from openlaw.index.qdrant_restore import CollectionSpec, ensure_collection
 from openlaw.index.upsert import SC_COLLECTION, build_point, upsert_points
 
@@ -139,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     indexed = 0
     unresolved = 0
 
-    with httpx.Client(timeout=120) as client:
+    with build_index_client(timeout=120) as client:
         spec = CollectionSpec(name=SC_COLLECTION, shards=1, mirror="")
         ensure_collection(spec, settings.qdrant_url, client)
 

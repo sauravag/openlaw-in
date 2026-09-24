@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 from openlaw.corpus.schema import JudgmentChunk
+from openlaw.index.qdrant_http import call_with_retry
 from openlaw.index.qdrant_restore import (
     COLLECTION_ALREADY_EXISTS,
     CollectionSpec,
@@ -51,14 +52,21 @@ def ensure_hc_collection(qdrant_url: str, client: httpx.Client) -> None:
     """Create the shared HC collection, tolerating 409 when it already exists.
 
     Idempotent and safe to re-run after an interrupted build, mirroring
-    `openlaw.index.qdrant_restore.ensure_collection`.
+    `openlaw.index.qdrant_restore.ensure_collection`. Retries transient
+    connection failures (see `openlaw.index.qdrant_http`) since this is
+    also the first Qdrant call `scripts/build_hc_index.py` makes each run.
     """
-    response = client.put(
-        f"{qdrant_url}/collections/{HC_COLLECTION}",
-        json=build_hc_collection_payload(),
-    )
-    if response.status_code != COLLECTION_ALREADY_EXISTS:
-        response.raise_for_status()
+
+    def _create() -> httpx.Response:
+        response = client.put(
+            f"{qdrant_url}/collections/{HC_COLLECTION}",
+            json=build_hc_collection_payload(),
+        )
+        if response.status_code != COLLECTION_ALREADY_EXISTS:
+            response.raise_for_status()
+        return response
+
+    call_with_retry(_create, description=f"PUT collections/{HC_COLLECTION}")
 
 
 def delete_hc_court_points(court_code: str, qdrant_url: str, client: httpx.Client) -> None:
@@ -78,15 +86,21 @@ def delete_hc_court_points(court_code: str, qdrant_url: str, client: httpx.Clien
     since it sits in the wrong region of vector space); scoping the delete to
     `court_code` prevents that same hazard from also destroying every OTHER
     court's already-indexed points, which a whole-collection delete would.
+    Retries transient connection failures (see `openlaw.index.qdrant_http`).
     """
-    response = client.post(
-        f"{qdrant_url}/collections/{HC_COLLECTION}/points/delete",
-        params={"wait": "true"},
-        json={"filter": {"must": [{"key": "court_code", "match": {"value": court_code}}]}},
-        timeout=120,
-    )
-    if response.status_code != COLLECTION_NOT_FOUND:
-        response.raise_for_status()
+
+    def _delete() -> httpx.Response:
+        response = client.post(
+            f"{qdrant_url}/collections/{HC_COLLECTION}/points/delete",
+            params={"wait": "true"},
+            json={"filter": {"must": [{"key": "court_code", "match": {"value": court_code}}]}},
+            timeout=120,
+        )
+        if response.status_code != COLLECTION_NOT_FOUND:
+            response.raise_for_status()
+        return response
+
+    call_with_retry(_delete, description=f"POST collections/{HC_COLLECTION}/points/delete")
 
 
 def build_hc_point(
@@ -133,11 +147,24 @@ def upsert_hc_points(
 
     Sent with `wait=true` so the call does not return until Qdrant has
     actually applied the upsert -- see `openlaw.index.upsert.upsert_points`,
-    which this mirrors.
+    which this mirrors. Retries transient connection failures (see
+    `openlaw.index.qdrant_http`) rather than letting an idle-connection
+    drop during this multi-hour build kill the whole run: point IDs are
+    deterministic (`openlaw.index.upsert.point_id`), so a retried upsert
+    writes the same points again rather than duplicating them.
     """
-    client.put(
-        f"{qdrant_url}/collections/{HC_COLLECTION}/points",
-        params={"wait": "true"},
-        json={"points": points},
-        timeout=120,
-    ).raise_for_status()
+
+    def _upsert() -> httpx.Response:
+        response = client.put(
+            f"{qdrant_url}/collections/{HC_COLLECTION}/points",
+            params={"wait": "true"},
+            json={"points": points},
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response
+
+    call_with_retry(
+        _upsert,
+        description=f"PUT collections/{HC_COLLECTION}/points ({len(points)} points)",
+    )

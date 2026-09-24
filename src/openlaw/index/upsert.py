@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from openlaw.corpus.schema import JudgmentChunk
+from openlaw.index.qdrant_http import call_with_retry
 
 SC_COLLECTION = "sc_judgments_v1"
 _ID_NAMESPACE = uuid.UUID("6f1c9d2e-0a3b-4c5d-8e7f-1a2b3c4d5e6f")
@@ -63,11 +64,24 @@ def upsert_points(
     Sent with `wait=true` so the call does not return until Qdrant has actually
     applied the upsert — otherwise Qdrant defaults to `wait=false`, and a
     driver's own "done" progress line (or a validation run started right after)
-    could observe the collection before this write lands.
+    could observe the collection before this write lands. Retries transient
+    connection failures (see `openlaw.index.qdrant_http`) rather than letting
+    an idle-connection drop during this multi-hour build kill the whole run:
+    point IDs are deterministic (`point_id`), so a retried upsert writes the
+    same points again rather than duplicating them.
     """
-    client.put(
-        f"{qdrant_url}/collections/{SC_COLLECTION}/points",
-        params={"wait": "true"},
-        json={"points": points},
-        timeout=120,
-    ).raise_for_status()
+
+    def _upsert() -> httpx.Response:
+        response = client.put(
+            f"{qdrant_url}/collections/{SC_COLLECTION}/points",
+            params={"wait": "true"},
+            json={"points": points},
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response
+
+    call_with_retry(
+        _upsert,
+        description=f"PUT collections/{SC_COLLECTION}/points ({len(points)} points)",
+    )

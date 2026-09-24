@@ -136,3 +136,52 @@ def test_upsert_points_raises_on_a_server_error() -> None:
             "http://qdrant.test",
             FailingClient(),
         )
+
+
+# --- Robustness against transient connection drops (idle-keepalive fix) -----
+
+
+class FlakyThenOkClient(FakeClient):
+    """Drops the connection on the first PUT, then succeeds -- the shape of
+    an idle pooled connection dying on the next write mid-build."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def put(self, url: str, **kwargs: object) -> FakeResponse:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise httpx.RemoteProtocolError(
+                "Server disconnected without sending a response"
+            )
+        return super().put(url, **kwargs)
+
+
+def test_upsert_points_recovers_from_one_dropped_connection(monkeypatch) -> None:
+    """A transport failure followed by success must complete the batch."""
+    monkeypatch.setattr("openlaw.index.qdrant_http.time.sleep", lambda seconds: None)
+    client = FlakyThenOkClient()
+    points = [build_point(_chunk(), [0.1] * 1024, PDF_URL, headnote=None)]
+
+    upsert_points(points, "http://qdrant.test", client)  # must not raise
+
+    assert client.attempts == 2
+    assert client.put_calls[0]["json"] == {"points": points}
+
+
+def test_upsert_points_does_not_retry_a_bad_request() -> None:
+    class RejectingClient(FakeClient):
+        def put(self, url: str, **kwargs: object) -> FakeResponse:
+            super().put(url, **kwargs)
+            return FakeResponse(400)
+
+    client = RejectingClient()
+    with pytest.raises(httpx.HTTPStatusError):
+        upsert_points(
+            [build_point(_chunk(), [0.1] * 1024, PDF_URL, headnote=None)],
+            "http://qdrant.test",
+            client,
+        )
+
+    assert len(client.put_calls) == 1

@@ -32,6 +32,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from openlaw.config import get_settings  # noqa: E402
+from openlaw.index.qdrant_http import build_index_client, call_with_retry  # noqa: E402
 from openlaw.index.qdrant_restore import CollectionSpec, build_collection_payload  # noqa: E402
 from openlaw.index.sparse import (  # noqa: E402
     SPARSE_VECTOR_NAME,
@@ -67,10 +68,17 @@ def scroll(
     }
     if offset is not None:
         body["offset"] = offset
-    response = client.post(
-        f"{qdrant_url}/collections/{collection}/points/scroll", json=body
+
+    def _scroll() -> httpx.Response:
+        response = client.post(
+            f"{qdrant_url}/collections/{collection}/points/scroll", json=body
+        )
+        response.raise_for_status()
+        return response
+
+    response = call_with_retry(
+        _scroll, description=f"POST collections/{collection}/points/scroll"
     )
-    response.raise_for_status()
     result = response.json()["result"]
     return result["points"], result.get("next_page_offset")
 
@@ -88,16 +96,23 @@ def measure_average_length(
     texts: list[str] = []
     per_collection = max(SAMPLE_SIZE // max(len(collections), 1), 1)
     for collection in collections:
-        response = client.post(
-            f"{qdrant_url}/collections/{collection}/points/query",
-            json={
-                "query": {"sample": "random"},
-                "limit": per_collection,
-                "with_payload": ["text"],
-                "with_vector": False,
-            },
+
+        def _sample(collection: str = collection) -> httpx.Response:
+            response = client.post(
+                f"{qdrant_url}/collections/{collection}/points/query",
+                json={
+                    "query": {"sample": "random"},
+                    "limit": per_collection,
+                    "with_payload": ["text"],
+                    "with_vector": False,
+                },
+            )
+            response.raise_for_status()
+            return response
+
+        response = call_with_retry(
+            _sample, description=f"POST collections/{collection}/points/query"
         )
-        response.raise_for_status()
         for point in response.json()["result"]["points"]:
             text = (point.get("payload") or {}).get("text")
             if text:
@@ -111,11 +126,16 @@ def set_idf_modifier(client: httpx.Client, qdrant_url: str, collection: str) -> 
     Stored values carry only BM25's term-frequency part; Qdrant supplies IDF from
     real collection statistics. Verified to work on an existing collection.
     """
-    response = client.patch(
-        f"{qdrant_url}/collections/{collection}",
-        json={"sparse_vectors": {SPARSE_VECTOR_NAME: {"modifier": "idf"}}},
-    )
-    response.raise_for_status()
+
+    def _patch() -> httpx.Response:
+        response = client.patch(
+            f"{qdrant_url}/collections/{collection}",
+            json={"sparse_vectors": {SPARSE_VECTOR_NAME: {"modifier": "idf"}}},
+        )
+        response.raise_for_status()
+        return response
+
+    call_with_retry(_patch, description=f"PATCH collections/{collection}")
 
 
 def read_checkpoint(collection: str) -> dict[str, Any] | None:
@@ -173,11 +193,18 @@ def rebuild_in_place(
             }
             for point in points
         ]
-        response = client.put(
-            f"{qdrant_url}/collections/{collection}/points/vectors?wait=true",
-            json={"points": updates},
+
+        def _write(collection: str = collection, updates: list = updates) -> httpx.Response:
+            response = client.put(
+                f"{qdrant_url}/collections/{collection}/points/vectors?wait=true",
+                json={"points": updates},
+            )
+            response.raise_for_status()
+            return response
+
+        call_with_retry(
+            _write, description=f"PUT collections/{collection}/points/vectors"
         )
-        response.raise_for_status()
 
         written += len(updates)
         offset = next_offset
@@ -200,9 +227,14 @@ def rebuild_into_copy(
     spec = CollectionSpec(name=ACTS_TARGET, shards=2, mirror="")
     payload = build_collection_payload(spec)
     payload["sparse_vectors"] = {SPARSE_VECTOR_NAME: {"modifier": "idf"}}
-    created = client.put(f"{qdrant_url}/collections/{ACTS_TARGET}", json=payload)
-    if created.status_code != COLLECTION_ALREADY_EXISTS:
-        created.raise_for_status()
+
+    def _create() -> httpx.Response:
+        created = client.put(f"{qdrant_url}/collections/{ACTS_TARGET}", json=payload)
+        if created.status_code != COLLECTION_ALREADY_EXISTS:
+            created.raise_for_status()
+        return created
+
+    call_with_retry(_create, description=f"PUT collections/{ACTS_TARGET}")
 
     checkpoint = read_checkpoint(ACTS_TARGET)
     offset = checkpoint["offset"] if checkpoint else None
@@ -235,11 +267,16 @@ def rebuild_into_copy(
             )
 
         if batch:
-            response = client.put(
-                f"{qdrant_url}/collections/{ACTS_TARGET}/points?wait=true",
-                json={"points": batch},
-            )
-            response.raise_for_status()
+
+            def _write(batch: list = batch) -> httpx.Response:
+                response = client.put(
+                    f"{qdrant_url}/collections/{ACTS_TARGET}/points?wait=true",
+                    json={"points": batch},
+                )
+                response.raise_for_status()
+                return response
+
+            call_with_retry(_write, description=f"PUT collections/{ACTS_TARGET}/points")
             copied += len(batch)
 
         offset = next_offset
@@ -270,7 +307,7 @@ def main() -> int:
         print("[Sparse] --restart: clearing checkpoint")
         CHECKPOINT_PATH.unlink()
 
-    with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+    with build_index_client(timeout=REQUEST_TIMEOUT) as client:
         avg_len = measure_average_length(
             client, settings.qdrant_url, [ACTS_SOURCE, SC_COLLECTION]
         )

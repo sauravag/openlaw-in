@@ -81,6 +81,7 @@ from openlaw.index.hc_upsert import (
     ensure_hc_collection,
     upsert_hc_points,
 )
+from openlaw.index.qdrant_http import build_index_client
 from openlaw.index.sparse import average_token_count, bm25_vector
 from openlaw.retrieval.local_nano import NANO_MODEL_ID, LocalNanoDocumentEmbedder
 
@@ -312,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     unresolved = 0
     started_at = time.monotonic()
 
-    with httpx.Client(timeout=120) as client:
+    with build_index_client(timeout=120) as client:
         metadata_index, avg_len, chunks, resume_count = _prepare_indexing(
             args, settings, court, checkpoint_path, client
         )
