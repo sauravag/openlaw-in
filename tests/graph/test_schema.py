@@ -1,4 +1,5 @@
 import neo4j
+import pytest
 
 from openlaw.graph.schema import CONSTRAINTS, INDEXES, apply_schema
 
@@ -39,6 +40,7 @@ def test_pagerank_is_indexed_for_authority_ordering() -> None:
     assert "pagerank" in " ".join(INDEXES)
 
 
+@pytest.mark.integration
 def test_apply_schema_is_safe_to_rerun_against_live_neo4j(
     live_driver: neo4j.Driver,
 ) -> None:

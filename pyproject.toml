@@ -25,6 +25,9 @@ packages = ["src/openlaw"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=openlaw --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    "integration: requires a live Neo4j container (skips cleanly if unreachable)",
+]
 
 [tool.coverage.run]
 omit = ["scripts/*"]

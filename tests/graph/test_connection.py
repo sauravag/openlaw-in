@@ -50,6 +50,7 @@ def test_graph_driver_closes_the_driver_even_on_error(monkeypatch) -> None:
     mock_driver.close.assert_called_once()
 
 
+@pytest.mark.integration
 def test_graph_driver_connects_to_a_live_neo4j(live_driver: neo4j.Driver) -> None:
     """Smoke test against the running container; skips if unreachable."""
     live_driver.verify_connectivity()
