@@ -12,6 +12,7 @@ dependencies = [
     "neo4j>=5.26",
     "numpy>=2.0",
     "anthropic>=0.69",
+    "langdetect>=1.0.9",
 ]
 
 [project.optional-dependencies]
