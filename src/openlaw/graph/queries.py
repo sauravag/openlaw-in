@@ -48,15 +48,17 @@ def judgments_interpreting_cypher() -> str:
     not an identifier — every act has a section 2 — so matching on
     `section_number` alone returns judgments interpreting section 302 of *any*
     act, including the placeholder created when a judgment named a section
-    without naming its statute. Passing `act_id` narrows the match to the one
-    statute the caller means; passing None keeps the old, broader behaviour
-    for callers that genuinely have nothing better, and such a caller must
-    treat the result as a candidate list rather than an answer.
+    without naming its statute. `NOT s:Stub` removes that placeholder case
+    outright — a judgment reaching section 302 only through a placeholder has
+    not been shown to interpret any particular act's section 302. Passing
+    `act_id` narrows the match further, to the one statute the caller means;
+    passing None still matches the number across every act, and such a caller
+    must treat the result as a candidate list rather than an answer.
     """
     return (
         "MATCH (j:Judgment)-[:INTERPRETS]->"
         "(s:Section {section_number: $section_number}) "
-        "WHERE j.case_id IS NOT NULL "
+        "WHERE j.case_id IS NOT NULL AND NOT s:Stub "
         "  AND ($act_id IS NULL OR s.act_id = $act_id) "
         "RETURN DISTINCT j.case_id AS case_id, j.court_code AS court_code, "
         "j.decision_year AS decision_year, j.pagerank AS pagerank "

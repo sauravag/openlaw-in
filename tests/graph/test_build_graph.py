@@ -290,6 +290,24 @@ def _run_edges_phase(state, checkpoint_path, settings, limit=None):  # noqa: ANN
     )
 
 
+def test_a_checkpoint_from_before_the_phase_split_resumes_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An on-disk checkpoint written with the old single `provision_files_done`
+    key carries the same corpus_version, so `load_state` accepts it — and the
+    phase must not then KeyError on a key that checkpoint never had."""
+    _record_calls(monkeypatch)
+    legacy = {
+        "corpus_version": CORPUS_VERSION,
+        "judgments_loaded": False,
+        "provision_files_done": ["in_central_legislation.parquet"],
+    }
+
+    _run_nodes_phase(legacy, tmp_path / "checkpoint.json", _settings(_FIXTURE_DIR))
+
+    assert legacy["provision_node_files_done"] == ["in_central_legislation.parquet"]
+
+
 def test_provision_nodes_phase_skips_files_already_recorded_as_done(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

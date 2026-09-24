@@ -364,3 +364,10 @@ def test_precedent_lineage_hops_stay_within_the_requested_depth(
         assert row["is_stub"] == (row["case_id"] is None)
         if row["is_stub"]:
             assert row["join_key"] is not None
+
+
+def test_judgments_interpreting_excludes_placeholder_sections() -> None:
+    """With no act_id, matching on the bare number would otherwise count the
+    placeholder created when a judgment named a section without its statute —
+    which is precisely the case where the act is unknown."""
+    assert "NOT s:Stub" in judgments_interpreting_cypher()

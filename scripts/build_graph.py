@@ -261,7 +261,13 @@ def run_provision_phase(
     Checkpointed per file: each file's rows are read, merged, and recorded as
     done before the next, so an interrupted run resumes at the next unfinished
     file instead of restarting.
+
+    `setdefault` is what lets a checkpoint written before the provision phases
+    were split (one `provision_files_done` key) resume instead of raising
+    KeyError. It resumes as if no provision work were done, which is safe:
+    every write is MERGE.
     """
+    state.setdefault(done_key, [])
     remaining = limit
     for path in provision_paths(settings):
         if path.name in state[done_key]:

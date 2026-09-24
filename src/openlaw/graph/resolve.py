@@ -21,8 +21,11 @@ matching, no edit distance. It resolves a title two ways, in order:
 
 1. exact match on the normalised full title (`"companies act 1956"`);
 2. exact match on the title with its trailing year removed
-   (`"bihar land reforms act"`), for judgment text that names an act without
-   its year.
+   (`"bihar land reforms act"`) — **only when the reference itself states no
+   year**, since a stated year is a constraint rather than a hint. Resolving
+   "the Companies Act, 1913" onto the 2013 Act because the catalogue lacks the
+   1913 one would assert a false legal connection, and repealed predecessors
+   are exactly what judgments cite.
 
 Either match must be *unambiguous* or it is refused. The one tie-break
 applied is jurisdiction: when several acts share a title and exactly one of
@@ -152,13 +155,28 @@ class ActIndex:
     def act_id_for(self, title: str | None) -> str | None:
         """Return the `act_id` `title` unambiguously names, or None.
 
-        Tries the full normalised title first, then the year-less stem. None
-        means "do not guess" — the caller must fall back to a stub.
+        Tries the full normalised title first. The year-less stem is a
+        fallback **only when the reference states no year** — a stated year is
+        a constraint, not a hint. Indian judgments cite repealed predecessors
+        by year constantly ("the Companies Act, 1913", "the Code of Criminal
+        Procedure, 1898"), and a modern catalogue holds the successor but not
+        the predecessor. Stemming such a reference would resolve it onto the
+        successor: a different statute, with different section numbering. That
+        is worse than a stub — a stub says "we do not have it", this would say
+        something false.
+
+        None means "do not guess"; the caller falls back to a stub.
         """
         key = normalise_act_title(title)
         if not key:
             return None
-        return self.by_key.get(key) or self.by_stem.get(act_title_stem(key))
+        exact = self.by_key.get(key)
+        if exact is not None:
+            return exact
+        stem = act_title_stem(key)
+        if stem != key:
+            return None  # the reference named a year, and no act carries it
+        return self.by_stem.get(stem)
 
 
 EMPTY_ACT_INDEX = ActIndex(by_key=MappingProxyType({}), by_stem=MappingProxyType({}))

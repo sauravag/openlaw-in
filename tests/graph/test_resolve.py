@@ -199,3 +199,48 @@ def test_load_act_index_resolves_an_act_that_is_actually_in_the_graph(
             session.run(
                 "MATCH (a:Act {act_id: 'TEST_RESOLVE_ACT'}) DETACH DELETE a"
             )
+
+
+# --- a stated year is a constraint, not a hint --------------------------------
+
+_SUCCESSOR_ONLY = ActIndex.from_records(
+    [
+        ("IND_central_20", "The Companies Act, 2013", _CENTRAL),
+        ("IND_central_21", "The Code of Criminal Procedure, 1973", _CENTRAL),
+        ("IND_central_22", "The Negotiable Instruments Act, 1881", _CENTRAL),
+    ]
+)
+
+
+def test_a_repealed_act_cited_by_year_does_not_resolve_to_its_successor() -> None:
+    """Indian judgments cite repealed predecessors by year constantly, and a
+    modern catalogue holds only the successor. Falling back to the year-less
+    stem would link a judgment about the 1913 Act to the 2013 Act — worse than
+    a stub, because a stub says "we don't have it" and this says something
+    false."""
+    assert _SUCCESSOR_ONLY.act_id_for("Companies Act, 1913") is None
+
+
+def test_the_old_criminal_procedure_code_does_not_resolve_to_the_new_one() -> None:
+    """The 1898 Code and the 1973 Code are different statutes with different
+    section numbering; conflating them misstates the law."""
+    assert _SUCCESSOR_ONLY.act_id_for("Code of Criminal Procedure, 1898") is None
+
+
+def test_a_matching_year_still_resolves_exactly() -> None:
+    assert _SUCCESSOR_ONLY.act_id_for("Companies Act, 2013") == "IND_central_20"
+
+
+def test_a_year_less_reference_still_uses_the_stem_fallback() -> None:
+    """Judgment text names "the Negotiable Instruments Act" with no year. That
+    states no year to contradict, so the unambiguous stem match stands."""
+    assert _SUCCESSOR_ONLY.act_id_for("Negotiable Instruments Act") == (
+        "IND_central_22"
+    )
+
+
+def test_a_bare_year_is_not_treated_as_a_year_qualified_title() -> None:
+    """Stripping the year from "1881" would leave nothing, so it is the whole
+    title, not a qualifier — the stem path must still be reachable."""
+    index = ActIndex.from_records([("IND_central_23", "1881", _CENTRAL)])
+    assert index.act_id_for("1881") == "IND_central_23"
