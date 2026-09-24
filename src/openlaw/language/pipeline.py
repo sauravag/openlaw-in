@@ -144,6 +144,18 @@ class LocalisedAnswer(BaseModel):
     `is_answerable` is False, and the only content ever safe to render is
     `claims` and `sources` -- see the module docstring.
 
+    `english_answer` is the SAME validated answer, before `translate_answer`
+    ever touched it -- the exact object `_generate_from_context` returned.
+    It exists for exactly one consumer: `scripts/review_translations.py`,
+    where a native-speaker reviewer must be able to see the untranslated
+    English answer next to the translated one to judge whether the legal
+    meaning survived translation -- neither the original question nor the
+    translated answer alone is enough for that judgement. It carries the
+    same "only `claims` and `sources` are safe to render" rule as `answer`.
+    For a crisis short-circuit (no generation ever ran) and for an English
+    question (`translate_answer` is a no-op there), `english_answer` and
+    `answer` are equal.
+
     `classifier_failures` carries any `ClassifierFailureEvent` recorded by
     the original-text crisis check (see the module docstring for why the
     second, translated-text check can never itself produce one). It is
@@ -156,6 +168,7 @@ class LocalisedAnswer(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     answer: ValidatedAnswer
+    english_answer: ValidatedAnswer
     language: str
     english_query: str
     crisis: CrisisKind | None = None
@@ -193,6 +206,7 @@ def _crisis_answer(
     footer = f"{crisis_response(crisis)}\n\n{escalation_footer(state)}"
     return LocalisedAnswer(
         answer=_UNANSWERABLE,
+        english_answer=_UNANSWERABLE,
         language=language,
         english_query=english_query,
         crisis=crisis,
@@ -272,6 +286,7 @@ def answer_in_language(
 
     return LocalisedAnswer(
         answer=localised,
+        english_answer=result.answer,
         language=language,
         english_query=english_query,
         crisis=result.crisis,

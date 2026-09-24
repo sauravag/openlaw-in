@@ -309,6 +309,48 @@ def test_answer_is_returned_in_the_users_language() -> None:
     assert result.answer.claims[0].text == "वापसी आवश्यक है।"
 
 
+def test_english_answer_carries_the_untranslated_claim_alongside_the_translation() -> None:
+    """`english_answer` exists for `scripts/review_translations.py`: a
+    native-speaker reviewer must see the untranslated English claim next to
+    the translated one to judge whether the legal meaning survived."""
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            "english query",
+            _generation(),
+            TRANSLATED,
+        ]
+    )
+    result = answer_in_language(
+        "हिंदी प्रश्न", _Retriever(), adapter, ModelRegistry(), _glossary()
+    )
+    assert result.english_answer.claims[0].text == "A refund is required."
+    assert result.answer.claims[0].text == "वापसी आवश्यक है।"
+
+
+def test_english_answer_equals_answer_for_an_english_question() -> None:
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            "my landlord kept my deposit",
+            _generation(),
+        ]
+    )
+    result = answer_in_language(
+        "my landlord kept my deposit", _Retriever(), adapter, ModelRegistry(), _glossary()
+    )
+    assert result.english_answer == result.answer
+
+
+def test_english_answer_is_unanswerable_on_a_crisis_short_circuit() -> None:
+    adapter = StubAdapter([_classifier_response(CrisisKind.SELF_HARM)])
+    result = answer_in_language(
+        "I want to end it all", _Retriever(), adapter, ModelRegistry(), _glossary()
+    )
+    assert result.english_answer.is_answerable is False
+    assert result.english_answer.claims == ()
+
+
 def test_citations_survive_the_round_trip() -> None:
     """The whole point: translation must not disturb the verified citation."""
     adapter = StubAdapter(
