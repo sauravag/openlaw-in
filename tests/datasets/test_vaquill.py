@@ -18,6 +18,18 @@ def test_reads_supreme_court_chunks_from_fixture(vaquill_fixture_dir: Path) -> N
     assert first.corpus_version == "v2026.08"
 
 
+def test_judgment_chunks_carry_their_reporter_citation(vaquill_fixture_dir: Path) -> None:
+    """Needed so the graph loader can derive `citation_key` — most CITES
+    targets in judgment text are reporter citations, not neutral join keys."""
+    chunks = list(
+        vaquill.read_judgment_chunks(
+            vaquill_fixture_dir / "in_supreme-court_judgments.parquet",
+            corpus_version="v2026.08",
+        )
+    )
+    assert any(chunk.citation for chunk in chunks)
+
+
 def test_judgment_chunks_carry_normalised_join_keys(vaquill_fixture_dir: Path) -> None:
     chunks = list(
         vaquill.read_judgment_chunks(

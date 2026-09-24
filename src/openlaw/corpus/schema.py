@@ -117,6 +117,7 @@ class JudgmentChunk(BaseModel):
     judges: tuple[str, ...] = ()
     decision_date: date | None = None
     language_code: str
+    citation: str | None = None
     corpus_version: str
 
     @classmethod
@@ -134,6 +135,7 @@ class JudgmentChunk(BaseModel):
             judges=clean_judge_names(_as_tuple(row.get("judges"))),
             decision_date=parse_decision_date(row.get("decision_date")),
             language_code=str(row.get("language_code") or ""),
+            citation=str(row.get("citation") or "").strip() or None,
             corpus_version=corpus_version,
         )
 

@@ -322,3 +322,45 @@ def test_judgment_chunk_text_original_is_not_stripped() -> None:
         corpus_version="v2026.08",
     )
     assert chunk.text_original == "  the appeal is dismissed  "
+
+
+def test_judgment_chunk_carries_its_reporter_citation() -> None:
+    """The raw `citation` column (e.g. '[1979] 3 S.C.R. 453') is preserved so
+    the graph loader can derive a `citation_key` that CITES edges resolve
+    against — most citations in judgment text are reporter forms, not the
+    neutral `join_key` form."""
+    chunk = JudgmentChunk.from_row(
+        {
+            "chunk_id": "c1", "case_id": "1979_INSC_59", "chunk_index": 0,
+            "text": "t", "text_original": "t", "court_code": "SCI",
+            "judges": [], "decision_date": "1979-01-01", "language_code": "en",
+            "citation": "[1979] 3 S.C.R. 453",
+        },
+        corpus_version="v2026.08",
+    )
+    assert chunk.citation == "[1979] 3 S.C.R. 453"
+
+
+def test_judgment_chunk_citation_defaults_to_none_when_absent() -> None:
+    chunk = JudgmentChunk.from_row(
+        {
+            "chunk_id": "c1", "case_id": "2016_INSC_1", "chunk_index": 0,
+            "text": "t", "text_original": "t", "court_code": "SCI",
+            "judges": [], "decision_date": "", "language_code": "en",
+        },
+        corpus_version="v2026.08",
+    )
+    assert chunk.citation is None
+
+
+def test_judgment_chunk_citation_blank_string_becomes_none() -> None:
+    chunk = JudgmentChunk.from_row(
+        {
+            "chunk_id": "c1", "case_id": "2016_INSC_1", "chunk_index": 0,
+            "text": "t", "text_original": "t", "court_code": "SCI",
+            "judges": [], "decision_date": "", "language_code": "en",
+            "citation": "   ",
+        },
+        corpus_version="v2026.08",
+    )
+    assert chunk.citation is None

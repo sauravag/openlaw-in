@@ -29,6 +29,8 @@ INDEXES: tuple[str, ...] = (
     "CREATE INDEX judgment_year IF NOT EXISTS FOR (j:Judgment) ON (j.decision_year)",
     "CREATE INDEX judgment_authority IF NOT EXISTS FOR (j:Judgment) ON (j.pagerank)",
     "CREATE INDEX judgment_join_key IF NOT EXISTS FOR (j:Judgment) ON (j.join_key)",
+    "CREATE INDEX judgment_citation_key IF NOT EXISTS "
+    "FOR (j:Judgment) ON (j.citation_key)",
     "CREATE INDEX section_act IF NOT EXISTS FOR (s:Section) ON (s.act_id)",
     "CREATE INDEX section_number IF NOT EXISTS FOR (s:Section) ON (s.section_number)",
 )

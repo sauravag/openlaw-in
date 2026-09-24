@@ -30,6 +30,12 @@ def test_judgment_is_indexed_on_the_fields_retrieval_filters_on() -> None:
     assert "decision_year" in joined
 
 
+def test_judgment_is_indexed_on_citation_key_for_cites_resolution() -> None:
+    """The CITES loader (Task 5) resolves targets against citation_key first —
+    see openlaw.graph.loader — so it must be indexed at corpus scale."""
+    assert "citation_key" in " ".join(INDEXES)
+
+
 def test_section_is_indexed_for_act_and_number_lookup() -> None:
     joined = " ".join(INDEXES)
     assert "act_id" in joined

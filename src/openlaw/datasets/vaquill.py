@@ -15,7 +15,7 @@ from openlaw.corpus.schema import JudgmentChunk, Provision
 
 _JUDGMENT_COLUMNS: list[str] = [
     "chunk_id", "case_id", "chunk_index", "text", "text_original",
-    "court_code", "judges", "decision_date", "language_code",
+    "court_code", "judges", "decision_date", "language_code", "citation",
 ]
 _PROVISION_COLUMNS: list[str] = [
     "chunk_id", "act_id", "title", "section_number", "text", "jurisdiction",
