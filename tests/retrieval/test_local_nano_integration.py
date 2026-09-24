@@ -12,7 +12,7 @@ from qdrant_client import QdrantClient
 
 from openlaw.index.embed import EMBEDDING_DIMENSIONS
 from openlaw.retrieval._nano_compat import NanoCompatError
-from openlaw.retrieval.local_nano import LocalNanoQueryEmbedder
+from openlaw.retrieval.local_nano import LocalNanoDocumentEmbedder, LocalNanoQueryEmbedder
 
 ACTS_INDIA_V1 = "acts_india_v1"
 
@@ -28,6 +28,18 @@ def real_embedder() -> Iterator[LocalNanoQueryEmbedder]:
     """
     try:
         yield LocalNanoQueryEmbedder()
+    except NanoCompatError as exc:
+        pytest.skip(f"voyage-4-nano's remote code failed to load: {exc}")
+    except Exception as exc:  # noqa: BLE001 - any load failure means skip, not fail
+        pytest.skip(f"voyage-4-nano could not be loaded (no model/network?): {exc}")
+
+
+@pytest.fixture(scope="module")
+def real_document_embedder() -> Iterator[LocalNanoDocumentEmbedder]:
+    """A real, model-backed document embedder -- skips cleanly if it can't be
+    loaded, mirroring `real_embedder` above."""
+    try:
+        yield LocalNanoDocumentEmbedder()
     except NanoCompatError as exc:
         pytest.skip(f"voyage-4-nano's remote code failed to load: {exc}")
     except Exception as exc:  # noqa: BLE001 - any load failure means skip, not fail
@@ -95,3 +107,46 @@ def test_real_nano_query_retrieves_sensibly_from_live_acts_india_v1(
     assert top.score > 0.3
     top_text = ((top.payload or {}).get("text") or "").lower()
     assert "theft" in top_text
+
+
+@pytest.mark.integration
+def test_real_nano_document_embeds_at_the_corpus_dimensionality(
+    real_document_embedder: LocalNanoDocumentEmbedder,
+) -> None:
+    vectors = real_document_embedder.embed_documents(
+        ["the writ petition is allowed and the impugned order is set aside"]
+    )
+
+    assert len(vectors) == 1
+    assert len(vectors[0]) == EMBEDDING_DIMENSIONS
+    norm = sum(v * v for v in vectors[0]) ** 0.5
+    assert abs(norm - 1.0) < 1e-4
+
+
+@pytest.mark.integration
+def test_real_nano_query_ranks_its_own_document_above_an_unrelated_one(
+    real_embedder: LocalNanoQueryEmbedder,
+    real_document_embedder: LocalNanoDocumentEmbedder,
+) -> None:
+    """Self-retrieval sanity check, no live Qdrant needed: a nano QUERY vector
+    of a distinctive phrase must score its own nano DOCUMENT embedding higher
+    than an unrelated document's -- the minimum bar for the new HC pairing
+    before indexing any real chunks."""
+    own_text = (
+        "the appellant's suit for specific performance of the agreement to "
+        "sell dated 12.03.2016 is decreed with costs"
+    )
+    unrelated_text = "the accused is acquitted of the charge under section 302 IPC"
+
+    query_vector = real_embedder.embed_query(
+        "specific performance agreement to sell decreed with costs"
+    )
+    own_vector, unrelated_vector = real_document_embedder.embed_documents(
+        [own_text, unrelated_text]
+    )
+
+    own_score = sum(a * b for a, b in zip(query_vector, own_vector, strict=True))
+    unrelated_score = sum(
+        a * b for a, b in zip(query_vector, unrelated_vector, strict=True)
+    )
+    assert own_score > unrelated_score

@@ -6,6 +6,7 @@ from openlaw.index.hc_upsert import (
     HC_COLLECTION,
     build_hc_collection_payload,
     build_hc_point,
+    delete_hc_collection,
     ensure_hc_collection,
     upsert_hc_points,
 )
@@ -32,9 +33,14 @@ class FakeClient:
     def __init__(self, status_code: int = 200) -> None:
         self.status_code = status_code
         self.put_calls: list[dict] = []
+        self.delete_calls: list[dict] = []
 
     def put(self, url: str, **kwargs: object) -> FakeResponse:
         self.put_calls.append({"url": url, **kwargs})
+        return FakeResponse(self.status_code)
+
+    def delete(self, url: str, **kwargs: object) -> FakeResponse:
+        self.delete_calls.append({"url": url, **kwargs})
         return FakeResponse(self.status_code)
 
 
@@ -84,6 +90,28 @@ def test_ensure_hc_collection_raises_on_a_real_server_error() -> None:
     client = FakeClient(status_code=500)
     with pytest.raises(httpx.HTTPStatusError):
         ensure_hc_collection("http://qdrant.test", client)
+
+
+def test_delete_hc_collection_deletes_the_shared_hc_collection_by_name() -> None:
+    """`hc_judgments_v1` is our own derived collection -- a --restart must be
+    able to discard it entirely so a rebuild with a new embedding model can
+    never mix old and new vectors in the same collection."""
+    client = FakeClient(status_code=200)
+    delete_hc_collection("http://qdrant.test", client)
+    assert client.delete_calls[0]["url"] == "http://qdrant.test/collections/hc_judgments_v1"
+
+
+def test_delete_hc_collection_tolerates_not_found() -> None:
+    """A --restart before anything has ever been indexed must not fail just
+    because the collection does not exist yet."""
+    client = FakeClient(status_code=404)
+    delete_hc_collection("http://qdrant.test", client)  # must not raise
+
+
+def test_delete_hc_collection_raises_on_a_real_server_error() -> None:
+    client = FakeClient(status_code=500)
+    with pytest.raises(httpx.HTTPStatusError):
+        delete_hc_collection("http://qdrant.test", client)
 
 
 def test_point_carries_dense_and_sparse_vectors() -> None:

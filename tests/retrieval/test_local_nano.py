@@ -9,10 +9,14 @@ import pytest
 from openlaw.index.embed import EMBEDDING_DIMENSIONS
 from openlaw.retrieval._nano_compat import NanoCompatError
 from openlaw.retrieval.local_nano import (
+    DEFAULT_DOCUMENT_WORKING_DIR,
+    DEFAULT_WORKING_DIR,
     MPS_FALLBACK_ENV_VAR,
     NANO_MODEL_ID,
+    LocalNanoDocumentEmbedder,
     LocalNanoQueryEmbedder,
     _download_model_snapshot,
+    _encode_documents,
     _encode_query,
     _select_device,
     _truncate_and_renormalise,
@@ -70,6 +74,28 @@ def test_encode_query_returns_a_unit_vector_of_the_corpus_dimensionality() -> No
 
     assert len(vector) == EMBEDDING_DIMENSIONS
     assert abs(sum(v * v for v in vector) ** 0.5 - 1.0) < 1e-6
+
+
+def test_encode_documents_uses_the_document_method_not_the_query_one() -> None:
+    """Nano applies different prompts to each side -- using the query prompt
+    on document text would measurably cost accuracy, mirroring the query
+    side's 0.9886 vs 0.9825 cosine measurement."""
+    model = FakeModel()
+
+    _encode_documents(model, ["the writ petition is allowed"], EMBEDDING_DIMENSIONS)
+
+    assert model.calls == ["document"]
+
+
+def test_encode_documents_returns_one_unit_vector_per_text() -> None:
+    vectors = _encode_documents(
+        FakeModel(vector=np.ones((2, 2048)) * 3.0), ["a", "b"], EMBEDDING_DIMENSIONS
+    )
+
+    assert len(vectors) == 2
+    for vector in vectors:
+        assert len(vector) == EMBEDDING_DIMENSIONS
+        assert abs(sum(v * v for v in vector) ** 0.5 - 1.0) < 1e-6
 
 
 # --- device selection -------------------------------------------------------
@@ -166,6 +192,9 @@ def _install_fake_model_stack(
         def encode_query(self, texts: list[str], show_progress_bar: bool = False):
             return np.ones((1, 2048))
 
+        def encode_document(self, texts: list[str], show_progress_bar: bool = False):
+            return np.ones((len(texts), 2048))
+
     FakeSentenceTransformer.instances = 0
     fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
@@ -260,3 +289,105 @@ def test_local_nano_raises_a_clear_error_when_model_loading_fails(
 
     with pytest.raises(NanoCompatError):
         LocalNanoQueryEmbedder(model_dir=source, working_dir=tmp_path / "working")
+
+
+# --- the document embedder ------------------------------------------------
+#
+# HC (High Court) judgment chunks are embedded with this instead of the
+# Voyage API's voyage-4-lite, so that the default LOCAL nano query embedder
+# above and the stored document vectors use the SAME model -- measured: nano
+# queries against voyage-4-lite HC documents scored only 15.0% top-1 / 31.7%
+# top-10 (median rank 61 of 300), because nano and lite's independent
+# approximation errors against full voyage-4 do not cancel against each
+# other, even though each aligns well to voyage-4 alone on its own.
+
+
+def test_local_nano_document_embedder_uses_a_separate_default_working_dir() -> None:
+    """Query and document embedders must not share a default working dir --
+    `prepare_local_model_dir` rebuilds it from scratch on every construction,
+    so two embedders pointed at the same directory would race to delete and
+    repopulate it out from under each other."""
+    assert DEFAULT_DOCUMENT_WORKING_DIR != DEFAULT_WORKING_DIR
+
+
+def test_local_nano_document_embedder_uses_an_explicit_model_dir_without_downloading(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+    _install_fake_model_stack(monkeypatch, captured)
+
+    def _fail_if_called() -> Path:
+        raise AssertionError("must not download when model_dir is given")
+
+    monkeypatch.setattr(
+        "openlaw.retrieval.local_nano._download_model_snapshot", _fail_if_called
+    )
+
+    source = tmp_path / "model"
+    source.mkdir()
+    LocalNanoDocumentEmbedder(model_dir=source, working_dir=tmp_path / "working")
+
+    assert captured["path"] == str(tmp_path / "working")
+
+
+def test_local_nano_document_embedder_loads_the_model_exactly_once(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Indexing streams many batches -- reloading the model per batch is not
+    an option."""
+    captured: dict = {}
+    fake_cls = _install_fake_model_stack(monkeypatch, captured)
+    source = tmp_path / "model"
+    source.mkdir()
+
+    embedder = LocalNanoDocumentEmbedder(
+        model_dir=source, working_dir=tmp_path / "working"
+    )
+    embedder.embed_documents(["one"])
+    embedder.embed_documents(["two", "three"])
+
+    assert fake_cls.instances == 1
+
+
+def test_local_nano_document_embedder_returns_one_vector_per_text(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+    _install_fake_model_stack(monkeypatch, captured)
+    source = tmp_path / "model"
+    source.mkdir()
+
+    embedder = LocalNanoDocumentEmbedder(
+        model_dir=source, working_dir=tmp_path / "working"
+    )
+    vectors = embedder.embed_documents(["a", "b", "c"])
+
+    assert len(vectors) == 3
+    assert all(len(vector) == EMBEDDING_DIMENSIONS for vector in vectors)
+
+
+def test_local_nano_document_embedder_returns_empty_list_for_empty_input(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+    _install_fake_model_stack(monkeypatch, captured)
+    source = tmp_path / "model"
+    source.mkdir()
+
+    embedder = LocalNanoDocumentEmbedder(
+        model_dir=source, working_dir=tmp_path / "working"
+    )
+
+    assert embedder.embed_documents([]) == []
+
+
+def test_local_nano_document_embedder_raises_a_clear_error_when_model_loading_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict = {}
+    _install_fake_model_stack(monkeypatch, captured, fail=True)
+    source = tmp_path / "model"
+    source.mkdir()
+
+    with pytest.raises(NanoCompatError):
+        LocalNanoDocumentEmbedder(model_dir=source, working_dir=tmp_path / "working")

@@ -36,8 +36,12 @@ COURT_SLUG = "punjab-and-haryana"
 # --- Model choice is a named constant, not a silent substitution ------------
 
 
-def test_embedding_model_is_voyage_4_lite() -> None:
-    assert build_hc_index.EMBEDDING_MODEL == "voyage-4-lite"
+def test_embedding_model_is_the_local_nano_model_id() -> None:
+    """Not voyage-4-lite -- the default query embedder is the LOCAL
+    voyage-4-nano, and nano-query-against-lite-document retrieval measured
+    only 15.0% top-1 / 31.7% top-10 (median rank 61 of 300). Documents must
+    be embedded with the SAME model that embeds queries."""
+    assert build_hc_index.EMBEDDING_MODEL == "voyageai/voyage-4-nano"
 
 
 def test_default_court_is_punjab_and_haryana() -> None:
@@ -224,15 +228,52 @@ class _StubEmbedder:
 
 
 class _RecordingClient:
-    def __init__(self) -> None:
+    def __init__(self, status_code: int = 200) -> None:
+        self.status_code = status_code
         self.put_calls: list[dict] = []
+        self.delete_calls: list[dict] = []
 
     def put(self, url: str, **kwargs: object) -> "_RecordingClient":
         self.put_calls.append({"url": url, **kwargs})
         return self
 
+    def delete(self, url: str, **kwargs: object) -> "_RecordingClient":
+        self.delete_calls.append({"url": url, **kwargs})
+        return self
+
     def raise_for_status(self) -> None:
         return None
+
+
+# --- _restart: --restart must clear the checkpoint AND the HC collection ----
+
+
+def test_restart_clears_the_checkpoint_and_deletes_the_hc_collection(tmp_path: Path) -> None:
+    """A --restart that only cleared the checkpoint would leave points
+    embedded by a stale model (voyage-4-lite, on the first run of this
+    script) mixed in with points from the new model -- silently unfindable
+    at query time. Both must be discarded together."""
+    path = tmp_path / "checkpoint.json"
+    build_hc_index.write_checkpoint(
+        path, processed=999, corpus_version=CORPUS_VERSION, court_slug=COURT_SLUG
+    )
+    client = _RecordingClient()
+
+    build_hc_index._restart(path, "http://qdrant.test", client)
+
+    assert build_hc_index.read_checkpoint(path) is None
+    assert client.delete_calls[0]["url"] == "http://qdrant.test/collections/hc_judgments_v1"
+
+
+def test_restart_tolerates_no_checkpoint_and_no_existing_collection(tmp_path: Path) -> None:
+    """A --restart before anything has ever been indexed (no checkpoint, no
+    collection) must not fail."""
+    path = tmp_path / "checkpoint.json"
+    client = _RecordingClient(status_code=404)
+
+    build_hc_index._restart(path, "http://qdrant.test", client)  # must not raise
+
+    assert build_hc_index.read_checkpoint(path) is None
 
 
 def _make_chunk(chunk_id: str, join_key: str):
