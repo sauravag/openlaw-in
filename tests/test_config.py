@@ -142,3 +142,22 @@ def test_classifier_failure_log_path_is_configurable_via_environment(monkeypatch
     assert Settings().classifier_failure_log_path == Path(
         "/secure/classifier_failures.jsonl"
     )
+
+
+def test_cookie_secure_defaults_to_true(monkeypatch) -> None:
+    """The safe default for any real deployment, which is reached over
+    HTTPS regardless -- see `Settings.cookie_secure`'s docstring."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+
+    assert Settings().cookie_secure is True
+
+
+def test_cookie_secure_can_be_disabled_for_plain_http_local_development(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_COOKIE_SECURE", "false")
+
+    assert Settings().cookie_secure is False

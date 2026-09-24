@@ -97,6 +97,17 @@ class Settings(BaseSettings):
     # by default so it works unmodified in dev; a real deployment should
     # override it with the frontend's actual URL.
     signup_url: str = "/signup"
+    # Anonymous-quota cookie `Secure` flag (Task 4 review, low finding,
+    # dispatched to Task 5 -- `openlaw.api.app._ensure_anonymous_token`).
+    # Cannot be unconditional: a `Secure` cookie is dropped by every browser
+    # on a plain-HTTP connection, which is exactly `docker compose up`
+    # local development (no TLS). Defaults to True -- the safe choice for
+    # any real deployment, which must be reached over HTTPS regardless (see
+    # `trusted_proxy_ips` above: the reverse proxy a self-hosted deployment
+    # sits behind is also where TLS is terminated). Self-hosters running
+    # plain HTTP locally must set this to false, or the cookie silently
+    # never round-trips and every request looks like a first visit.
+    cookie_secure: bool = True
 
 
 @lru_cache

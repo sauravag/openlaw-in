@@ -2,6 +2,14 @@
 # datastores are not reachable from the local network — the credentials
 # below are development defaults and Qdrant runs without authentication.
 # Production deployment must supply real secrets and its own network policy.
+#
+# Datastore ports MUST stay bound to 127.0.0.1 — this is a hard project
+# constraint, not a default to reconsider. When the `api` service and a
+# reverse proxy are added here (self-hosting, one-command deployment), set
+# OPENLAW_TRUSTED_PROXY_IPS (see .env.example) to that proxy's address on
+# this network — otherwise every request reaches `api` from the same
+# address and per-IP rate limiting/anonymous quota collapse into one shared
+# bucket for the whole deployment.
 
 services:
   qdrant:

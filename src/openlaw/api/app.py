@@ -33,7 +33,9 @@ makes the token survive a refusal: a route that raises `HTTPException` never
 gets to touch the response object FastAPI would otherwise let it decorate,
 but middleware wraps the ENTIRE call, success or exception, and always sees
 the final response -- so a first-time caller gets their token even on the
-very request that refuses them.
+very request that refuses them. `Secure` is set from `Settings.cookie_secure`
+(Task 4 review low finding, closed in Task 5) rather than hard-coded True --
+see that setting's docstring for why it cannot be unconditional.
 """
 
 import logging
@@ -73,12 +75,14 @@ def _register_anonymous_token_middleware(app: FastAPI) -> None:
         request.state.anon_token = existing or secrets.token_urlsafe(16)
         response = await call_next(request)
         if not existing:
+            settings: Settings = request.app.state.settings
             response.set_cookie(
                 ANON_COOKIE_NAME,
                 request.state.anon_token,
                 max_age=_ANON_COOKIE_MAX_AGE_SECONDS,
                 httponly=True,
                 samesite="lax",
+                secure=settings.cookie_secure,
             )
         return response
 

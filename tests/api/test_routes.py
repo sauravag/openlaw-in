@@ -45,6 +45,13 @@ def _settings(**overrides: object) -> Settings:
         "anonymous_quota": 3,
         "monthly_quota": 2,
         "supabase_jwt_secret": JWT_SECRET,
+        # TestClient talks plain HTTP ("http://testserver"); a `Secure`
+        # cookie (the production default -- see `Settings.cookie_secure`)
+        # would never round-trip back to the client, silently breaking
+        # every anonymous-quota test that relies on the cookie surviving
+        # between requests on the same client. Mirrors the documented local
+        # HTTP dev case, not a weakening of the production default.
+        "cookie_secure": False,
     }
     return Settings(**{**defaults, **overrides})
 
@@ -679,3 +686,20 @@ def test_an_unhandled_error_in_answer_fn_returns_a_generic_500() -> None:
     assert response.status_code == 500
     assert "qdrant" not in response.text
     assert "10.0.0.5" not in response.text
+
+
+# --- Task 5: the anonymous cookie's `Secure` flag is a deployment setting --
+
+
+def test_anonymous_cookie_carries_secure_when_the_deployment_requires_https() -> None:
+    client = _client(settings=_settings(anonymous_quota=3, cookie_secure=True))
+    response = client.post("/ask", json={"question": "q"})
+
+    assert "secure" in response.headers["set-cookie"].lower()
+
+
+def test_anonymous_cookie_omits_secure_for_plain_http_local_development() -> None:
+    client = _client(settings=_settings(anonymous_quota=3, cookie_secure=False))
+    response = client.post("/ask", json={"question": "q"})
+
+    assert "secure" not in response.headers["set-cookie"].lower()
