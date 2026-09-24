@@ -2,13 +2,16 @@
 
 Plan-measured coverage on English Supreme Court chunks: 84.8% contain a case
 citation, 48.4% contain a statutory section reference (that section figure was
-measured against "Section"/"Sections" only). Re-measured here on a random
-500-chunk sample of the live `sc_judgments_v1` collection: 84.4% citations,
-54.0% section references — the section rate is higher because judgments also
-cite sections via the "s. 138" abbreviation, confirmed genuine (not a false
-positive) by manual inspection of matched spans, and included below. These two
-regexes therefore supply the citation network and the judgment-to-statute
-links at no LLM cost.
+measured against "Section"/"Sections" only). Re-measured here on random
+500-chunk samples of the live `sc_judgments_v1` collection: ~84% citations
+(matches the plan closely), ~57% section references — the section rate is
+higher because judgments also cite sections via the "s.", "ss.", and "Secs."
+abbreviations, each confirmed genuine (not a false positive) by manual
+inspection of matched spans. Those abbreviations are also confirmed NOT to
+collide with unrelated "Rs.", "Exs.", or "Messrs." abbreviations, or with a
+sentence-ending period followed by an unrelated number — see the regression
+tests in `tests/graph/test_extract.py`. These two regexes therefore supply the
+citation network and the judgment-to-statute links at no LLM cost.
 
 Citations are normalised to `<year><reporter><number>` so the several printed
 forms of one reference collapse to a single node key. Extraction is pure regex
@@ -37,9 +40,15 @@ _CITATION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (_AIR, "AIR"),
 )
 
-# Section 302 / Sections 138 and 141 / Section 304B / s. 138
+# Section 302 / Sections 138 and 141 / Section 304B / s. 138 / ss. 34 and 149
+# / Secs. 34. The `\b` before each abbreviation requires a non-word character
+# (or string start) immediately before it, which is what keeps this from
+# matching the trailing "s."/"ss." inside "Rs.", "Exs.", or "Messrs." — in all
+# three, the letter before the final s/ss is itself a word character, so no
+# boundary exists there.
 _SECTION = re.compile(
-    r"\b(?:Sections?|[Ss]\.)\s+(\d+[A-Z]{0,2}(?:\s*(?:,|and)\s*\d+[A-Z]{0,2})*)"
+    r"\b(?:Sections?|[Ss]\.|[Ss]s\.|Secs\.)\s+"
+    r"(\d+[A-Z]{0,2}(?:\s*(?:,|and)\s*\d+[A-Z]{0,2})*)"
     r"(?:\s+of\s+the\s+([A-Z][A-Za-z\s]{3,60}?Act))?",
     re.IGNORECASE,
 )

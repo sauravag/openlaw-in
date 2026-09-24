@@ -78,3 +78,55 @@ def test_returns_empty_when_no_section_reference() -> None:
 
 def test_section_references_handles_empty_text() -> None:
     assert extract_section_references("") == ()
+
+
+def test_extracts_section_via_lowercase_s_abbreviation() -> None:
+    refs = extract_section_references("liable under s. 138")
+    assert refs[0].number == "138"
+
+
+def test_extracts_section_via_uppercase_s_abbreviation() -> None:
+    refs = extract_section_references("liable under S. 138")
+    assert refs[0].number == "138"
+
+
+def test_extracts_section_via_ss_abbreviation_lowercase() -> None:
+    refs = extract_section_references("punishable under ss. 34 and 149")
+    numbers = {ref.number for ref in refs}
+    assert numbers == {"34", "149"}
+
+
+def test_extracts_section_via_ss_abbreviation_uppercase() -> None:
+    refs = extract_section_references("charged under Ss. 302 and 149 IPC")
+    numbers = {ref.number for ref in refs}
+    assert "302" in numbers
+    assert "149" in numbers
+
+
+def test_extracts_section_via_secs_abbreviation() -> None:
+    refs = extract_section_references("liable under Secs. 34 and 149")
+    numbers = {ref.number for ref in refs}
+    assert numbers == {"34", "149"}
+
+
+def test_does_not_extract_rupees_abbreviation_as_section() -> None:
+    assert extract_section_references("the fine of Rs. 500 was imposed") == ()
+
+
+def test_does_not_extract_exhibits_abbreviation_as_section() -> None:
+    assert extract_section_references("marked as Exs. P1 in evidence") == ()
+
+
+def test_does_not_extract_messrs_abbreviation_as_section() -> None:
+    assert extract_section_references("notice issued to Messrs. Kumar") == ()
+
+
+def test_does_not_extract_messrs_abbreviation_even_when_a_number_follows() -> None:
+    """Stronger form of the Messrs. check: a digit right after must not help."""
+    text = "notice issued to Messrs. 138 & Sons, the respondents"
+    assert extract_section_references(text) == ()
+
+
+def test_does_not_extract_number_across_sentence_boundary() -> None:
+    text = "he counted the words. 138 of them were relevant"
+    assert extract_section_references(text) == ()
