@@ -126,3 +126,43 @@ def test_drop_projection_is_safe_when_nothing_is_projected(
     """Called unconditionally before every run, so a missing projection (the
     normal case) must not raise."""
     drop_projection(live_driver, "a_projection_that_was_never_created")
+
+
+@pytest.mark.integration
+def test_full_cycle_is_safe_to_run_twice_back_to_back(
+    live_driver: neo4j.Driver,
+) -> None:
+    """The graph is derived data, "dropped and rebuilt per corpus release" —
+    so project -> PageRank -> Louvain -> drop must be safe to run twice in a
+    row. A stale projection left over from a previous run must not make the
+    second pass fail, or silently double-write its properties."""
+    case_ids = ["TASK6_RERUN_A", "TASK6_RERUN_B", "TASK6_RERUN_C"]
+    with live_driver.session() as session:
+        session.run(
+            "UNWIND $ids AS cid MERGE (:Judgment {case_id: cid})", ids=case_ids
+        )
+        session.run(
+            "MATCH (a:Judgment {case_id: 'TASK6_RERUN_A'}), "
+            "(b:Judgment {case_id: 'TASK6_RERUN_B'}), "
+            "(c:Judgment {case_id: 'TASK6_RERUN_C'}) "
+            "MERGE (b)-[:CITES]->(a) "
+            "MERGE (c)-[:CITES]->(a)"
+        )
+
+    def run_full_cycle() -> tuple[int, int, int]:
+        drop_projection(live_driver, CITATION_PROJECTION)
+        node_count = project_citation_graph(live_driver)
+        properties_written = run_pagerank(live_driver)
+        clusters_written = run_louvain(live_driver)
+        drop_projection(live_driver, CITATION_PROJECTION)
+        return node_count, properties_written, clusters_written
+
+    try:
+        first_pass = run_full_cycle()
+        second_pass = run_full_cycle()
+
+        assert first_pass[0] >= len(case_ids)
+        assert second_pass == first_pass
+    finally:
+        drop_projection(live_driver, CITATION_PROJECTION)
+        _cleanup(live_driver, case_ids)
