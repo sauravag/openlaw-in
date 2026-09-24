@@ -58,8 +58,13 @@ def detect_by_script(text: str) -> str | None:
     """Return the language implied by `text`'s script, or None when Latin.
 
     Devanagari resolves to Hindi and Bengali script to Bengali. Marathi and
-    Assamese share those scripts and are distinguished only by an explicit user
-    choice, which the interface supplies.
+    Assamese share those scripts and are never detected here at all; they are
+    reachable only through an explicit caller choice, which
+    `openlaw.language.pipeline.answer_in_language` takes as its `language`
+    parameter and which overrides detection outright. An interface serving
+    Marathi or Assamese must pass it -- without it, this function's Hindi (or
+    Bengali) verdict stands and those speakers get the wrong language, with
+    the wrong glossary terms pinned.
     """
     if not text:
         return None

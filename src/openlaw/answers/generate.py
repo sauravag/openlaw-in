@@ -84,7 +84,12 @@ the model this turn.
 `Settings.classifier_failure_log_path`). `generate_answer` returns the
 events without persisting them, because it takes no `Settings` -- a caller
 holding one (`scripts/run_eval.py`, for instance) calls
-`persist_answer_events` itself.
+`persist_answer_events` itself. The multilingual path
+(`openlaw.language.pipeline.answer_in_language`) follows the same split and
+reuses this same function: `persist_answer_events` takes the structural
+`AnswerEvents` rather than `AnswerResult` specifically, so a
+`LocalisedAnswer` persists through it too and a non-English turn's events
+stop being built and then dropped on the floor.
 
 **The user-visible answer is never composed from model prose.**
 `generate_answer` returns a `ValidatedAnswer` whose only safe-to-render
@@ -97,7 +102,7 @@ caller must never render them.
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -302,7 +307,29 @@ def _failures_of(detection: CrisisDetection) -> tuple[ClassifierFailureEvent, ..
     return (detection.failure,) if detection.failure is not None else ()
 
 
-def persist_answer_events(result: AnswerResult, settings: Settings) -> None:
+class AnswerEvents(Protocol):
+    """Anything carrying the two event logs one turn can produce.
+
+    Structural on purpose: `AnswerResult` (the English path) and
+    `openlaw.language.pipeline.LocalisedAnswer` (the multilingual one) both
+    build exactly these two tuples and neither writes them, so both can be
+    handed to `persist_answer_events` at their respective boundaries without
+    the multilingual path growing a second, drifting copy of the same two
+    appends.
+    """
+
+    @property
+    def events(self) -> tuple[HallucinationEvent, ...]:
+        """Hallucination events built this turn."""
+        ...
+
+    @property
+    def classifier_failures(self) -> tuple[ClassifierFailureEvent, ...]:
+        """Crisis-classifier failures recorded this turn."""
+        ...
+
+
+def persist_answer_events(result: AnswerEvents, settings: Settings) -> None:
     """Write both event logs one turn can produce, to their configured paths.
 
     Both writes go through `escalation.append_jsonl_records`, so both logs

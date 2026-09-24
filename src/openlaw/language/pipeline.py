@@ -262,17 +262,36 @@ def answer_in_language(
     registry: ModelRegistry,
     glossary: Glossary,
     state: str | None = None,
+    language: str | None = None,
 ) -> LocalisedAnswer:
-    """Answer `question` in the language it was asked in.
+    """Answer `question` in `language`, or in the language it was asked in.
+
+    `language` is the caller's explicit choice -- an interface's language
+    selector -- and it wins over detection outright: it selects the answer's
+    target language, the glossary's pinned terminology, and the per-language
+    translator model for both translation calls. Detection
+    (`openlaw.language.detect.detect_language`) is only the default, for a
+    caller that says nothing.
+
+    Two things are unreachable without it, both measured rather than
+    theoretical. `detect_by_script` maps every Devanagari question to Hindi
+    and every Bengali-script question to Bengali, so Marathi and Assamese
+    are never detected at all -- a Marathi speaker gets Hindi output with
+    Hindi-pinned glossary terms, and the glossary's Marathi renderings can
+    never be used. And a Hinglish question carries no Indic signal, so it
+    detects as `"en"` (see `openlaw.language.detect`'s module docstring);
+    `translate_query` already works around that for retrieval, but the
+    ANSWER would still come back in English. `language="hi"` fixes the
+    second half of that turn.
 
     See the module docstring for why crisis routing runs twice -- the full
     classifier check on `question` itself, then a regex-only check on its
     English translation -- and both times before `retriever.retrieve` is
     ever called.
     """
-    language = detect_language(question)
+    target = language or detect_language(question)
 
-    cleared = _clear_crisis_and_translate(question, language, adapter, registry, state)
+    cleared = _clear_crisis_and_translate(question, target, adapter, registry, state)
     if isinstance(cleared, LocalisedAnswer):
         return cleared
     english_query, classifier_failures = cleared
@@ -282,12 +301,12 @@ def answer_in_language(
     result = _generate_from_context(
         english_query, context, adapter, registry, footer, classifier_failures
     )
-    localised = translate_answer(result.answer, language, adapter, registry, glossary)
+    localised = translate_answer(result.answer, target, adapter, registry, glossary)
 
     return LocalisedAnswer(
         answer=localised,
         english_answer=result.answer,
-        language=language,
+        language=target,
         english_query=english_query,
         crisis=result.crisis,
         footer=result.footer,

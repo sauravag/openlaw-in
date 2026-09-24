@@ -360,3 +360,84 @@ def test_translator_returns_hinglish_translated_and_english_unchanged_live() -> 
     english_text = "what documents do I need to register a rent agreement"
     english_result = translate_query(english_text, "en", adapter, registry)
     assert english_result.strip().lower() == english_text.lower()
+
+
+# --- claim text must be a genuine, non-empty string --------------------------
+
+
+def test_empty_translated_text_falls_back_to_english() -> None:
+    """A lazy translator that returns `{"id": 0, "text": ""}` used to build
+    `Claim(text="")`, which raises `ValidationError` -- an exception escaping
+    both `translate_answer` and `answer_in_language` and turning an answered
+    question into a crash. Empty text is a parse failure, handled exactly
+    like a missing id: the English answer is returned untouched."""
+    adapter = StubAdapter(['{"summary": "अनुवादित", "claims": [{"id": 0, "text": ""}]}'])
+    result = translate_answer(_answer(), "hi", adapter, ModelRegistry(), _glossary())
+
+    assert result == _answer()
+
+
+def test_whitespace_only_translated_text_falls_back_to_english() -> None:
+    adapter = StubAdapter(
+        ['{"summary": "अनुवादित", "claims": [{"id": 0, "text": "   "}]}']
+    )
+    result = translate_answer(_answer(), "hi", adapter, ModelRegistry(), _glossary())
+
+    assert result == _answer()
+
+
+def test_non_string_translated_text_falls_back_to_english() -> None:
+    """`str(item["text"])` coerced any JSON value into claim text: a response
+    carrying `{"x": 1}` produced the claim text `"{'x': 1}"` bound to real,
+    validated `chunk_ids` -- text nobody wrote or checked, wearing a real
+    citation. Require a genuine string instead."""
+    adapter = StubAdapter(
+        ['{"summary": "अनुवादित", "claims": [{"id": 0, "text": {"x": 1}}]}']
+    )
+    result = translate_answer(_answer(), "hi", adapter, ModelRegistry(), _glossary())
+
+    assert result == _answer()
+    assert result.claims[0].text == "A refund is required."
+
+
+def test_missing_translated_text_key_falls_back_to_english() -> None:
+    adapter = StubAdapter(['{"summary": "अनुवादित", "claims": [{"id": 0}]}'])
+    result = translate_answer(_answer(), "hi", adapter, ModelRegistry(), _glossary())
+
+    assert result == _answer()
+
+
+def test_one_empty_claim_rejects_the_whole_translation() -> None:
+    """Partial acceptance would leave a Hindi answer with one silently blank
+    claim; the whole translation is rejected instead."""
+    adapter = StubAdapter(
+        [
+            json.dumps(
+                {
+                    "summary": "अनुवादित",
+                    "claims": [{"id": 0, "text": "ठीक है।"}, {"id": 1, "text": ""}],
+                },
+                ensure_ascii=False,
+            )
+        ]
+    )
+    result = translate_answer(
+        _two_claim_answer(), "hi", adapter, ModelRegistry(), _glossary()
+    )
+
+    assert result == _two_claim_answer()
+
+
+# --- quoted statutory text stays in English ----------------------------------
+
+
+def test_answer_prompt_keeps_quoted_statutory_text_in_English() -> None:
+    """Spec §7: a translated statute is not the statute. The prompt must say
+    so about QUOTED statutory text, not only about statute names and section
+    numbers."""
+    adapter = StubAdapter([TRANSLATED])
+    translate_answer(_answer(), "hi", adapter, ModelRegistry(), _glossary())
+    system = adapter.calls[0]["system"].lower()
+
+    assert "quote" in system
+    assert "english" in system

@@ -48,10 +48,16 @@ being silently mis-served when detection was wrong. The only remaining
 short-circuit is empty/whitespace-only text, which has nothing to translate
 either way.
 
-`translate_answer` keeps the brief's original gate on `language == "en"`:
-the answer's target language is a caller decision (typically the same
-language surfaced to the user for the whole turn), not a per-message
-detector verdict, so it does not carry the same blind spot.
+`translate_answer` keeps the brief's original gate on `language == "en"`,
+and that is now honest: the answer's target language really is a caller
+decision. `openlaw.language.pipeline.answer_in_language` takes an explicit
+`language` parameter that overrides detection outright, so an interface
+whose user asked in Hinglish (or picked Marathi, which no detector can
+distinguish from Hindi) supplies the target language itself and the gate
+never sees the detector's blind spot. Detection is only the fallback when
+the caller says nothing; when it is, the gate does inherit the "en" verdict
+and a Hinglish speaker who was never offered a language selector gets an
+English answer to a query that was nonetheless translated for retrieval.
 
 Every failure path degrades to English (or to the original text, for
 queries). An English answer is useful; a mangled one is worse than none.
@@ -87,6 +93,10 @@ person with no legal training.
 Rules:
 - Translate the meaning, not word by word. The reader must be able to act on it.
 - Keep statute names, section numbers, and case citations in English.
+- If a claim quotes the words of a statute, keep that quoted statutory text \
+in English, exactly as given. The English text is the law; a translation of \
+it is not. You may add your own {language} rendering after the quote, in \
+brackets, clearly as an explanation -- never in place of the English words.
 - Never invent, add, or remove any legal content.
 - Each claim you are given carries an "id". Return every claim, each paired \
 with its exact original "id" and its translated "text". Do not add, drop, \
@@ -136,6 +146,15 @@ def _parse_translation(
     Every claim in the response must carry an `id` from `expected_ids`, and
     every id in `expected_ids` must appear exactly once -- a missing id, an
     id that was never sent (invented), or a duplicate id all fail the parse.
+
+    Each claim's `text` must be a genuine, non-blank string. A missing or
+    empty `text` fails the parse rather than reaching `Claim(text="")`, whose
+    `ValidationError` would escape `translate_answer` and
+    `answer_in_language` entirely and turn one lazy model response into a
+    crashed answer. A non-string `text` fails it too rather than being
+    coerced with `str()`: `{"x": 1}` rendered as the claim text `"{'x': 1}"`
+    would be text nobody wrote or validated, bound to real `chunk_ids` and
+    displayed wearing a real citation.
     This is what lets the caller reassemble translated text by identity
     rather than by position: `text_by_id` can be looked up by each original
     claim's own id regardless of what order the response listed claims in.
@@ -147,8 +166,11 @@ def _parse_translation(
         text_by_id: dict[int, str] = {}
         for item in translated["claims"]:
             claim_id = int(item["id"])
+            text = item["text"]
+            if not isinstance(text, str) or not text.strip():
+                return None  # empty or non-string text -- see the docstring
             seen_ids.append(claim_id)
-            text_by_id[claim_id] = str(item["text"])
+            text_by_id[claim_id] = text
     except (TypeError, KeyError, ValueError):
         return None
 

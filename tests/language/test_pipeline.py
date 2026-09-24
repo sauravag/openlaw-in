@@ -35,10 +35,14 @@ the full accounting):
 """
 
 import json
+from pathlib import Path
 from typing import Any
 
 from openlaw.answers.escalation import CrisisKind
-from openlaw.answers.models import Completion, ModelRegistry, StubAdapter
+from openlaw.answers.generate import persist_answer_events
+from openlaw.answers.models import Completion, ModelRegistry, ModelRole, StubAdapter
+from openlaw.config import Settings
+from openlaw.language.detect import detect_language
 from openlaw.language.glossary import Glossary, GlossaryTerm
 from openlaw.language.pipeline import answer_in_language
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
@@ -145,6 +149,21 @@ def _generation() -> str:
 
 def _insufficient_generation() -> str:
     return json.dumps({"summary": "No answer.", "claims": [], "sufficient": False})
+
+
+def _generation_with_a_ghost_citation() -> str:
+    """A generation citing a chunk_id the retriever never returned -- the
+    validator drops that claim and a `HallucinationEvent` is built for it."""
+    return json.dumps(
+        {
+            "summary": "The deposit must be refunded.",
+            "claims": [
+                {"text": "A refund is required.", "chunk_ids": ["a"]},
+                {"text": "The landlord goes to prison.", "chunk_ids": ["ghost"]},
+            ],
+            "sufficient": True,
+        }
+    )
 
 
 # --- English, no crisis ------------------------------------------------
@@ -472,3 +491,177 @@ def test_crisis_found_only_after_translation_short_circuits_before_retrieval() -
 
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert len(adapter.calls) == 2
+
+
+# --- explicit language: the caller's choice, not only the detector's -------
+
+
+MARATHI_TRANSLATED = json.dumps(
+    {
+        "summary": "ठेव परत करावी लागेल.",
+        "claims": [{"id": 0, "text": "परतावा आवश्यक आहे."}],
+    },
+    ensure_ascii=False,
+)
+
+HINDI_TRANSLATED = TRANSLATED
+
+
+def _multilingual_glossary() -> Glossary:
+    """A glossary pinning one term in both Hindi and Marathi, so a Marathi
+    request can be told apart from a Hindi one by the instruction text."""
+    return Glossary(
+        (
+            GlossaryTerm(
+                term="anticipatory bail",
+                preserve_english=True,
+                translations={"hi": "अग्रिम जमानत", "mr": "अटकपूर्व जामीन"},
+            ),
+        )
+    )
+
+
+def test_explicit_marathi_produces_marathi_output_and_marathi_glossary_rules() -> None:
+    """`detect_by_script` maps all Devanagari to Hindi, so without an explicit
+    choice a Marathi speaker gets Hindi output and the Marathi glossary
+    entries can never be used at all. The caller supplies the choice."""
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            "my landlord kept my deposit",
+            _generation(),
+            MARATHI_TRANSLATED,
+        ]
+    )
+    result = answer_in_language(
+        "माझ्या घरमालकाने ठेव परत केली नाही",
+        _Retriever(),
+        adapter,
+        ModelRegistry(),
+        _multilingual_glossary(),
+        language="mr",
+    )
+
+    assert result.language == "mr"
+    assert result.answer.claims[0].text == "परतावा आवश्यक आहे."
+    translation_system = adapter.calls[-1]["system"]
+    assert "Marathi" in translation_system
+    assert "अटकपूर्व जामीन" in translation_system
+    assert "अग्रिम जमानत" not in translation_system
+
+
+def test_explicit_hindi_answers_a_hinglish_question_in_hindi() -> None:
+    """Hinglish detects as English (no Indic characters, no romanised-Hindi
+    model), so detection alone answers a Hinglish speaker in English. An
+    explicit request for Hindi must translate the answer too, not just the
+    query."""
+    question = "mera makan malik deposit wapas nahi kar raha"
+    assert detect_language(question) == "en"
+
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            "my landlord is not returning my deposit",
+            _generation(),
+            HINDI_TRANSLATED,
+        ]
+    )
+    result = answer_in_language(
+        question,
+        _Retriever(),
+        adapter,
+        ModelRegistry(),
+        _glossary(),
+        language="hi",
+    )
+
+    assert result.language == "hi"
+    assert result.answer.claims[0].text == "वापसी आवश्यक है।"
+
+
+def test_detection_remains_the_default_when_no_language_is_given() -> None:
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            "english query",
+            _generation(),
+            TRANSLATED,
+        ]
+    )
+    result = answer_in_language(
+        "हिंदी प्रश्न", _Retriever(), adapter, ModelRegistry(), _glossary()
+    )
+    assert result.language == "hi"
+
+
+def test_explicit_language_is_reported_on_a_crisis_short_circuit() -> None:
+    adapter = StubAdapter([])
+    result = answer_in_language(
+        "my husband beats me",
+        _RaisingRetriever(),
+        adapter,
+        ModelRegistry(),
+        _glossary(),
+        language="mr",
+    )
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.language == "mr"
+
+
+def test_explicit_language_routes_the_query_translator_model_too() -> None:
+    """The per-language model override must follow the caller's choice, not
+    the detector's guess -- an Indic-specialist translator model configured
+    for Marathi is useless if the query call is still routed as Hindi."""
+    registry = ModelRegistry(language_overrides={(ModelRole.TRANSLATOR, "mr"): "mr-1"})
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            "my landlord kept my deposit",
+            _generation(),
+            MARATHI_TRANSLATED,
+        ]
+    )
+    answer_in_language(
+        "माझ्या घरमालकाने ठेव परत केली नाही",
+        _Retriever(),
+        adapter,
+        registry,
+        _multilingual_glossary(),
+        language="mr",
+    )
+
+    assert adapter.calls[1]["model"] == "mr-1"  # query translation
+    assert adapter.calls[-1]["model"] == "mr-1"  # answer translation
+
+
+# --- events built here are persistable at the boundary --------------------
+
+
+def test_localised_answer_events_reach_persist_answer_events(tmp_path: Path) -> None:
+    """Binding requirement (Plan 3, re-asserted here): a sustained classifier
+    outage or a run of hallucinations must be discoverable after the fact.
+    The multilingual path builds both event kinds; the boundary persists
+    them through the same `persist_answer_events` the English path uses."""
+    adapter = _ClassifierFailsAdapter(
+        ["my landlord kept my deposit", _generation_with_a_ghost_citation()]
+    )
+    result = answer_in_language(
+        "my landlord kept my deposit",
+        _Retriever(),
+        adapter,
+        ModelRegistry(),
+        _glossary(),
+    )
+    assert result.events
+    assert result.classifier_failures
+
+    settings = Settings(
+        vaquill_root="/tmp/v",
+        kanoongpt_root="/tmp/k",
+        hallucination_log_path=tmp_path / "hallucinations.jsonl",
+        classifier_failure_log_path=tmp_path / "classifier_failures.jsonl",
+    )
+    persist_answer_events(result, settings)
+
+    assert (tmp_path / "hallucinations.jsonl").read_text(encoding="utf-8").strip()
+    assert (tmp_path / "classifier_failures.jsonl").read_text(encoding="utf-8").strip()
