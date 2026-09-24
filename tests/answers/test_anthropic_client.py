@@ -162,6 +162,99 @@ def test_adapter_returns_an_empty_completion_on_refusal_without_reading_content(
     assert completion.stop_reason == "refusal"
 
 
+def test_adapter_populates_raw_with_usage_and_the_serving_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage = SimpleNamespace(
+        input_tokens=120,
+        output_tokens=340,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=500,
+    )
+    response = SimpleNamespace(
+        stop_reason="end_turn",
+        content=[_text_block("hi")],
+        usage=usage,
+        model="claude-opus-5",
+    )
+    _install_fake_client(monkeypatch, response)
+    adapter = AnthropicAdapter(api_key="k")
+
+    completion = adapter.complete("claude-opus-5", "sys", [], None, 100)
+
+    assert completion.raw == {
+        "model": "claude-opus-5",
+        "usage": {
+            "input_tokens": 120,
+            "output_tokens": 340,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 500,
+        },
+    }
+
+
+def test_adapter_raw_reports_the_actual_serving_model_after_a_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server-side refusal fallback can route the call to a different model
+    than requested -- `raw['model']` must reflect what actually ran, since
+    cost metering has to key off that model's price, not the requested one.
+    """
+    usage = SimpleNamespace(input_tokens=10, output_tokens=5)
+    response = SimpleNamespace(
+        stop_reason="end_turn",
+        content=[_text_block("ok")],
+        usage=usage,
+        model="claude-opus-4-8",
+    )
+    _install_fake_client(monkeypatch, response)
+    adapter = AnthropicAdapter(api_key="k")
+
+    completion = adapter.complete("claude-opus-5", "sys", [], None, 100)
+
+    assert completion.raw["model"] == "claude-opus-4-8"
+
+
+def test_adapter_raw_has_just_the_model_when_usage_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = SimpleNamespace(stop_reason="end_turn", content=[_text_block("ok")])
+    _install_fake_client(monkeypatch, response)
+    adapter = AnthropicAdapter(api_key="k")
+
+    completion = adapter.complete("claude-opus-5", "sys", [], None, 100)
+
+    assert completion.raw == {"model": "claude-opus-5"}
+
+
+def test_adapter_populates_raw_on_a_refusal_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decline can still bill streamed partial tokens, so usage must
+    survive the refusal short-circuit rather than only the normal path."""
+    usage = SimpleNamespace(input_tokens=50, output_tokens=0)
+
+    class _ExplodingContent(list):
+        def __iter__(self) -> Any:
+            raise AssertionError("content must not be read after a refusal")
+
+    response = SimpleNamespace(
+        stop_reason="refusal",
+        content=_ExplodingContent(),
+        usage=usage,
+        model="claude-opus-5",
+    )
+    _install_fake_client(monkeypatch, response)
+    adapter = AnthropicAdapter(api_key="k")
+
+    completion = adapter.complete("claude-opus-5", "sys", [], None, 100)
+
+    assert completion.raw == {
+        "model": "claude-opus-5",
+        "usage": {"input_tokens": 50, "output_tokens": 0},
+    }
+
+
 def test_adapter_defaults_a_missing_stop_reason_to_end_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
