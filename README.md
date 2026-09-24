@@ -50,10 +50,26 @@ source before relying on anything here.
 
 ## Setup
 
-    cp .env.example .env      # set OPENLAW_VOYAGE_API_KEY
-    pip install -e ".[dev]"
+    cp .env.example .env
+    pip install -e ".[dev,local-nano]"
     docker compose up -d
     pytest
+
+Query embedding defaults to a local, open-weight model (`voyage-4-nano`) — no
+API key needed, no per-query cost, no vendor dependency. The `local-nano` extra
+above pulls in torch/transformers/sentence-transformers (~2GB) to run it; the
+first query downloads the weights (set `HF_HUB_DISABLE_XET=1` if that hangs on
+your network — Hugging Face's Xet backend can stall indefinitely otherwise).
+
+Skip that ~2GB (e.g. for CI, or an API-only deployment) by installing without
+the extra and switching backends:
+
+    pip install -e ".[dev]"
+    export OPENLAW_QUERY_EMBEDDER_BACKEND=voyage_api
+    # and set OPENLAW_VOYAGE_API_KEY in .env
+
+Calling the `local_nano` backend without the extra installed raises a clear
+`ImportError` naming the exact `pip install -e ".[local-nano]"` command to fix it.
 
 ## Corpus build
 

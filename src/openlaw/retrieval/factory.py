@@ -12,6 +12,7 @@ from openlaw.retrieval.query import QueryEmbedder, VoyageQueryEmbedder
 
 LOCAL_NANO_BACKEND = "local_nano"
 VOYAGE_API_BACKEND = "voyage_api"
+LOCAL_NANO_INSTALL_COMMAND = 'pip install -e ".[local-nano]"'
 
 
 def build_query_embedder(settings: Settings) -> QueryEmbedder:
@@ -36,8 +37,21 @@ def _build_voyage_api_embedder(settings: Settings) -> VoyageQueryEmbedder:
 
 
 def _build_local_nano_embedder(settings: Settings) -> QueryEmbedder:
-    # Imported lazily so selecting (or merely defaulting to) this backend never
-    # requires torch/transformers/sentence-transformers unless it's actually used.
-    from openlaw.retrieval.local_nano import LocalNanoQueryEmbedder
+    # torch/transformers/sentence-transformers live in the optional "local-nano"
+    # extra (spec §12.7: a voyage_api-only install, or CI, must not pay their
+    # ~2GB install cost). Both the import and the model load below can raise
+    # ImportError if that extra was never installed -- caught and re-raised with
+    # the exact fix, not hidden.
+    try:
+        from openlaw.retrieval.local_nano import LocalNanoQueryEmbedder
 
-    return LocalNanoQueryEmbedder(model_dir=settings.nano_model_dir)
+        return LocalNanoQueryEmbedder(model_dir=settings.nano_model_dir)
+    except ImportError as exc:
+        raise ImportError(
+            "The 'local_nano' query embedder backend needs its optional ML "
+            "dependencies (torch, transformers, sentence-transformers), which "
+            f"are not installed. Install them with:\n\n    {LOCAL_NANO_INSTALL_COMMAND}\n\n"
+            "Or set OPENLAW_QUERY_EMBEDDER_BACKEND=voyage_api (with "
+            "OPENLAW_VOYAGE_API_KEY) to use the Voyage API instead, with no "
+            "local model."
+        ) from exc

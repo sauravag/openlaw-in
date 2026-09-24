@@ -34,6 +34,25 @@ def test_rejects_an_unknown_backend() -> None:
         build_query_embedder(_settings(query_embedder_backend="something_else"))
 
 
+def test_local_nano_raises_an_actionable_error_when_its_extra_is_not_installed(
+    monkeypatch,
+) -> None:
+    """spec 12.7: torch/transformers/sentence-transformers live behind the
+    optional 'local-nano' extra. Simulate that extra being missing WITHOUT
+    uninstalling anything: setting a name to None in sys.modules forces the next
+    `import` of it to raise ImportError, exactly as if it were never installed."""
+    for module_name in (
+        "torch",
+        "transformers",
+        "sentence_transformers",
+        "huggingface_hub",
+    ):
+        monkeypatch.setitem(sys.modules, module_name, None)
+
+    with pytest.raises(ImportError, match=r"pip install -e .*\[local-nano\]"):
+        build_query_embedder(_settings())
+
+
 def test_local_nano_is_the_default_backend_and_is_wired_correctly(monkeypatch) -> None:
     """Binding decision: local nano is the default. Swap in a stub so this test
     does not need the real model or its heavy dependencies installed."""

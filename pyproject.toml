@@ -11,18 +11,25 @@ dependencies = [
     "httpx>=0.27",
     "neo4j>=5.26",
     "numpy>=2.0",
-    # Local query embedding (voyage-4-nano, Plan 3 T1) -- pinned exactly, not a
-    # range: nano's shipped remote code needed hand-patching for transformers 5.x
-    # (see openlaw.retrieval._nano_compat) and is only known to work with this
-    # combination. Bumping any of these three needs re-verifying that patch.
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-cov>=6.0"]
+# Local query embedding (voyage-4-nano, Plan 3 T1) -- kept OPTIONAL (spec §12.7):
+# the voyage_api backend and CI must not pay for ~2GB of torch/transformers they
+# never import just because dependency resolution runs. Install with
+# `pip install -e ".[local-nano]"`; openlaw.retrieval.factory raises an
+# actionable ImportError naming that exact command if it's missing.
+#
+# Pinned exactly, not a range: nano's shipped remote code needed hand-patching
+# for transformers 5.x (see openlaw.retrieval._nano_compat) and is only known to
+# work with this combination. Bumping any of these needs re-verifying that patch.
+local-nano = [
     "transformers==5.17.0",
     "sentence-transformers==6.1.0",
     "torch==2.14.0",
     "huggingface-hub>=1.0",
 ]
-
-[project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-cov>=6.0"]
 
 [build-system]
 requires = ["hatchling"]
