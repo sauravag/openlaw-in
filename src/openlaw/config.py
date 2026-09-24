@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     # mostly filler today -- see the full reasoning and the specific
     # re-enable condition in `openlaw.retrieval.rerank`'s module docstring.
     graph_expansion_enabled: bool = False
+    # Per-role model configuration (Plan 3 T4): the generator does grounded
+    # legal reasoning and warrants a frontier model; translation and
+    # classification do not, and paying frontier prices for them is waste at
+    # the ~10K-user scale this product targets. See openlaw.answers.models.
+    model_generator: str = "claude-opus-5"
+    model_translator: str = "claude-haiku-4-5"
+    model_classifier: str = "claude-haiku-4-5"
+    anthropic_api_key: str | None = None
 
 
 @lru_cache

@@ -63,3 +63,43 @@ def test_graph_expansion_can_be_enabled_via_environment(monkeypatch) -> None:
     monkeypatch.setenv("OPENLAW_GRAPH_EXPANSION_ENABLED", "true")
 
     assert Settings().graph_expansion_enabled is True
+
+
+def test_model_defaults_match_the_per_role_spec(monkeypatch) -> None:
+    """Binding decision (Plan 3 T4): the generator needs frontier reasoning for
+    grounded legal answers; translation and classification do not, and paying
+    frontier prices for them is waste at the product's projected scale."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+
+    settings = Settings()
+
+    assert settings.model_generator == "claude-opus-5"
+    assert settings.model_translator == "claude-haiku-4-5"
+    assert settings.model_classifier == "claude-haiku-4-5"
+
+
+def test_model_roles_can_be_overridden_independently(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+    monkeypatch.setenv("OPENLAW_MODEL_GENERATOR", "claude-sonnet-5")
+
+    settings = Settings()
+
+    assert settings.model_generator == "claude-sonnet-5"
+    assert settings.model_translator == "claude-haiku-4-5"
+
+
+def test_anthropic_api_key_defaults_to_none(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+
+    assert Settings().anthropic_api_key is None
+
+
+def test_anthropic_api_key_reads_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+    monkeypatch.setenv("OPENLAW_ANTHROPIC_API_KEY", "sk-ant-test")
+
+    assert Settings().anthropic_api_key == "sk-ant-test"
