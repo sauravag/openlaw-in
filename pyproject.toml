@@ -13,6 +13,12 @@ dependencies = [
     "numpy>=2.0",
     "anthropic>=0.69",
     "langdetect>=1.0.9",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    "pyjwt[crypto]>=2.9",
 ]
 
 [project.optional-dependencies]

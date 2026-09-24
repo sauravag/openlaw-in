@@ -53,6 +53,18 @@ class Settings(BaseSettings):
     # and same "put it on a restricted volume" deployment decision. See
     # openlaw.answers.crisis_classifier.append_classifier_failure_events.
     classifier_failure_log_path: Path = Path("data/classifier_failures.jsonl")
+    # Application database (Plan 5 T1): users, quota, conversations and the
+    # hallucination log. Local default matches docker-compose.yml's postgres
+    # service, bound to 127.0.0.1 only. See openlaw.db.models for what is and
+    # is not stored.
+    database_url: str = "postgresql+psycopg://openlaw:openlaw@localhost:5432/openlaw"
+    # Quota. Self-hosters set OPENLAW_QUOTA_ENABLED=false for unlimited use.
+    quota_enabled: bool = True
+    monthly_quota: int = 30
+    anonymous_quota: int = 3
+    # Supabase auth (email + Google). Left unset in self-hosted/dev use.
+    supabase_url: str | None = None
+    supabase_jwt_secret: str | None = None
 
 
 @lru_cache
