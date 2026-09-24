@@ -30,7 +30,11 @@ import httpx
 import neo4j
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
-from openlaw.answers.generate import build_retrieval_context, generate_answer
+from openlaw.answers.generate import (
+    build_retrieval_context,
+    generate_answer,
+    persist_answer_events,
+)
 from openlaw.answers.models import ModelRegistry
 from openlaw.config import Settings, get_settings
 from openlaw.evaluation.dataset import MINIMUM_QUESTIONS, EvalQuestion, load_eval_set
@@ -134,6 +138,11 @@ def _run_generation_gate(
         retrieved_ids = tuple(chunk.chunk_id for chunk in context.chunks)
         recall = recall_at_k(retrieved_ids, question.gold_chunk_ids)
         outcome = generate_answer(question.question, context, adapter, registry)
+        # `generate_answer` takes no Settings, so it returns its events
+        # unpersisted; this loop holds one, so it writes them to the
+        # 0600-hardened logs -- an eval run is exactly when a classifier
+        # outage or a burst of hallucinated citations must leave a record.
+        persist_answer_events(outcome, settings)
         unverifiable = sum(len(d.unresolvable_chunk_ids) for d in outcome.answer.dropped)
         results.append(QuestionResult(recall=recall, unverifiable_citations=unverifiable))
     return tuple(results)

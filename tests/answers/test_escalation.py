@@ -18,7 +18,7 @@ from openlaw.answers.escalation import (
     purge_stale_events,
 )
 from openlaw.answers.schema import Claim
-from openlaw.answers.validate import DroppedClaim, ValidatedAnswer
+from openlaw.answers.validate import RejectedClaim
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
 
 
@@ -245,13 +245,8 @@ def test_escalation_footer_without_state_still_routes_somewhere() -> None:
 
 
 def test_hallucination_events_record_dropped_chunk_ids() -> None:
-    answer = ValidatedAnswer(
-        unverified_summary=None,
-        claims=(),
-        dropped=(DroppedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),),
-        is_answerable=False,
-    )
-    events = build_hallucination_events("my question", answer, _context("real"))
+    rejected = (RejectedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),)
+    events = build_hallucination_events("my question", rejected, _context("real"))
 
     assert events[0].dropped_chunk_ids == ("ghost",)
     assert events[0].retrieved_chunk_ids == ("real",)
@@ -261,49 +256,29 @@ def test_hallucination_events_record_dropped_chunk_ids() -> None:
 
 
 def test_no_events_when_nothing_was_dropped() -> None:
-    answer = ValidatedAnswer(
-        unverified_summary="s",
-        claims=(Claim(text="c", chunk_ids=("real",)),),
-        is_answerable=True,
-    )
-    assert build_hallucination_events("q", answer, _context("real")) == ()
+    assert build_hallucination_events("q", (), _context("real")) == ()
 
 
 def test_one_event_per_dropped_claim() -> None:
-    answer = ValidatedAnswer(
-        unverified_summary=None,
-        claims=(),
-        dropped=(
-            DroppedClaim(text="bad one", unresolvable_chunk_ids=("ghost1",)),
-            DroppedClaim(text="bad two", unresolvable_chunk_ids=("ghost2", "ghost3")),
-        ),
-        is_answerable=False,
+    rejected = (
+        RejectedClaim(text="bad one", unresolvable_chunk_ids=("ghost1",)),
+        RejectedClaim(text="bad two", unresolvable_chunk_ids=("ghost2", "ghost3")),
     )
-    events = build_hallucination_events("q", answer, _context("real"))
+    events = build_hallucination_events("q", rejected, _context("real"))
     assert len(events) == 2
     assert events[1].dropped_chunk_ids == ("ghost2", "ghost3")
 
 
 def test_hallucination_event_is_frozen() -> None:
-    answer = ValidatedAnswer(
-        unverified_summary=None,
-        claims=(),
-        dropped=(DroppedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),),
-        is_answerable=False,
-    )
-    event = build_hallucination_events("q", answer, _context("real"))[0]
+    rejected = (RejectedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),)
+    event = build_hallucination_events("q", rejected, _context("real"))[0]
     with pytest.raises(Exception):  # noqa: B017 - pydantic frozen model raises
         event.question = "changed"  # type: ignore[misc]
 
 
 def test_events_append_as_jsonl(tmp_path) -> None:
-    answer = ValidatedAnswer(
-        unverified_summary=None,
-        claims=(),
-        dropped=(DroppedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),),
-        is_answerable=False,
-    )
-    events = build_hallucination_events("q", answer, _context("real"))
+    rejected = (RejectedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),)
+    events = build_hallucination_events("q", rejected, _context("real"))
     path = tmp_path / "hallucinations.jsonl"
 
     assert append_events(events, path) == 1
@@ -323,13 +298,8 @@ def test_append_events_with_empty_tuple_writes_nothing_and_creates_no_file(
 
 
 def test_append_events_creates_parent_directories(tmp_path) -> None:
-    answer = ValidatedAnswer(
-        unverified_summary=None,
-        claims=(),
-        dropped=(DroppedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),),
-        is_answerable=False,
-    )
-    events = build_hallucination_events("q", answer, _context("real"))
+    rejected = (RejectedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),)
+    events = build_hallucination_events("q", rejected, _context("real"))
     path = tmp_path / "nested" / "deep" / "hallucinations.jsonl"
 
     assert append_events(events, path) == 1
@@ -344,13 +314,8 @@ def _mode(path) -> int:
 
 
 def test_append_events_creates_file_with_owner_only_permissions(tmp_path) -> None:
-    answer = ValidatedAnswer(
-        unverified_summary=None,
-        claims=(),
-        dropped=(DroppedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),),
-        is_answerable=False,
-    )
-    events = build_hallucination_events("q", answer, _context("real"))
+    rejected = (RejectedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),)
+    events = build_hallucination_events("q", rejected, _context("real"))
     path = tmp_path / "hallucinations.jsonl"
 
     append_events(events, path)
@@ -367,13 +332,8 @@ def test_append_events_fixes_looser_permissions_on_an_existing_file(tmp_path) ->
     path.chmod(0o644)
     assert _mode(path) == 0o644
 
-    answer = ValidatedAnswer(
-        unverified_summary=None,
-        claims=(),
-        dropped=(DroppedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),),
-        is_answerable=False,
-    )
-    events = build_hallucination_events("q", answer, _context("real"))
+    rejected = (RejectedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),)
+    events = build_hallucination_events("q", rejected, _context("real"))
     append_events(events, path)
 
     assert _mode(path) == 0o600
@@ -463,3 +423,29 @@ def test_purge_stale_events_uses_the_documented_default_when_unspecified(
     append_events((just_over_default,), path)
 
     assert purge_stale_events(path) == 1
+
+
+# --- the footer must not assert an unsourced statistic ----------------------
+#
+# The footer is the one piece of prose this system always emits, to every
+# citizen. It carried "Around 80% of people in India qualify for free legal
+# aid" -- an unsourced quantitative claim, in a product whose whole thesis is
+# that unsourced legal assertions must not reach users.
+
+
+def test_escalation_footer_asserts_no_unsourced_statistic() -> None:
+    footer = escalation_footer()
+
+    assert "80%" not in footer
+    assert "%" not in footer
+
+
+def test_escalation_footer_cites_the_statutory_basis_for_eligibility() -> None:
+    footer = escalation_footer()
+
+    assert "Legal Services Authorities Act, 1987" in footer
+    assert "section 12" in footer
+
+
+def test_escalation_footer_tells_people_how_to_check_eligibility() -> None:
+    assert "whether you qualify" in escalation_footer()

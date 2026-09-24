@@ -24,12 +24,14 @@ response -- see `_classifier_response`.
 """
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from openlaw.answers.escalation import CrisisKind
 from openlaw.answers.generate import (
+    MAX_CONTEXT_CHARS,
     MAX_CONTEXT_CHUNKS,
     answer_question,
     build_retrieval_context,
@@ -618,11 +620,16 @@ def test_answer_question_delivers_a_real_helpline_for_a_classifier_detected_cris
     assert len(adapter.calls) == 1
 
 
-def test_answer_question_records_a_classifier_failure_without_short_circuiting() -> None:
+def test_answer_question_records_a_classifier_failure_without_short_circuiting(
+    tmp_path: Path,
+) -> None:
     """A classifier outage must not stop `answer_question` from retrieving
     and generating an ordinary answer -- it proceeds on the regex verdict
     (no crisis) and records the failure for later persistence instead."""
-    settings = _settings(qdrant_url=_QDRANT_URL)
+    settings = _settings(
+        qdrant_url=_QDRANT_URL,
+        classifier_failure_log_path=tmp_path / "classifier_failures.jsonl",
+    )
     adapter = _ClassifierFailsThenGeneratorSucceedsAdapter(_response(["a1"]))
 
     result = answer_question(
@@ -638,3 +645,169 @@ def test_answer_question_records_a_classifier_failure_without_short_circuiting()
     assert result.answer.is_answerable is True
     assert len(result.classifier_failures) == 1
     assert result.classifier_failures[0].question == "my landlord kept my deposit"
+
+
+# --- the context is bounded by size, not only by chunk count ---------------
+#
+# `MAX_CONTEXT_CHUNKS` bounds how MANY chunks are rendered, not how big they
+# are: 20 long judgment chunks were still effectively unbounded. A character
+# bound caps the real cost of one turn.
+
+
+def _long_chunk(chunk_id: str, length: int) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=chunk_id,
+        text="x" * length,
+        source_url=f"https://www.indiacode.nic.in/{chunk_id}",
+        score=0.9,
+        kind=ChunkKind.JUDGMENT,
+        title="A Judgment",
+    )
+
+
+def test_long_chunks_are_dropped_once_the_character_budget_is_spent() -> None:
+    half_budget = MAX_CONTEXT_CHARS // 2
+    context = RetrievalContext(
+        query="q",
+        chunks=(
+            _long_chunk("j0", half_budget),
+            _long_chunk("j1", half_budget),
+            _long_chunk("j2", half_budget),
+        ),
+    )
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["j0"])])
+
+    generate_answer("q", context, adapter, ModelRegistry())
+
+    rendered_text = adapter.calls[-1]["messages"][0]["content"][0]["text"]
+    assert "chunk_id: j0]" in rendered_text
+    assert "chunk_id: j1]" in rendered_text
+    assert "chunk_id: j2]" not in rendered_text
+    assert len(rendered_text) < 2 * MAX_CONTEXT_CHARS
+
+
+def test_a_citation_outside_the_character_budget_is_dropped() -> None:
+    context = RetrievalContext(
+        query="q",
+        chunks=(
+            _long_chunk("j0", MAX_CONTEXT_CHARS),
+            _long_chunk("j1", MAX_CONTEXT_CHARS),
+        ),
+    )
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["j1"])])
+
+    result = generate_answer("q", context, adapter, ModelRegistry())
+
+    assert result.answer.is_answerable is False
+    assert result.events[0].dropped_chunk_ids == ("j1",)
+
+
+def test_the_strongest_chunk_survives_even_when_it_alone_exceeds_the_budget() -> None:
+    """Dropping everything would make every question unanswerable; the top
+    hit is kept so an answer is still possible, and the bound still holds
+    everything after it."""
+    context = RetrievalContext(
+        query="q",
+        chunks=(
+            _long_chunk("j0", MAX_CONTEXT_CHARS * 2),
+            _long_chunk("j1", 10),
+        ),
+    )
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["j0"])])
+
+    result = generate_answer("q", context, adapter, ModelRegistry())
+
+    assert result.answer.is_answerable is True
+    rendered_text = adapter.calls[-1]["messages"][0]["content"][0]["text"]
+    assert "chunk_id: j1]" not in rendered_text
+
+
+# --- classifier failures and hallucinations are actually persisted ---------
+#
+# `append_classifier_failure_events` was called from nowhere: the events were
+# built and then dropped, so a classifier outage was not in fact
+# "discoverable and countable after the fact".
+
+
+def test_answer_question_persists_a_classifier_failure_to_its_log(
+    tmp_path: Path,
+) -> None:
+    log_path = tmp_path / "logs" / "classifier_failures.jsonl"
+    settings = _settings(
+        qdrant_url=_QDRANT_URL, classifier_failure_log_path=log_path
+    )
+    adapter = _ClassifierFailsThenGeneratorSucceedsAdapter(_response(["a1"]))
+
+    answer_question(
+        "my landlord kept my deposit",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+    )
+
+    record = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert record["question"] == "my landlord kept my deposit"
+    assert "RuntimeError" in record["error"]
+
+
+def test_the_persisted_classifier_failure_log_is_owner_only(tmp_path: Path) -> None:
+    log_path = tmp_path / "classifier_failures.jsonl"
+    settings = _settings(
+        qdrant_url=_QDRANT_URL, classifier_failure_log_path=log_path
+    )
+    adapter = _ClassifierFailsThenGeneratorSucceedsAdapter(_response(["a1"]))
+
+    answer_question(
+        "my landlord kept my deposit",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+    )
+
+    assert log_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_answer_question_persists_hallucination_events(tmp_path: Path) -> None:
+    log_path = tmp_path / "hallucinations.jsonl"
+    settings = _settings(qdrant_url=_QDRANT_URL, hallucination_log_path=log_path)
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["ghost"])])
+
+    answer_question(
+        "my landlord kept my deposit",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+    )
+
+    record = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert record["dropped_chunk_ids"] == ["ghost"]
+    assert log_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_nothing_is_written_when_a_turn_produces_no_events(tmp_path: Path) -> None:
+    hallucinations = tmp_path / "hallucinations.jsonl"
+    failures = tmp_path / "classifier_failures.jsonl"
+    settings = _settings(
+        qdrant_url=_QDRANT_URL,
+        hallucination_log_path=hallucinations,
+        classifier_failure_log_path=failures,
+    )
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a1"])])
+
+    answer_question(
+        "my landlord kept my deposit",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+    )
+
+    assert not hallucinations.exists()
+    assert not failures.exists()

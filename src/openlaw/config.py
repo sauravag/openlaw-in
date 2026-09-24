@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     # volume -- rather than a literal hard-coded at a call site. See
     # openlaw.answers.escalation.append_events / purge_stale_events.
     hallucination_log_path: Path = Path("data/hallucinations.jsonl")
+    # Crisis-classifier failure log (Plan 3 T8b, fix round 2): a classifier
+    # outage is silent and sustained -- every question asked during it loses
+    # the second layer of crisis routing -- so the failures must be countable
+    # after the fact, not just a log line nobody was watching. Same verbatim,
+    # sensitive question text as the hallucination log, so same 0600 treatment
+    # and same "put it on a restricted volume" deployment decision. See
+    # openlaw.answers.crisis_classifier.append_classifier_failure_events.
+    classifier_failure_log_path: Path = Path("data/classifier_failures.jsonl")
 
 
 @lru_cache

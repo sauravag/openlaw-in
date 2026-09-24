@@ -121,3 +121,24 @@ def test_hallucination_log_path_is_configurable_via_environment(monkeypatch) -> 
     monkeypatch.setenv("OPENLAW_HALLUCINATION_LOG_PATH", "/secure/hallucinations.jsonl")
 
     assert Settings().hallucination_log_path == Path("/secure/hallucinations.jsonl")
+
+
+def test_classifier_failure_log_path_has_a_default(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+
+    assert Settings().classifier_failure_log_path == Path(
+        "data/classifier_failures.jsonl"
+    )
+
+
+def test_classifier_failure_log_path_is_configurable_via_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv(
+        "OPENLAW_CLASSIFIER_FAILURE_LOG_PATH", "/secure/classifier_failures.jsonl"
+    )
+
+    assert Settings().classifier_failure_log_path == Path(
+        "/secure/classifier_failures.jsonl"
+    )

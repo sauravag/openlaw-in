@@ -66,21 +66,34 @@ decisions** (see task-8-report.md for the full accounting):
   prevent. See `openlaw.retrieval.rerank`'s module docstring for the full,
   measured case against expansion as a request-path default.
 
-**The context sent to the generator is bounded.** `build_context_message`
-performs no truncation of its own, so an unbounded retrieved set (primary
-hits plus any graph expansion) combined with a long question could exceed
-the model's context window at runtime. `generate_answer` caps the chunks it
-renders to `MAX_CONTEXT_CHUNKS`, and validates the answer against that same
-bounded set -- a claim cannot be credited for citing a chunk that was
-retrieved but never actually shown to the model this turn.
+**The context sent to the generator is bounded, by count AND by size.**
+`build_context_message` performs no truncation of its own, so an unbounded
+retrieved set (primary hits plus any graph expansion) combined with a long
+question could exceed the model's context window at runtime.
+`generate_answer` caps the chunks it renders to `MAX_CONTEXT_CHUNKS` *and*
+their combined text to `MAX_CONTEXT_CHARS` -- a count alone is not a bound,
+since 20 long judgment chunks are effectively unbounded input. It then
+validates the answer against that same bounded set -- a claim cannot be
+credited for citing a chunk that was retrieved but never actually shown to
+the model this turn.
+
+**Both event logs a turn can produce are actually written.**
+`answer_question` calls `persist_answer_events`, which appends
+`HallucinationEvent`s and `ClassifierFailureEvent`s to their configured,
+`0600`-permissioned paths (`Settings.hallucination_log_path` and
+`Settings.classifier_failure_log_path`). `generate_answer` returns the
+events without persisting them, because it takes no `Settings` -- a caller
+holding one (`scripts/run_eval.py`, for instance) calls
+`persist_answer_events` itself.
 
 **The user-visible answer is never composed from model prose.**
 `generate_answer` returns a `ValidatedAnswer` whose only safe-to-render
 content is `claims` and `sources`; `unverified_summary` is unchecked model
 text and is always `None` on every path in this module where the answer is
-not answerable (refusal, malformed JSON, empty completion, or crisis). See
-`openlaw.answers.validate` for why that field exists at all and why a caller
-must never render it.
+not answerable (refusal, malformed JSON, empty completion, or crisis), and
+`dropped` carries chunk ids only, never the rejected prose. See
+`openlaw.answers.validate` for why those fields exist at all and why a
+caller must never render them.
 """
 
 from collections.abc import Callable
@@ -91,11 +104,13 @@ from pydantic import BaseModel, ConfigDict
 from openlaw.answers.crisis_classifier import (
     ClassifierFailureEvent,
     CrisisDetection,
+    append_classifier_failure_events,
     detect_crisis_with_classifier,
 )
 from openlaw.answers.escalation import (
     CrisisKind,
     HallucinationEvent,
+    append_events,
     build_hallucination_events,
     crisis_response,
     escalation_footer,
@@ -103,7 +118,11 @@ from openlaw.answers.escalation import (
 from openlaw.answers.models import LLMAdapter, ModelRegistry, ModelRole
 from openlaw.answers.prompts import SYSTEM_PROMPT, build_context_message
 from openlaw.answers.schema import ANSWER_JSON_SCHEMA, DraftAnswer
-from openlaw.answers.validate import ValidatedAnswer, validate_answer
+from openlaw.answers.validate import (
+    ValidatedAnswer,
+    rejected_claims,
+    validate_answer,
+)
 from openlaw.config import Settings
 from openlaw.retrieval.context import RetrievalContext, RetrievedChunk
 from openlaw.retrieval.factory import build_query_embedder
@@ -120,6 +139,16 @@ MAX_ANSWER_TOKENS = 4096
 #: chunk in the common, expansion-off case.
 MAX_CONTEXT_CHUNKS = 20
 
+#: Caps the total SIZE of those chunks. A count alone is not a bound: a
+#: Supreme Court judgment chunk can run to tens of thousands of characters,
+#: so 20 of them is effectively unbounded input on every question — an
+#: unbounded per-question cost on a product priced per citizen, and a
+#: context-window risk at the tail. 60,000 characters is roughly 15-20k
+#: tokens (Indic scripts tokenise worse than English, so the token figure is
+#: the pessimistic one) and leaves the common provision-chunk case —
+#: 20 chunks of a few thousand characters — entirely untouched.
+MAX_CONTEXT_CHARS = 60_000
+
 _UNANSWERABLE_ANSWER = ValidatedAnswer(unverified_summary=None, is_answerable=False)
 
 #: A function that expands a set of primary chunk ids into further,
@@ -135,12 +164,11 @@ class AnswerResult(BaseModel):
     `classifier_failures` is non-empty only when the crisis classifier could
     not be consulted this turn (a failed call, or an unparseable response) --
     see `openlaw.answers.crisis_classifier`'s module docstring for why that
-    does NOT set `crisis`. It is carried through here, unpersisted, following
-    the same "build now, persist later" shape as `events`
-    (`HallucinationEvent`): a caller can append it via
-    `crisis_classifier.append_classifier_failure_events` so a silent,
-    sustained classifier outage is countable and discoverable after the
-    fact, not just a single log line at the moment it happened.
+    does NOT set `crisis`. It follows the same "build now, persist later"
+    shape as `events` (`HallucinationEvent`), and `persist_answer_events`
+    does the persisting -- `answer_question` calls it on every turn -- so a
+    silent, sustained classifier outage is countable and discoverable after
+    the fact, not just a single log line at the moment it happened.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -168,9 +196,31 @@ def _crisis_result(crisis: CrisisKind, state: str | None) -> AnswerResult:
     )
 
 
+def _bounded_chunks(chunks: tuple[RetrievedChunk, ...]) -> tuple[RetrievedChunk, ...]:
+    """Return the leading chunks that fit within BOTH context bounds.
+
+    Keeps a prefix rather than cherry-picking whichever chunks happen to fit:
+    chunks arrive ordered by relevance, and skipping a long strong hit to fit
+    a short weak one behind it would quietly reorder the evidence.
+
+    The first chunk is always kept, even when it alone exceeds
+    `MAX_CONTEXT_CHARS` — dropping everything would make the question
+    unanswerable outright, which is a worse outcome than one oversized chunk,
+    and the bound still holds for every chunk after it.
+    """
+    kept: list[RetrievedChunk] = []
+    remaining = MAX_CONTEXT_CHARS
+    for chunk in chunks[:MAX_CONTEXT_CHUNKS]:
+        if kept and len(chunk.text) > remaining:
+            break
+        kept.append(chunk)
+        remaining -= len(chunk.text)
+    return tuple(kept)
+
+
 def _bounded_context(question: str, context: RetrievalContext) -> RetrievalContext:
     """Return a context carrying `question` as its query, capped to
-    `MAX_CONTEXT_CHUNKS` chunks.
+    `MAX_CONTEXT_CHUNKS` chunks and `MAX_CONTEXT_CHARS` characters of text.
 
     Never mutates `context`. Chunks are assumed already ordered by relevance
     (retrieval score, or a reranker upstream), so capping keeps the strongest
@@ -184,9 +234,7 @@ def _bounded_context(question: str, context: RetrievalContext) -> RetrievalConte
     the text crisis detection and hallucination logging saw for the same
     turn.
     """
-    return RetrievalContext(
-        query=question, chunks=context.chunks[:MAX_CONTEXT_CHUNKS]
-    )
+    return RetrievalContext(query=question, chunks=_bounded_chunks(context.chunks))
 
 
 def _generate_from_context(
@@ -237,11 +285,12 @@ def _generate_from_context(
             classifier_failures=classifier_failures,
         )
 
-    validated = validate_answer(draft, bounded)
     return AnswerResult(
-        answer=validated,
+        answer=validate_answer(draft, bounded),
         footer=footer,
-        events=build_hallucination_events(question, validated, bounded),
+        events=build_hallucination_events(
+            question, rejected_claims(draft, bounded), bounded
+        ),
         classifier_failures=classifier_failures,
     )
 
@@ -251,6 +300,26 @@ def _failures_of(detection: CrisisDetection) -> tuple[ClassifierFailureEvent, ..
     else `()`. Shared by `generate_answer` and `answer_question` to build the
     tuple `_generate_from_context` expects."""
     return (detection.failure,) if detection.failure is not None else ()
+
+
+def persist_answer_events(result: AnswerResult, settings: Settings) -> None:
+    """Write both event logs one turn can produce, to their configured paths.
+
+    Both writes go through `escalation.append_jsonl_records`, so both logs
+    are created (and re-asserted) `0600` and appended to, never rewritten;
+    both carry verbatim user text and need identical handling. Neither log
+    file is created when there is nothing to write, so an ordinary,
+    event-free question touches the filesystem not at all.
+
+    Called by `answer_question` on every non-crisis turn. Without it the
+    events were built and then dropped on the floor, which made "a classifier
+    outage is countable and discoverable after the fact" untrue: a sustained
+    outage left nothing behind but log lines nobody was watching.
+    """
+    append_events(result.events, settings.hallucination_log_path)
+    append_classifier_failure_events(
+        result.classifier_failures, settings.classifier_failure_log_path
+    )
 
 
 def generate_answer(
@@ -344,6 +413,8 @@ def answer_question(
         question, settings, search_client, embedder, expand_fn
     )
     footer = escalation_footer(state)
-    return _generate_from_context(
+    result = _generate_from_context(
         question, context, adapter, registry, footer, _failures_of(detection)
     )
+    persist_answer_events(result, settings)
+    return result

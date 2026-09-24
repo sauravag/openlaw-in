@@ -44,7 +44,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from openlaw.answers.validate import ValidatedAnswer
+from openlaw.answers.validate import RejectedClaim
 from openlaw.retrieval.context import RetrievalContext
 
 NALSA_HELPLINE = "15100"
@@ -206,9 +206,13 @@ def escalation_footer(state: str | None = None) -> str:
     return (
         "This is legal information, not legal advice, and it cannot replace a "
         "lawyer who knows your case.\n\n"
-        f"You may be entitled to a free lawyer. Contact {authority}, or call the "
-        f"NALSA helpline on {NALSA_HELPLINE}. Around 80% of people in India "
-        "qualify for free legal aid."
+        "Free legal aid is a statutory right in India. Who qualifies is set "
+        "out in section 12 of the Legal Services Authorities Act, 1987 — it "
+        "covers women and children, members of the Scheduled Castes and "
+        "Scheduled Tribes, people in custody, and anyone whose income is "
+        "below the limit their State prescribes, among others.\n\n"
+        f"To find out whether you qualify, contact {authority}, or call the "
+        f"NALSA helpline on {NALSA_HELPLINE}."
     )
 
 
@@ -257,22 +261,28 @@ class HallucinationEvent(BaseModel):
 
 
 def build_hallucination_events(
-    question: str, answer: ValidatedAnswer, context: RetrievalContext
+    question: str, rejected: tuple[RejectedClaim, ...], context: RetrievalContext
 ) -> tuple[HallucinationEvent, ...]:
-    """Return one event per dropped claim. Empty when nothing was dropped."""
-    if not answer.dropped:
+    """Return one event per rejected claim. Empty when nothing was rejected.
+
+    Takes `openlaw.answers.validate.rejected_claims(draft, context)` rather
+    than the `ValidatedAnswer`: the verbatim text of a refused claim is
+    deliberately absent from `ValidatedAnswer` (see `DroppedClaim`), so this
+    log-only path is the only thing that ever holds it.
+    """
+    if not rejected:
         return ()
     now = datetime.now(UTC).isoformat()
     retrieved = tuple(sorted(context.chunk_ids))
     return tuple(
         HallucinationEvent(
             question=question,
-            dropped_chunk_ids=dropped.unresolvable_chunk_ids,
+            dropped_chunk_ids=claim.unresolvable_chunk_ids,
             retrieved_chunk_ids=retrieved,
-            claim_text=dropped.text,
+            claim_text=claim.text,
             timestamp=now,
         )
-        for dropped in answer.dropped
+        for claim in rejected
     )
 
 

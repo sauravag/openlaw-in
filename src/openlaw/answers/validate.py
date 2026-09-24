@@ -37,6 +37,14 @@ logging/debugging, and never safe to render to a user. Note too that
 references (e.g. "under Section 9") that nobody has checked against the
 claim's `chunk_ids` — validation here only proves the *cited chunks* were
 retrieved, not that every assertion inside `text` is supported by them.
+
+A third route for unverified prose, now closed: the text of a claim that
+*failed* validation. It was preserved verbatim on `ValidatedAnswer.dropped`,
+unconditionally — the one piece of prose in the whole pipeline already known
+to be ungrounded, sitting on the object handed to renderers. `DroppedClaim`
+now carries chunk ids only; the verbatim text lives on `RejectedClaim`,
+produced by `rejected_claims` and consumed solely by the log-only,
+`0600`-permissioned `HallucinationEvent` in `openlaw.answers.escalation`.
 """
 
 import logging
@@ -60,7 +68,33 @@ class Source(BaseModel):
 
 
 class DroppedClaim(BaseModel):
-    """A claim removed because it cited chunks that were not retrieved."""
+    """The citation-only record of a claim validation refused.
+
+    Carries the unresolvable chunk_ids and *nothing else* — in particular,
+    not the claim's text. This model is attached to `ValidatedAnswer`, which
+    travels to whatever renders the answer, and the text of a claim that
+    failed validation is precisely the prose a reader cannot check. It used
+    to be carried here, which made `ValidatedAnswer.dropped[].text` a third
+    route for unverified prose to reach a user (after `summary`, closed by
+    `unverified_summary`). The verbatim text now lives only on
+    `RejectedClaim`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    unresolvable_chunk_ids: tuple[str, ...]
+
+
+class RejectedClaim(BaseModel):
+    """A refused claim *with* its verbatim model-written text — log-only.
+
+    Produced by `rejected_claims` and consumed only by
+    `openlaw.answers.escalation.build_hallucination_events`, whose
+    `HallucinationEvent` log is append-only, `0600`-permissioned and
+    retention-bounded. Deliberately not reachable from `ValidatedAnswer`: a
+    diagnosis log is the one place this text belongs, and anything holding it
+    must be as hard to render by accident as that log is.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -80,11 +114,13 @@ class ValidatedAnswer(BaseModel):
     `sources`; `unverified_summary` exists solely for logging/debugging.
 
     When every claim is dropped, `claims` and `sources` are empty and
-    `is_answerable` is False, but `dropped` is preserved: the caller decides
-    how to present the "could not verify" state (e.g. showing a fixed "we
-    could not find a verifiable answer" message) rather than silently handing
-    back an empty-looking answer that could be mistaken for "there is nothing
-    to say" instead of "we caught a problem".
+    `is_answerable` is False, but `dropped` is preserved so the caller can
+    tell "we caught a problem" apart from "there is nothing to say" — and
+    show its own fixed, pre-written "we could not find a verifiable answer"
+    message. `dropped` is deliberately *not* renderable material: it carries
+    chunk ids only, never the rejected prose, so there is nothing on this
+    model that a template could surface as an answer. Nothing here is safe to
+    render except `claims` and `sources`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -103,20 +139,23 @@ def _unresolvable_ids(claim: Claim, permitted: frozenset[str]) -> tuple[str, ...
 
 def _split_claims(
     claims: tuple[Claim, ...], permitted: frozenset[str]
-) -> tuple[tuple[Claim, ...], tuple[DroppedClaim, ...]]:
+) -> tuple[tuple[Claim, ...], tuple[RejectedClaim, ...]]:
     """Partition `claims` into those fully grounded in `permitted` and those not.
 
     A claim survives only if every one of its chunk_ids is a member of
-    `permitted`; one unresolvable id drops the whole claim.
+    `permitted`; one unresolvable id drops the whole claim. The single
+    implementation behind both `validate_answer` (which strips the rejected
+    prose) and `rejected_claims` (which keeps it for the log), so the two
+    views can never disagree about what was refused.
     """
     kept: list[Claim] = []
-    dropped: list[DroppedClaim] = []
+    rejected: list[RejectedClaim] = []
 
     for claim in claims:
         unresolvable = _unresolvable_ids(claim, permitted)
         if unresolvable:
-            dropped.append(
-                DroppedClaim(text=claim.text, unresolvable_chunk_ids=unresolvable)
+            rejected.append(
+                RejectedClaim(text=claim.text, unresolvable_chunk_ids=unresolvable)
             )
             logger.warning(
                 "dropped claim citing unresolvable chunk_ids: %s", unresolvable
@@ -124,7 +163,7 @@ def _split_claims(
             continue
         kept.append(claim)
 
-    return tuple(kept), tuple(dropped)
+    return tuple(kept), tuple(rejected)
 
 
 def _build_sources(
@@ -171,7 +210,7 @@ def validate_answer(draft: DraftAnswer, context: RetrievalContext) -> ValidatedA
     answer must come from `claims`/`sources` instead.
     """
     permitted = context.chunk_ids
-    kept, dropped = _split_claims(draft.claims, permitted)
+    kept, rejected = _split_claims(draft.claims, permitted)
     sources = _build_sources(kept, context)
     is_answerable = bool(kept) and draft.sufficient
 
@@ -179,6 +218,23 @@ def validate_answer(draft: DraftAnswer, context: RetrievalContext) -> ValidatedA
         unverified_summary=draft.summary if is_answerable else None,
         claims=kept,
         sources=sources,
-        dropped=dropped,
+        dropped=tuple(
+            DroppedClaim(unresolvable_chunk_ids=claim.unresolvable_chunk_ids)
+            for claim in rejected
+        ),
         is_answerable=is_answerable,
     )
+
+
+def rejected_claims(
+    draft: DraftAnswer, context: RetrievalContext
+) -> tuple[RejectedClaim, ...]:
+    """Return the claims `validate_answer` refuses, with their verbatim text.
+
+    Same partition as `validate_answer` (both call `_split_claims`), but this
+    is the log-only view: it keeps the model's prose so
+    `openlaw.answers.escalation.build_hallucination_events` can record *what*
+    was hallucinated. Never give the result to anything that renders.
+    """
+    _, rejected = _split_claims(draft.claims, context.chunk_ids)
+    return rejected

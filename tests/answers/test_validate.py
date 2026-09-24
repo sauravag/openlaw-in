@@ -1,5 +1,5 @@
 from openlaw.answers.schema import Claim, DraftAnswer
-from openlaw.answers.validate import validate_answer
+from openlaw.answers.validate import rejected_claims, validate_answer
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
 
 
@@ -66,7 +66,7 @@ def test_drops_only_the_offending_claim_and_keeps_the_rest() -> None:
     result = validate_answer(draft, _context("a"))
 
     assert [claim.text for claim in result.claims] == ["good"]
-    assert [dropped.text for dropped in result.dropped] == ["bad"]
+    assert [d.unresolvable_chunk_ids for d in result.dropped] == [("nope",)]
 
 
 def test_sources_are_built_only_from_surviving_claims() -> None:
@@ -405,3 +405,52 @@ def test_source_is_skipped_without_crashing_if_the_membership_invariant_is_ever_
 
     assert len(result.claims) == 1
     assert result.sources == ()
+
+
+# --- rejected prose never rides along on the renderable answer --------------
+#
+# `ValidatedAnswer.dropped[].text` used to hold the verbatim text of a claim
+# that FAILED validation, preserved unconditionally -- a third route for
+# unverified model prose to reach a user, one level down from the `summary`
+# bypass already closed. The rejected prose now lives only in
+# `RejectedClaim`, which goes straight to the log-only, 0600-hardened
+# `HallucinationEvent` and is never attached to `ValidatedAnswer`.
+
+
+def test_dropped_claims_on_the_answer_carry_no_model_prose() -> None:
+    draft = DraftAnswer(
+        summary="s",
+        claims=(Claim(text="invented prose", chunk_ids=("ghost",)),),
+        sufficient=True,
+    )
+
+    result = validate_answer(draft, _context("a"))
+
+    assert result.dropped[0].unresolvable_chunk_ids == ("ghost",)
+    assert not hasattr(result.dropped[0], "text")
+    assert "invented prose" not in result.model_dump_json()
+
+
+def test_rejected_claims_carry_the_verbatim_text_for_the_log() -> None:
+    draft = DraftAnswer(
+        summary="s",
+        claims=(
+            Claim(text="good", chunk_ids=("a",)),
+            Claim(text="invented prose", chunk_ids=("ghost", "a")),
+        ),
+        sufficient=True,
+    )
+
+    rejected = rejected_claims(draft, _context("a"))
+
+    assert len(rejected) == 1
+    assert rejected[0].text == "invented prose"
+    assert rejected[0].unresolvable_chunk_ids == ("ghost",)
+
+
+def test_rejected_claims_is_empty_when_every_claim_is_grounded() -> None:
+    draft = DraftAnswer(
+        summary="s", claims=(Claim(text="good", chunk_ids=("a",)),), sufficient=True
+    )
+
+    assert rejected_claims(draft, _context("a")) == ()
