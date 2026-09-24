@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import jwt
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -34,6 +35,17 @@ from openlaw.db.models import Base
 from openlaw.language.pipeline import LocalisedAnswer
 
 JWT_SECRET = "test-secret-at-least-32-bytes-long!!"
+
+
+@pytest.fixture(autouse=True)
+def _reset_proxy_trust_warning_latch() -> None:
+    """`openlaw.api.routes._proxy_trust_warning_logged` is a module-level,
+    once-per-process latch (Task 5 review, H3) -- reset it before every test
+    in this file so a warning logged by one test cannot silently suppress
+    the assertion in another, regardless of test order."""
+    import openlaw.api.routes as routes_module
+
+    routes_module._proxy_trust_warning_logged = False
 
 
 def _settings(**overrides: object) -> Settings:
@@ -147,6 +159,100 @@ def _bearer_token(**claim_overrides: object) -> str:
 
 def test_health_endpoint_reports_ok() -> None:
     assert _client().get("/health").json()["status"] == "ok"
+
+
+# --- Task 5 review, M1: readiness must be checked separately from liveness
+
+
+def test_readyz_reports_ok_when_both_datastores_are_reachable(monkeypatch) -> None:
+    """Postgres is genuinely checked (the test client's real sqlite
+    session); Qdrant is monkeypatched -- this suite never makes a real
+    network call to a live Qdrant."""
+    from openlaw.api import routes as routes_module
+
+    monkeypatch.setattr(routes_module, "_check_qdrant", lambda qdrant_url: "ok")
+
+    response = _client().get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "postgres": "ok", "qdrant": "ok"}
+
+
+def test_readyz_reports_degraded_and_503_when_qdrant_is_unreachable(monkeypatch) -> None:
+    from openlaw.api import routes as routes_module
+
+    monkeypatch.setattr(
+        routes_module, "_check_qdrant", lambda qdrant_url: "unreachable"
+    )
+
+    response = _client().get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "degraded",
+        "postgres": "ok",
+        "qdrant": "unreachable",
+    }
+
+
+def test_readyz_reports_degraded_and_503_when_postgres_is_unreachable(
+    monkeypatch,
+) -> None:
+    from openlaw.api import routes as routes_module
+
+    monkeypatch.setattr(routes_module, "_check_qdrant", lambda qdrant_url: "ok")
+
+    def _broken_session_factory():
+        raise RuntimeError("no such table")
+
+    client = _client(answer_fn=None)
+    # Swap in a session factory that always fails -- exercises the "cannot
+    # even open a session" branch, not just "opened but the query failed".
+    client.app.state.session_factory = _broken_session_factory
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "degraded",
+        "postgres": "unreachable",
+        "qdrant": "ok",
+    }
+
+
+def test_check_qdrant_reports_ok_for_a_healthy_response() -> None:
+    """Unit-level check of `_check_qdrant` itself, with an injected fake
+    client -- proves the function's own logic without any network access."""
+    from openlaw.api.routes import _check_qdrant
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeClient:
+        def __init__(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        def __enter__(self) -> "_FakeClient":
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def get(self, url: str) -> _FakeResponse:
+            assert url == "http://q:6333/healthz"
+            return _FakeResponse()
+
+    assert _check_qdrant("http://q:6333", client_factory=_FakeClient) == "ok"
+
+
+def test_check_qdrant_reports_unreachable_on_any_failure() -> None:
+    from openlaw.api.routes import _check_qdrant
+
+    def _boom(timeout: float):
+        raise ConnectionError("refused")
+
+    assert _check_qdrant("http://q:6333", client_factory=_boom) == "unreachable"
 
 
 # --- basic /ask shape -----------------------------------------------------
@@ -534,6 +640,22 @@ def test_client_key_uses_the_rightmost_untrusted_forwarded_for_hop() -> None:
     assert _client_key(request, settings) == "203.0.113.5"
 
 
+def test_client_key_trusts_the_peer_directly_when_it_is_not_a_trusted_proxy() -> None:
+    """`trusted_proxy_ips` is configured, but this particular caller's peer
+    is not in it -- a direct connection that bypassed the proxy entirely
+    (or a caller with no proxy in the path at all). The raw peer is used
+    as-is, with no `X-Forwarded-For` walk, since only a trusted peer's
+    forwarded header is meaningful."""
+    from openlaw.api.routes import _client_key
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.9"),
+        headers={"x-forwarded-for": "1.2.3.4"},
+    )
+    settings = _settings(trusted_proxy_ips=("172.18.0.1",))
+    assert _client_key(request, settings) == "203.0.113.9"
+
+
 def test_client_key_falls_back_to_the_peer_when_every_hop_is_trusted() -> None:
     from openlaw.api.routes import _client_key
 
@@ -543,6 +665,59 @@ def test_client_key_falls_back_to_the_peer_when_every_hop_is_trusted() -> None:
     )
     settings = _settings(trusted_proxy_ips=("172.18.0.1",))
     assert _client_key(request, settings) == "172.18.0.1"
+
+
+# --- Task 5 review, H3: an unconfigured proxy must be logged, not silent ---
+
+
+def test_client_key_warns_once_when_forwarded_header_arrives_untrusted(caplog) -> None:
+    import logging
+
+    from openlaw.api.routes import _client_key
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.9"),
+        headers={"x-forwarded-for": "1.2.3.4"},
+    )
+    settings = _settings(trusted_proxy_ips=())
+
+    with caplog.at_level(logging.ERROR, logger="openlaw.api.routes"):
+        _client_key(request, settings)
+
+    assert "OPENLAW_TRUSTED_PROXY_IPS" in caplog.text
+
+
+def test_client_key_only_warns_once_per_process(caplog) -> None:
+    import logging
+
+    from openlaw.api.routes import _client_key
+
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="203.0.113.9"),
+        headers={"x-forwarded-for": "1.2.3.4"},
+    )
+    settings = _settings(trusted_proxy_ips=())
+
+    with caplog.at_level(logging.ERROR, logger="openlaw.api.routes"):
+        _client_key(request, settings)
+        _client_key(request, settings)
+        _client_key(request, settings)
+
+    assert len(caplog.records) == 1
+
+
+def test_client_key_does_not_warn_when_no_forwarded_header_is_present(caplog) -> None:
+    import logging
+
+    from openlaw.api.routes import _client_key
+
+    request = SimpleNamespace(client=SimpleNamespace(host="203.0.113.9"), headers={})
+    settings = _settings(trusted_proxy_ips=())
+
+    with caplog.at_level(logging.ERROR, logger="openlaw.api.routes"):
+        _client_key(request, settings)
+
+    assert caplog.records == []
 
 
 # --- Review finding M3: the refusal path's crisis check must not be blind

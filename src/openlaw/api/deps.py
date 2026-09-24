@@ -35,11 +35,14 @@ starts and only fails once a real user asks a question. See
 """
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 
 import httpx
 from fastapi import FastAPI
 from pydantic import ValidationError
 from pydantic_settings.exceptions import SettingsError
+from sqlalchemy import Engine, text
+from sqlalchemy.orm import Session
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.models import ModelRegistry
@@ -203,7 +206,15 @@ def _require_anthropic_key(settings: Settings) -> None:
         )
 
 
-def build_answer_fn(settings: Settings) -> Callable[..., LocalisedAnswer]:
+#: The exact shape the task brief specifies and `routes.ask` calls against
+#: (`answer_fn(body.question, body.language, body.state)`). Precise on
+#: purpose (Task 5 review, H1/LOW): the loose `Callable[..., LocalisedAnswer]`
+#: this used to be typed as let `answer_fn` silently drop `language` without
+#: any type checker ever flagging it -- see `answer_fn`'s docstring below.
+AnswerFn = Callable[[str, str | None, str | None], LocalisedAnswer]
+
+
+def build_answer_fn(settings: Settings) -> AnswerFn:
     """Return the production answer function used by the `/ask` endpoint.
 
     Everything expensive -- the Anthropic client, the model registry, the
@@ -214,6 +225,11 @@ def build_answer_fn(settings: Settings) -> Callable[..., LocalisedAnswer]:
     `_build_search_fn`). Calls `answer_in_language` only -- never
     `persist_answer_events` -- so `routes.ask` remains the single place a
     turn's events are written (see the module docstring).
+
+    `client` (the shared `httpx.Client` used for every search request) is
+    deliberately never closed: it must live exactly as long as the closure
+    that captures it, which is the lifetime of the process, so there is no
+    earlier point at which closing it would be correct.
     """
     _require_anthropic_key(settings)
 
@@ -227,36 +243,58 @@ def build_answer_fn(settings: Settings) -> Callable[..., LocalisedAnswer]:
     def answer_fn(
         question: str, language: str | None, state: str | None
     ) -> LocalisedAnswer:
-        """Answer `question` in the language it was asked in."""
+        """Answer `question` in `language`, or the language it was asked in.
+
+        Task 5 review, H1: an earlier version of this closure accepted
+        `language` and never forwarded it to `answer_in_language`, so an
+        explicit language selection from `AskRequest.language` -- which
+        `answer_in_language`'s own docstring documents as overriding
+        detection outright, and which is the only way a Marathi or Assamese
+        speaker (script-indistinguishable from Hindi/Bengali by detection)
+        gets served in their own language -- was silently discarded in
+        production. `language=language` below is the fix; see
+        `tests/api/test_deps.py` for the regression test, whose stub now
+        requires this keyword rather than defaulting it away.
+        """
         retriever = QdrantGraphRetriever(
             embedder=embedder,
             search_fn=_build_search_fn(client, settings, question),
             expand_fn=expand_fn,
         )
         return answer_in_language(
-            question, retriever, adapter, registry, glossary, state=state
+            question, retriever, adapter, registry, glossary,
+            state=state, language=language,
         )
 
     return answer_fn
 
 
-def _describe_validation_error(exc: ValidationError) -> str:
-    """Return a human-readable summary of every field `exc` failed on.
+def _describe_one_error(error: dict) -> str:
+    """Return a readable description of one pydantic error dict.
 
-    Missing fields are named as their `OPENLAW_*` environment variable
-    (matching every other setting's documented name); anything else (a
-    malformed value pydantic could not coerce -- e.g. non-JSON
-    `OPENLAW_TRUSTED_PROXY_IPS`) is named with its field and pydantic's own
-    message, since there is no single canonical "what to set it to" for an
-    arbitrary bad value the way there is for a simply-missing one.
+    `error["loc"]` is guarded (LOW, Task 5 review): pydantic's own typing
+    allows `loc` to be empty for a model-level (rather than field-level)
+    error, and indexing it unguarded would raise `IndexError` from inside
+    this error-reporting path itself -- the one place that must not itself
+    fail with an unreadable traceback. A missing field is named as its
+    `OPENLAW_*` environment variable (matching every other setting's
+    documented name); anything else (a malformed value pydantic could not
+    coerce -- e.g. non-JSON `OPENLAW_TRUSTED_PROXY_IPS`) is named with its
+    field and pydantic's own message, since there is no single canonical
+    "what to set it to" for an arbitrary bad value the way there is for a
+    simply-missing one.
     """
-    parts = [
-        f"OPENLAW_{str(error['loc'][0]).upper()}"
-        if error["type"] == "missing"
-        else f"{error['loc'][0]} ({error['msg']})"
-        for error in exc.errors()
-    ]
-    return ", ".join(parts)
+    loc = error["loc"]
+    if not loc:
+        return f"(configuration: {error['msg']})"
+    if error["type"] == "missing":
+        return f"OPENLAW_{str(loc[0]).upper()}"
+    return f"{loc[0]} ({error['msg']})"
+
+
+def _describe_validation_error(exc: ValidationError) -> str:
+    """Return a human-readable summary of every field `exc` failed on."""
+    return ", ".join(_describe_one_error(error) for error in exc.errors())
 
 
 def _require_settings() -> Settings:
@@ -290,18 +328,81 @@ def _require_settings() -> Settings:
         ) from exc
 
 
+def _require_proxy_acknowledgement(settings: Settings) -> None:
+    """Fail fast unless the reverse-proxy trust decision was made explicitly.
+
+    Task 5 review, H3. `settings.trusted_proxy_ips` left at its empty
+    default is genuinely ambiguous between two very different deployments:
+    "no proxy, correctly trusting nothing" and "there IS a proxy and nobody
+    configured it" -- and the second one fails with no crash and no 500,
+    just the fourth visitor of the day getting a normal-looking 429 while
+    every caller behind the proxy shares one rate-limit/anonymous-quota
+    bucket (see `Settings.trusted_proxy_ips`'s docstring). Documentation
+    alone does not close this: the value lives in a file the operator copies
+    once and may never re-read, and the correct value is not even knowable
+    until after the proxy is running. Requiring an explicit choice -- either
+    a configured `trusted_proxy_ips`, or `OPENLAW_NO_REVERSE_PROXY=true`
+    acknowledging there is none -- turns an easy-to-miss comment into a
+    state the service refuses to start in silently, matching every other
+    required-secret check in this module.
+    """
+    if settings.trusted_proxy_ips or settings.no_reverse_proxy:
+        return
+    raise RuntimeError(
+        "reverse-proxy trust is not configured. If a reverse proxy "
+        "(nginx/Caddy/Traefik, or the Docker Compose network) sits in front "
+        "of this service, set OPENLAW_TRUSTED_PROXY_IPS to its address (see "
+        ".env.example). If nothing does -- a bare, direct deployment -- set "
+        "OPENLAW_NO_REVERSE_PROXY=true to confirm that explicitly. Leaving "
+        "both unset would silently collapse per-IP rate limiting and the "
+        "anonymous quota into one shared bucket for the whole deployment "
+        "the moment a proxy is added without anyone updating this setting."
+    )
+
+
+def _require_database_reachable(engine: Engine) -> None:
+    """Fail fast when the configured database cannot actually be reached.
+
+    Task 5 review, M3. `engine_from_settings` builds a lazily-connecting
+    SQLAlchemy engine -- the pool never opens a real connection until first
+    use -- so a wrong host, wrong credentials, or a Postgres that was never
+    started would otherwise surface for the first time as a generic 500 on
+    a real user's first authenticated request (the exact "starts and only
+    fails once a user asks a question" outcome this task's requirements
+    forbid), not at startup alongside every other required setting. One
+    cheap `SELECT 1` here converts that into the same fail-fast
+    `RuntimeError` every other missing/invalid setting gets. The URL in the
+    error message has its password redacted -- an error message must not
+    leak a credential.
+    """
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        safe_url = engine.url.render_as_string(hide_password=True)
+        raise RuntimeError(
+            f"cannot reach the configured database ({safe_url}): {exc}. "
+            "Check OPENLAW_DATABASE_URL and that Postgres is running "
+            "(`docker compose up -d postgres`)."
+        ) from exc
+
+
 def production_app() -> FastAPI:
     """Build the production application.
 
-    The composition root: validates configuration, builds `answer_fn` and the
-    database session factory exactly once, and hands both to `create_app`
-    (`openlaw.api.app`), which wires the HTTP surface around them without
-    constructing or reloading either itself.
+    The composition root: validates configuration (including the reverse-
+    proxy trust acknowledgement and live database reachability -- see
+    `_require_proxy_acknowledgement`/`_require_database_reachable`), builds
+    `answer_fn` and the database session factory exactly once, and hands
+    both to `create_app` (`openlaw.api.app`), which wires the HTTP surface
+    around them without constructing or reloading either itself.
     """
     settings = _require_settings()
+    _require_proxy_acknowledgement(settings)
     engine = engine_from_settings(settings)
+    _require_database_reachable(engine)
 
-    def session_factory():
+    def session_factory() -> AbstractContextManager[Session]:
         return session_scope(engine)
 
     return create_app(build_answer_fn(settings), session_factory, settings)

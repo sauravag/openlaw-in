@@ -68,7 +68,10 @@ import time
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 
+import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from openlaw.answers.generate import persist_answer_events
 from openlaw.api.auth import AuthError, decode_token, extract_bearer, upsert_user
@@ -83,6 +86,11 @@ from openlaw.db.quota import (
     next_period_start,
 )
 
+#: Timeout for the /readyz datastore probes -- short, since this endpoint
+#: exists to be polled frequently by an orchestrator and must never itself
+#: become the slow thing blocking a deploy.
+_READINESS_TIMEOUT_SECONDS = 3.0
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -93,6 +101,46 @@ router = APIRouter()
 #: needs a shared store (Redis) instead, which is out of this task's scope.
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
 _RATE_LIMIT_MAX_REQUESTS = 30
+
+
+#: One-time-per-process latch for `_warn_once_about_unconfigured_proxy_trust`
+#: (Task 5 review, H3). Module-level rather than `request.app.state`: several
+#: existing tests call `_client_key` directly with a bare `SimpleNamespace`
+#: request that has no `.app`, and "once per process" is the semantics the
+#: review actually asked for (`logger.error`, rate-limited to once, not once
+#: per app instance). `tests/api/test_routes.py` resets this between tests
+#: via an autouse fixture so the tests stay order-independent.
+_proxy_trust_warning_logged = False
+
+
+def _warn_once_about_unconfigured_proxy_trust(request: Request) -> None:
+    """Log once, at ERROR, when a forwarded-for header arrives with no
+    trusted proxy configured (Task 5 review, H3).
+
+    `Settings.trusted_proxy_ips` left empty is ambiguous between "no proxy,
+    correctly trusting nothing" and "there IS a proxy and nobody configured
+    it" -- and the second one otherwise fails with no crash and no 500, just
+    the fourth visitor of the day getting a normal-looking 429 while every
+    caller behind the proxy shares one bucket. A request carrying
+    `X-Forwarded-For` while the trusted set is empty is near-proof a proxy
+    is in front of this service, so it is the one signal cheap enough to
+    check on every request without becoming a per-request cost itself
+    (`production_app`'s `_require_proxy_acknowledgement` closes the same
+    hazard at startup; this catches the case where a proxy is added to an
+    already-running deployment without anyone updating the setting).
+    """
+    global _proxy_trust_warning_logged
+    if _proxy_trust_warning_logged or not request.headers.get("x-forwarded-for"):
+        return
+    _proxy_trust_warning_logged = True
+    logger.error(
+        "request arrived with X-Forwarded-For but OPENLAW_TRUSTED_PROXY_IPS "
+        "is empty -- a reverse proxy appears to be in front of this service "
+        "with no trust configured, which collapses per-IP rate limiting and "
+        "the anonymous quota into one shared bucket for the whole "
+        "deployment. Set OPENLAW_TRUSTED_PROXY_IPS to the proxy's address "
+        "(see .env.example). Logged once per process."
+    )
 
 
 def _client_key(request: Request, settings: Settings) -> str:
@@ -110,7 +158,10 @@ def _client_key(request: Request, settings: Settings) -> str:
     """
     peer = request.client.host if request.client else "unknown"
     trusted = settings.trusted_proxy_ips
-    if not trusted or peer not in trusted:
+    if not trusted:
+        _warn_once_about_unconfigured_proxy_trust(request)
+        return peer
+    if peer not in trusted:
         return peer
     forwarded = request.headers.get("x-forwarded-for", "")
     hops = [hop.strip() for hop in forwarded.split(",") if hop.strip()]
@@ -323,8 +374,68 @@ def _anonymous_decision(request: Request, settings: Settings, token: str) -> Quo
 
 @router.get("/health")
 def health() -> dict[str, str]:
-    """Liveness probe."""
+    """Liveness probe -- process is up. Deliberately checks nothing else;
+    see `/readyz` for whether it can actually answer a question."""
     return {"status": "ok"}
+
+
+def _check_postgres(session_factory: Callable) -> str:
+    """Return `"ok"` if a session can open and run a trivial query, else a
+    short reason. Never raises -- a failed check is data for `/readyz`, not
+    an exception that would itself 500 the readiness endpoint."""
+    try:
+        with session_factory() as session:
+            session.execute(text("SELECT 1"))
+        return "ok"
+    except Exception as exc:  # pragma: no cover - depends on live environment
+        logger.warning("readiness check: Postgres unreachable: %s", exc)
+        return "unreachable"
+
+
+def _check_qdrant(
+    qdrant_url: str, client_factory: Callable[..., httpx.Client] = httpx.Client
+) -> str:
+    """Return `"ok"` if Qdrant's own health endpoint responds, else a short
+    reason. `client_factory` is injectable for tests -- never invoked
+    against a live server here."""
+    try:
+        with client_factory(timeout=_READINESS_TIMEOUT_SECONDS) as client:
+            response = client.get(f"{qdrant_url}/healthz")
+            response.raise_for_status()
+        return "ok"
+    except Exception as exc:  # pragma: no cover - depends on live environment
+        logger.warning("readiness check: Qdrant unreachable: %s", exc)
+        return "unreachable"
+
+
+@router.get("/readyz")
+def readyz(request: Request) -> JSONResponse:
+    """Readiness probe: can this instance actually answer a question right
+    now (Task 5 review, M1).
+
+    Deliberately separate from `/health` (liveness): a process that is UP
+    but cannot reach Postgres or Qdrant is not ready to serve traffic, and
+    conflating the two means a deployment with no corpus, an unreachable
+    Qdrant, or a down Postgres starts clean, reports healthy, and fails only
+    on a real user's question (a generic 500) -- the exact "starts and only
+    fails once a user asks a question" outcome this task's requirements
+    forbid. Checks Postgres (a session round-trip) and Qdrant (its own
+    `/healthz`) -- never Neo4j or the Anthropic API, both of which
+    `production_app()` already either validates or does not require for a
+    degraded-but-functional (graph expansion off, or crisis classifier
+    absorbing a failure) service.
+    """
+    settings: Settings = request.app.state.settings
+    session_factory: Callable = request.app.state.session_factory
+    postgres = _check_postgres(session_factory)
+    qdrant = _check_qdrant(settings.qdrant_url)
+    healthy = postgres == "ok" and qdrant == "ok"
+    body = {
+        "status": "ok" if healthy else "degraded",
+        "postgres": postgres,
+        "qdrant": qdrant,
+    }
+    return JSONResponse(status_code=200 if healthy else 503, content=body)
 
 
 @router.post("/ask", response_model=AskResponse)

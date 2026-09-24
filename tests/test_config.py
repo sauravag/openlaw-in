@@ -161,3 +161,71 @@ def test_cookie_secure_can_be_disabled_for_plain_http_local_development(
     monkeypatch.setenv("OPENLAW_COOKIE_SECURE", "false")
 
     assert Settings().cookie_secure is False
+
+
+# --- Task 5 review, C1: the shipped .env.example must actually parse -------
+
+
+def test_env_example_constructs_settings_without_error() -> None:
+    """`cp .env.example .env` is the documented first step (README's Setup
+    section) -- if pydantic-settings cannot parse this file, every test,
+    `alembic`, and the service itself fail before a single line of this
+    project's own code runs (Task 5 review, C1: a blank
+    `OPENLAW_TRUSTED_PROXY_IPS=` shipped exactly that break). This
+    constructs `Settings` from the real, checked-in `.env.example` -- not a
+    hand-typed stand-in -- so a future setting with a broken example value
+    fails this test immediately instead of shipping invisible."""
+    example_path = Path(__file__).resolve().parent.parent / ".env.example"
+    assert example_path.exists()
+
+    settings = Settings(_env_file=example_path)  # type: ignore[call-arg]
+
+    assert settings.trusted_proxy_ips == ()
+    assert settings.nano_model_dir is None
+
+
+def test_trusted_proxy_ips_blank_value_means_no_trusted_proxies(monkeypatch) -> None:
+    """A blank `OPENLAW_TRUSTED_PROXY_IPS=` (not merely absent -- present
+    and empty, exactly what the shipped .env.example had before the Task 5
+    review's C1 fix) must resolve to the safe empty tuple, not raise
+    `SettingsError` -- see the `_decode_trusted_proxy_ips` validator."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_TRUSTED_PROXY_IPS", "")
+
+    assert Settings().trusted_proxy_ips == ()
+
+
+def test_trusted_proxy_ips_reads_the_documented_json_array_syntax(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_TRUSTED_PROXY_IPS", '["172.18.0.1","10.0.0.5"]')
+
+    assert Settings().trusted_proxy_ips == ("172.18.0.1", "10.0.0.5")
+
+
+def test_nano_model_dir_blank_value_means_unset(monkeypatch) -> None:
+    """A blank `OPENLAW_NANO_MODEL_DIR=` must resolve to `None`, not
+    `Path(".")` -- `pathlib` silently normalises an empty string to the
+    current directory, which `prepare_local_model_dir` would then treat as
+    a configured model directory and `rglob` (Task 5 review, M2)."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_NANO_MODEL_DIR", "")
+
+    assert Settings().nano_model_dir is None
+
+
+def test_no_reverse_proxy_defaults_to_false(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+
+    assert Settings().no_reverse_proxy is False
+
+
+def test_no_reverse_proxy_can_be_set_true(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_NO_REVERSE_PROXY", "true")
+
+    assert Settings().no_reverse_proxy is True

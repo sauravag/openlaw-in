@@ -1,9 +1,12 @@
 """Environment-driven settings for the OpenLaw corpus pipeline."""
 
+import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -25,6 +28,17 @@ class Settings(BaseSettings):
     # measured decision in docs/superpowers/sdd/.../task-1-brief.md -- the Voyage
     # API stays available as a configurable alternative.
     query_embedder_backend: str = "local_nano"
+    # Task 5 review, M2: a bare `OPENLAW_NANO_MODEL_DIR=` (present, empty --
+    # exactly what a naive .env.example entry with no value looks like) does
+    # NOT stay unset: pydantic parses the empty string as `Path("")`, which
+    # `pathlib` normalises to `Path(".")` -- the repository root -- not
+    # `None`. Silently truthy (`Path` has no `__bool__`, so `Path(".")` is
+    # truthy like every other `Path`), so `openlaw.retrieval._nano_compat
+    # .prepare_local_model_dir` would `rglob` and symlink the entire repo
+    # tree (`.venv`, `data/`, everything) into the model cache before
+    # failing to find a model there. The validator below is what actually
+    # keeps "leave unset to fetch from the Hub" true for an empty value, not
+    # just for a genuinely absent one.
     nano_model_dir: Path | None = None
     # Graph expansion (Plan 3 T3, fix round 2): OFF by default. Everything
     # expansion adds becomes citable, and live measurement showed it is
@@ -92,7 +106,32 @@ class Settings(BaseSettings):
     # An operator running behind a known proxy MUST set this to that proxy's
     # address (its Docker Compose service IP, or `127.0.0.1` for a local
     # nginx) for per-caller accounting to work at all.
-    trusted_proxy_ips: tuple[str, ...] = ()
+    #
+    # `Annotated[..., NoDecode]` plus the validator below (Task 5 review, C1):
+    # pydantic-settings normally JSON-decodes a tuple-typed env value BEFORE
+    # any field validator runs, so `OPENLAW_TRUSTED_PROXY_IPS=` (empty --
+    # exactly what the shipped .env.example had) raised
+    # `pydantic_settings.exceptions.SettingsError` from inside the settings
+    # SOURCE, unconditionally, for every process that ever constructs
+    # `Settings()` -- `cp .env.example .env` broke the entire test suite and
+    # `alembic`, before a single line of this project's own code ran.
+    # `NoDecode` defers decoding to the validator, which treats a blank
+    # value the same way `signup_url`'s default handles "nothing configured"
+    # -- as the safe empty tuple -- so this can no longer be reproduced by
+    # hand-editing the file, not just by fixing today's shipped value.
+    trusted_proxy_ips: Annotated[tuple[str, ...], NoDecode] = ()
+    # Explicit acknowledgement that no reverse proxy sits in front of this
+    # service (Task 5 review, H3). `production_app` refuses to start unless
+    # EITHER `trusted_proxy_ips` above is non-empty OR this is `true` --
+    # `trusted_proxy_ips` left at its empty default is otherwise
+    # indistinguishable between "no proxy, correctly trusting nothing" and
+    # "there IS a proxy and nobody configured it", and the latter fails
+    # silently: no crash, no 500, just the fourth visitor of the day getting
+    # a normal-looking 429 while every caller behind the proxy shares one
+    # rate-limit/anonymous-quota bucket. Forcing the choice at startup turns
+    # an easy-to-miss comment into a state the service will not run in
+    # unnoticed. See `openlaw.api.deps._require_proxy_acknowledgement`.
+    no_reverse_proxy: bool = False
     # Where a quota/rate-limit refusal tells the caller to sign up. Relative
     # by default so it works unmodified in dev; a real deployment should
     # override it with the frontend's actual URL.
@@ -108,6 +147,37 @@ class Settings(BaseSettings):
     # plain HTTP locally must set this to false, or the cookie silently
     # never round-trips and every request looks like a first visit.
     cookie_secure: bool = True
+
+    @field_validator("nano_model_dir", mode="before")
+    @classmethod
+    def _blank_nano_model_dir_means_unset(cls, value: object) -> object:
+        """Treat an empty string as `None`, not `Path("")`/`Path(".")`.
+
+        See `nano_model_dir`'s docstring above -- an empty env value is what
+        a naive `.env.example` entry with no value looks like, and `pathlib`
+        silently normalises `Path("")` to the repository root rather than
+        raising, so this has to be caught explicitly.
+        """
+        if value == "":
+            return None
+        return value
+
+    @field_validator("trusted_proxy_ips", mode="before")
+    @classmethod
+    def _decode_trusted_proxy_ips(cls, value: object) -> object:
+        """Parse `trusted_proxy_ips` from its raw (undecoded, see `NoDecode`
+        above) env-var string, treating blank as the safe empty tuple.
+
+        Still accepts the documented JSON-array syntax (`["1.2.3.4"]`) for
+        anything genuinely configured; only the empty-value case is special-
+        cased, so a malformed non-empty value still fails loudly with a
+        clear parse error rather than being silently swallowed.
+        """
+        if isinstance(value, str):
+            if value.strip() == "":
+                return ()
+            return tuple(json.loads(value))
+        return value
 
 
 @lru_cache

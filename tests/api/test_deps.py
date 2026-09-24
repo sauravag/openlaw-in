@@ -12,8 +12,13 @@ project (see `tests/api/test_routes.py`'s module docstring).
 import pytest
 from fastapi.testclient import TestClient
 
+from sqlalchemy import create_engine
+
 from openlaw.api.deps import (
     QdrantGraphRetriever,
+    _describe_one_error,
+    _require_database_reachable,
+    _require_proxy_acknowledgement,
     build_answer_fn,
     build_expand_fn,
     production_app,
@@ -159,6 +164,52 @@ def test_build_expand_fn_resolves_rows_into_citable_chunks(monkeypatch) -> None:
     assert by_id["s1"].kind == ChunkKind.PROVISION
 
 
+# --- Task 5 review, H3: the reverse-proxy trust decision must be explicit -
+
+
+def test_require_proxy_acknowledgement_rejects_the_ambiguous_default() -> None:
+    """Neither `trusted_proxy_ips` nor `no_reverse_proxy` set -- the exact
+    state that silently collapses per-IP rate limiting and the anonymous
+    quota the moment a proxy is added without anyone updating the setting."""
+    with pytest.raises(RuntimeError, match="OPENLAW_NO_REVERSE_PROXY"):
+        _require_proxy_acknowledgement(
+            _settings(trusted_proxy_ips=(), no_reverse_proxy=False)
+        )
+
+
+def test_require_proxy_acknowledgement_accepts_a_configured_proxy() -> None:
+    _require_proxy_acknowledgement(
+        _settings(trusted_proxy_ips=("172.18.0.1",), no_reverse_proxy=False)
+    )
+
+
+def test_require_proxy_acknowledgement_accepts_an_explicit_no_proxy() -> None:
+    _require_proxy_acknowledgement(
+        _settings(trusted_proxy_ips=(), no_reverse_proxy=True)
+    )
+
+
+# --- Task 5 review, M3: a bad database URL must fail at startup, not on the
+# --- first authenticated request ------------------------------------------
+
+
+def test_require_database_reachable_passes_for_a_reachable_database() -> None:
+    engine = create_engine("sqlite://")
+    _require_database_reachable(engine)  # must not raise
+
+
+def test_require_database_reachable_fails_fast_with_no_credential_leak() -> None:
+    """Connection refused (nothing listens on this port) -- must fail with a
+    readable message, and that message must not include the password from
+    the connection URL."""
+    engine = create_engine(
+        "postgresql+psycopg://openlaw:supersecret@localhost:1/nonexistent"
+    )
+    with pytest.raises(RuntimeError, match="cannot reach the configured database") as excinfo:
+        _require_database_reachable(engine)
+    assert "supersecret" not in str(excinfo.value)
+
+
 def test_build_answer_fn_requires_an_anthropic_key() -> None:
     """Fails fast, before the (expensive) query embedder is ever built --
     see the startup-validation requirement in the task's binding
@@ -202,23 +253,68 @@ def test_production_app_fails_fast_with_a_readable_message_when_config_is_missin
         get_settings.cache_clear()
 
 
-def test_production_app_fails_fast_with_a_readable_message_for_malformed_json_config(
+def test_production_app_fails_fast_with_a_readable_message_for_malformed_trusted_proxy_ips(
     monkeypatch,
 ) -> None:
-    """`OPENLAW_TRUSTED_PROXY_IPS` (a JSON-typed field) failing to parse
-    raises `pydantic_settings.exceptions.SettingsError`, not
-    `pydantic.ValidationError` -- a different exception type that must be
-    caught separately or it reaches the operator as a raw stack trace."""
+    """A genuinely malformed (non-blank) `OPENLAW_TRUSTED_PROXY_IPS` value
+    must still fail loudly and readably -- only the blank-value case (Task 5
+    review, C1) is special-cased to the safe empty tuple. Raises
+    `pydantic.ValidationError` (caught via `NoDecode` + the field validator,
+    see `openlaw.config`), not `SettingsError`."""
     monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
     monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
     monkeypatch.setenv("OPENLAW_TRUSTED_PROXY_IPS", "not-json")
     get_settings.cache_clear()
 
     try:
-        with pytest.raises(RuntimeError, match="invalid configuration"):
+        with pytest.raises(RuntimeError, match="trusted_proxy_ips"):
             production_app()
     finally:
         monkeypatch.delenv("OPENLAW_TRUSTED_PROXY_IPS", raising=False)
+        get_settings.cache_clear()
+
+
+def test_production_app_fails_fast_with_a_readable_message_for_malformed_json_config(
+    monkeypatch,
+) -> None:
+    """A field that still uses pydantic-settings' own JSON decoding (unlike
+    `trusted_proxy_ips`, which now decodes itself -- see the test above)
+    raises `pydantic_settings.exceptions.SettingsError`, not
+    `pydantic.ValidationError` -- a different exception type that must be
+    caught separately or it reaches the operator as a raw stack trace."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_MODEL_TRANSLATOR_OVERRIDES", "not-json")
+    get_settings.cache_clear()
+
+    try:
+        with pytest.raises(RuntimeError, match="invalid configuration"):
+            production_app()
+    finally:
+        monkeypatch.delenv("OPENLAW_MODEL_TRANSLATOR_OVERRIDES", raising=False)
+        get_settings.cache_clear()
+
+
+def test_production_app_refuses_to_start_with_no_proxy_decision_made(
+    monkeypatch,
+) -> None:
+    """End-to-end: even with every other setting present and valid,
+    `production_app()` still refuses to start while the reverse-proxy trust
+    question is unanswered (Task 5 review, H3) -- and does so before the
+    Anthropic key check or anything expensive, since it is unreachable via
+    `.env.example`'s own (unconfigured) values otherwise."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("OPENLAW_DATABASE_URL", "sqlite://")
+    monkeypatch.delenv("OPENLAW_TRUSTED_PROXY_IPS", raising=False)
+    monkeypatch.delenv("OPENLAW_NO_REVERSE_PROXY", raising=False)
+    get_settings.cache_clear()
+
+    try:
+        with pytest.raises(RuntimeError, match="reverse-proxy trust is not configured"):
+            production_app()
+    finally:
         get_settings.cache_clear()
 
 
@@ -274,12 +370,17 @@ def test_production_app_builds_a_working_app_without_touching_qdrant_or_neo4j(
     monkeypatch.setenv("OPENLAW_QUERY_EMBEDDER_BACKEND", "voyage_api")
     monkeypatch.setenv("OPENLAW_VOYAGE_API_KEY", "voyage-test")
     monkeypatch.setenv("OPENLAW_DATABASE_URL", "sqlite://")
+    monkeypatch.setenv("OPENLAW_NO_REVERSE_PROXY", "true")
     get_settings.cache_clear()
 
     seen: dict = {}
 
-    def _fake_answer_in_language(question, retriever, adapter, registry, glossary, state=None):
-        seen.update(question=question, retriever=retriever, state=state)
+    # `state`/`language` deliberately have NO default (Task 5 review, H1):
+    # the earlier stub's `state=None` default let `answer_fn` silently drop
+    # `language` without any test ever noticing. A stub that requires both
+    # keywords turns a dropped one back into an immediate `TypeError`.
+    def _fake_answer_in_language(question, retriever, adapter, registry, glossary, *, state, language):
+        seen.update(question=question, retriever=retriever, state=state, language=language)
         return "sentinel-answer"
 
     monkeypatch.setattr(deps_module, "answer_in_language", _fake_answer_in_language)
@@ -291,13 +392,23 @@ def test_production_app_builds_a_working_app_without_touching_qdrant_or_neo4j(
         response = client.get("/health")
         assert response.status_code == 200
 
-        result = app.state.answer_fn("my landlord kept my deposit", "en", "KA")
+        result = app.state.answer_fn("my landlord kept my deposit", "mr", "KA")
         assert result == "sentinel-answer"
         assert seen["question"] == "my landlord kept my deposit"
         assert seen["state"] == "KA"
+        assert seen["language"] == "mr"
         assert isinstance(seen["retriever"], deps_module.QdrantGraphRetriever)
 
         with app.state.session_factory() as session:
             assert session.is_active
     finally:
         get_settings.cache_clear()
+
+
+def test_describe_one_error_handles_a_model_level_error_with_no_loc() -> None:
+    """LOW, Task 5 review: pydantic's own typing allows `loc` to be empty
+    for a model-level error -- indexing `loc[0]` unguarded would raise
+    `IndexError` from inside this error-reporting path itself."""
+    described = _describe_one_error({"loc": (), "msg": "something went wrong", "type": "value_error"})
+
+    assert described == "(configuration: something went wrong)"

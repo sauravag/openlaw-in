@@ -86,6 +86,8 @@ used:
     cp .env.example .env
     pip install -e ".[dev,local-nano]"
     docker compose up -d
+    docker compose exec postgres createdb -U openlaw openlaw_test
+    alembic upgrade head
     pytest
 
 Query embedding defaults to a local, open-weight model (`voyage-4-nano`) — no
@@ -103,6 +105,44 @@ the extra and switching backends:
 
 Calling the `local_nano` backend without the extra installed raises a clear
 `ImportError` naming the exact `pip install -e ".[local-nano]"` command to fix it.
+
+### Database migrations
+
+`alembic upgrade head` (above) creates the five application tables (`users`,
+`quota_usage`, `conversations`, `messages`, `hallucination_log`) in the
+`openlaw` database — run it once, on every fresh Postgres, **before**
+`pytest`. Migrations do not assume an empty database: if these tables
+already exist some other way (an early dev workflow that predates Alembic,
+or a database restored from a snapshot), reconcile with `alembic stamp head`
+instead — it records the migration as applied without re-running its DDL.
+Running `upgrade head` against a database that already has these tables
+fails loudly with `DuplicateTable`, which is the signal to use `stamp head`
+instead, not a broken migration.
+
+`pytest`'s `@pytest.mark.integration` tests that need a live Postgres
+connection target a **separate** database, `openlaw_test` by default
+(`docker compose exec postgres createdb -U openlaw openlaw_test`, once;
+override the URL with `OPENLAW_TEST_DATABASE_URL`) — never the `openlaw`
+database above. This is deliberate: those tests create their own schema
+(`Base.metadata.create_all`), and doing that in the same database Alembic
+manages is exactly what breaks the migration step for a later `alembic
+upgrade head`. The tests skip cleanly if `openlaw_test` isn't reachable
+yet.
+
+### Running the service
+
+    uvicorn openlaw.api.deps:production_app --factory --host 0.0.0.0 --port 8000
+
+`production_app()` (`openlaw.api.deps`) is the composition root: it
+validates required configuration up front — failing fast with a clear
+message naming exactly what is missing or misconfigured, never a stack
+trace and never a service that starts only to fail on a real user's first
+question — builds the query embedder and Anthropic client exactly once, and
+wires them into the FastAPI app. At minimum, set `OPENLAW_ANTHROPIC_API_KEY`
+in `.env`, and make an explicit reverse-proxy decision: either
+`OPENLAW_TRUSTED_PROXY_IPS` (if a proxy sits in front of this service) or
+`OPENLAW_NO_REVERSE_PROXY=true` (if nothing does) — see `.env.example` for
+why leaving both unset is refused rather than defaulted.
 
 ## Corpus build
 
