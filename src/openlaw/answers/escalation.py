@@ -19,6 +19,15 @@ user one extra paragraph of helpline numbers before their legal answer. A
 false negative can cost a life. When in doubt, this module is built to err
 toward showing help.
 
+This regex is deliberately only half of crisis routing. A second,
+complementary layer using the CLASSIFIER-role model lives in
+`openlaw.answers.crisis_classifier` — it catches euphemism, third-person
+reports, and non-Latin scripts/other Indian languages that no realistic
+regex set reaches. `crisis_classifier.detect_crisis_with_classifier` runs
+this module's `detect_crisis` first and only falls through to the model when
+it is silent; see that module's docstring for the full rationale and its
+fail-safe behaviour when the model call fails.
+
 Every dropped citation is logged. That log is both a safety metric — how
 often is the system inventing citations, and for what kinds of questions —
 and a labelled evaluation dataset produced free by production traffic. See

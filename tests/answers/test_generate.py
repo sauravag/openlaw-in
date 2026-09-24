@@ -12,6 +12,15 @@ Binding corrections over the original task-8 brief (see task-8-report.md):
     and gated graph expansion into one path -- none of that wiring existed
     anywhere in the codebase before this task, and `Settings.
     graph_expansion_enabled` was read nowhere at all.
+
+Task 8b adds a second crisis-detection layer (see
+`tests/answers/test_crisis_classifier.py` for that layer's own tests) and
+fixes a task-8 regression: crisis routing now delivers the category-specific
+helpline (`crisis_response`), not only the generic NALSA footer. Because
+crisis routing now asks the CLASSIFIER-role model whenever the regex is
+silent, every non-crisis `generate_answer`/`answer_question` call in this
+file queues one extra `_SAFE_CLASSIFIER_RESPONSE` ahead of the generator's
+response -- see `_classifier_response`.
 """
 
 import json
@@ -26,12 +35,22 @@ from openlaw.answers.generate import (
     build_retrieval_context,
     generate_answer,
 )
-from openlaw.answers.models import ModelRegistry, ModelRole, StubAdapter
+from openlaw.answers.models import Completion, ModelRegistry, ModelRole, StubAdapter
 from openlaw.config import Settings
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
 from openlaw.retrieval.query import StubQueryEmbedder
 
 _QDRANT_URL = "http://127.0.0.1:6333"
+
+
+def _classifier_response(kind: CrisisKind | None = None) -> str:
+    """The classifier's JSON reply -- "none" unless `kind` is given."""
+    return json.dumps({"crisis": kind.value if kind is not None else "none"})
+
+
+#: Queued ahead of a generator response in every test below whose question
+#: does not match the regex: the classifier is asked once before generation.
+_SAFE_CLASSIFIER_RESPONSE = _classifier_response()
 
 
 def _chunk(chunk_id: str) -> RetrievedChunk:
@@ -127,7 +146,7 @@ class _ExhaustedAdapter:
 
 
 def test_valid_answer_survives_validation() -> None:
-    adapter = StubAdapter([_response(["a"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
 
     assert result.answer.is_answerable is True
@@ -135,7 +154,7 @@ def test_valid_answer_survives_validation() -> None:
 
 
 def test_fabricated_citation_is_dropped_and_logged() -> None:
-    adapter = StubAdapter([_response(["ghost"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["ghost"])])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
 
     assert result.answer.claims == ()
@@ -144,18 +163,18 @@ def test_fabricated_citation_is_dropped_and_logged() -> None:
 
 
 def test_generation_uses_the_configured_generator_model() -> None:
-    adapter = StubAdapter([_response(["a"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
     registry = ModelRegistry({ModelRole.GENERATOR: "claude-sonnet-5"})
     generate_answer("q", _context("a"), adapter, registry)
 
-    assert adapter.calls[0]["model"] == "claude-sonnet-5"
+    assert adapter.calls[-1]["model"] == "claude-sonnet-5"
 
 
 def test_generation_passes_the_structured_output_schema() -> None:
-    adapter = StubAdapter([_response(["a"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
     generate_answer("q", _context("a"), adapter, ModelRegistry())
 
-    schema = adapter.calls[0]["output_schema"]
+    schema = adapter.calls[-1]["output_schema"]
     assert schema is not None
     assert "claims" in schema["properties"]
 
@@ -169,18 +188,18 @@ def test_crisis_question_is_detected_and_reported() -> None:
 
 
 def test_ordinary_question_reports_no_crisis() -> None:
-    adapter = StubAdapter([_response(["a"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
     assert generate_answer("q", _context("a"), adapter, ModelRegistry()).crisis is None
 
 
 def test_every_answer_carries_the_escalation_footer() -> None:
-    adapter = StubAdapter([_response(["a"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
     assert "15100" in result.footer
 
 
 def test_footer_names_the_state_authority_when_supplied() -> None:
-    adapter = StubAdapter([_response(["a"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
     result = generate_answer(
         "q", _context("a"), adapter, ModelRegistry(), state="Kerala"
     )
@@ -188,14 +207,14 @@ def test_footer_names_the_state_authority_when_supplied() -> None:
 
 
 def test_model_reported_insufficiency_is_not_answerable() -> None:
-    adapter = StubAdapter([_response(["a"], sufficient=False)])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"], sufficient=False)])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
     assert result.answer.is_answerable is False
 
 
 def test_malformed_model_json_yields_an_unanswerable_result() -> None:
     """A broken generator must never produce an unvalidated answer."""
-    adapter = StubAdapter(["this is not json"])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, "this is not json"])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
 
     assert result.answer.is_answerable is False
@@ -203,22 +222,43 @@ def test_malformed_model_json_yields_an_unanswerable_result() -> None:
 
 
 def test_empty_generation_yields_an_unanswerable_result() -> None:
-    adapter = StubAdapter([""])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, ""])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
     assert result.answer.is_answerable is False
+
+
+def test_generation_refusal_yields_an_unanswerable_result() -> None:
+    """Exercises the `stop_reason == "refusal"` branch, which an all-`end_turn`
+    `StubAdapter` can never reach on its own."""
+
+    class _ClassifierThenRefusingAdapter:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def complete(self, **kwargs: Any) -> Completion:
+            self.calls.append(kwargs)
+            if kwargs["model"] == ModelRegistry().for_role(ModelRole.CLASSIFIER):
+                return Completion(text=_SAFE_CLASSIFIER_RESPONSE)
+            return Completion(text="", stop_reason="refusal")
+
+    adapter = _ClassifierThenRefusingAdapter()
+    result = generate_answer("q", _context("a"), adapter, ModelRegistry())
+
+    assert result.answer.is_answerable is False
+    assert result.answer.claims == ()
 
 
 # --- Requirement 4: never compose the answer from unvalidated model prose --
 
 
 def test_unverified_summary_is_none_when_not_answerable() -> None:
-    adapter = StubAdapter([_response(["ghost"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["ghost"])])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
     assert result.answer.unverified_summary is None
 
 
 def test_unverified_summary_is_none_on_malformed_json() -> None:
-    adapter = StubAdapter(["not json"])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, "not json"])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
     assert result.answer.unverified_summary is None
 
@@ -252,6 +292,33 @@ def test_crisis_result_still_carries_the_escalation_footer() -> None:
     assert result.answer.is_answerable is False
 
 
+# --- fix round 2 (task 8b): the crisis short-circuit must deliver a real ---
+# --- helpline number, not only the generic NALSA footer, on BOTH the      ---
+# --- regex path and the classifier path.                                  ---
+
+
+def test_crisis_footer_carries_a_real_helpline_number_for_a_regex_hit() -> None:
+    adapter = StubAdapter([])
+    result = generate_answer(
+        "my husband beats me", _context("a"), adapter, ModelRegistry()
+    )
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert "112" in result.footer
+    assert adapter.calls == []
+
+
+def test_crisis_footer_carries_a_real_helpline_number_for_a_classifier_hit() -> None:
+    """The euphemism "I want to end it all" does not match the regex; the
+    classifier must both recognise it AND the resulting footer must still
+    carry a real helpline, not only the generic NALSA footer."""
+    adapter = StubAdapter([_classifier_response(CrisisKind.SELF_HARM)])
+    result = generate_answer(
+        "I want to end it all", _context("a"), adapter, ModelRegistry()
+    )
+    assert result.crisis is CrisisKind.SELF_HARM
+    assert "14416" in result.footer
+
+
 def test_answer_question_skips_retrieval_and_generation_on_crisis() -> None:
     """The full pipeline entry point must not touch the search client or the
     adapter at all once a crisis fires."""
@@ -273,11 +340,11 @@ def test_answer_question_skips_retrieval_and_generation_on_crisis() -> None:
 
 def test_context_rendered_to_the_generator_is_capped() -> None:
     many_chunks = _context(*[f"c{i}" for i in range(MAX_CONTEXT_CHUNKS + 5)])
-    adapter = StubAdapter([_response(["c0"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["c0"])])
 
     generate_answer("q", many_chunks, adapter, ModelRegistry())
 
-    rendered_text = adapter.calls[0]["messages"][0]["content"][0]["text"]
+    rendered_text = adapter.calls[-1]["messages"][0]["content"][0]["text"]
     assert "chunk_id: c0]" in rendered_text
     assert f"chunk_id: c{MAX_CONTEXT_CHUNKS}]" not in rendered_text
 
@@ -288,7 +355,7 @@ def test_a_citation_outside_the_bounded_context_is_dropped() -> None:
     citing something never retrieved."""
     many_chunks = _context(*[f"c{i}" for i in range(MAX_CONTEXT_CHUNKS + 5)])
     truncated_id = f"c{MAX_CONTEXT_CHUNKS}"
-    adapter = StubAdapter([_response([truncated_id])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response([truncated_id])])
 
     result = generate_answer("q", many_chunks, adapter, ModelRegistry())
 
@@ -297,11 +364,25 @@ def test_a_citation_outside_the_bounded_context_is_dropped() -> None:
 
 
 def test_small_context_is_left_untouched() -> None:
-    adapter = StubAdapter([_response(["a"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
     generate_answer("q", _context("a"), adapter, ModelRegistry())
 
-    rendered_text = adapter.calls[0]["messages"][0]["content"][0]["text"]
+    rendered_text = adapter.calls[-1]["messages"][0]["content"][0]["text"]
     assert "chunk_id: a]" in rendered_text
+
+
+def test_rendered_question_uses_the_argument_not_a_divergent_context_query() -> None:
+    """`_context()` fixes `query="my landlord kept my deposit"`, but this
+    calls `generate_answer` with a different `question` ("q") -- the message
+    rendered to the generator must reflect the actual `question` argument,
+    since that is also what crisis detection and hallucination logging see
+    for the same turn."""
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
+    generate_answer("q", _context("a"), adapter, ModelRegistry())
+
+    rendered_text = adapter.calls[-1]["messages"][0]["content"][0]["text"]
+    assert "Question: q" in rendered_text
+    assert "my landlord kept my deposit" not in rendered_text
 
 
 # --- Requirement 1: the query embedder always comes from the factory ------
@@ -435,7 +516,7 @@ def test_graph_expansion_merges_in_expanded_chunks_when_enabled() -> None:
 
 def test_answer_question_end_to_end_for_an_ordinary_question() -> None:
     settings = _settings(qdrant_url=_QDRANT_URL)
-    adapter = StubAdapter([_response(["a1"])])
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a1"])])
 
     result = answer_question(
         "my landlord kept my deposit",
@@ -450,3 +531,39 @@ def test_answer_question_end_to_end_for_an_ordinary_question() -> None:
     assert result.answer.is_answerable is True
     assert result.answer.sources[0].chunk_id == "a1"
     assert "15100" in result.footer
+
+
+def test_answer_question_asks_the_classifier_only_once_for_an_ordinary_question() -> None:
+    """`answer_question` must not re-run crisis detection inside
+    `generate_answer` after already clearing it itself -- a second classifier
+    call per question would double the crisis-detection cost of every
+    ordinary question for no benefit."""
+    settings = _settings(qdrant_url=_QDRANT_URL)
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a1"])])
+
+    result = answer_question(
+        "my landlord kept my deposit",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+    )
+
+    assert result.crisis is None
+    assert len(adapter.calls) == 2
+
+
+def test_answer_question_delivers_a_real_helpline_for_a_classifier_detected_crisis() -> None:
+    """The classifier path must reach the same helpline delivery as the regex
+    path, and must never touch the search client or the generator."""
+    settings = _settings()
+    adapter = StubAdapter([_classifier_response(CrisisKind.SELF_HARM)])
+
+    result = answer_question(
+        "I want to end it all", settings, _RaisingClient(), adapter, ModelRegistry()
+    )
+
+    assert result.crisis is CrisisKind.SELF_HARM
+    assert "14416" in result.footer
+    assert len(adapter.calls) == 1

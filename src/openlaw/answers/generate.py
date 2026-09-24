@@ -5,12 +5,31 @@ Generation is untrusted. Every path out of `generate_answer` passes through
 model refusal produces an unanswerable result, never an unvalidated one.
 
 **Crisis routing runs before anything else.** Both `answer_question` and
-`generate_answer` call `detect_crisis` first and return immediately when it
-fires, before any retrieval or generation call is made. A citizen in danger
-must get helpline numbers now, not after a search-and-generate round trip
-whose output would be discarded anyway -- see `openlaw.answers.escalation`'s
-module docstring: this is a success state, not something bolted onto the end
-of the normal path.
+`generate_answer` call `detect_crisis_with_classifier` first and return
+immediately when it fires, before any retrieval or generation call is made.
+That function itself runs two layers in a fixed order -- the fast, free,
+deterministic regex from `openlaw.answers.escalation` first, then, only when
+the regex stays silent, the CLASSIFIER-role model, which catches euphemism,
+third-person framing, and non-Latin-script/other-language phrasing that no
+realistic regex set reaches (see `openlaw.answers.crisis_classifier`'s
+module docstring for the measured gaps and its fail-safe behaviour on a
+model failure). `answer_question` performs this check exactly once and
+passes the already-cleared question straight through to generation, rather
+than letting `generate_answer` re-run it a second time -- a second
+classifier call per question would double the crisis-detection cost of every
+ordinary question for no benefit.
+
+A citizen in danger must get helpline numbers now, not after a
+search-and-generate round trip whose output would be discarded anyway -- see
+`openlaw.answers.escalation`'s module docstring: this is a success state, not
+something bolted onto the end of the normal path. The crisis short-circuit's
+`footer` is built from `crisis_response(crisis)` (the category-specific
+helpline: police/NHRC, Tele-MANAS, the women's helpline, or the trafficking
+numbers) followed by the standard `escalation_footer` -- not the standard
+footer alone. A version of this module once returned only the generic NALSA
+footer on a crisis short-circuit, which meant "my husband beats me" produced
+no legal content *and* no helpline, only a lawyer referral -- the exact
+inversion of what crisis routing exists to do.
 
 **Retrieval wiring corrects the original task-8 brief, which predates these
 decisions** (see task-8-report.md for the full accounting):
@@ -57,11 +76,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from openlaw.answers.crisis_classifier import detect_crisis_with_classifier
 from openlaw.answers.escalation import (
     CrisisKind,
     HallucinationEvent,
     build_hallucination_events,
-    detect_crisis,
+    crisis_response,
     escalation_footer,
 )
 from openlaw.answers.models import LLMAdapter, ModelRegistry, ModelRole
@@ -104,46 +124,61 @@ class AnswerResult(BaseModel):
     events: tuple[HallucinationEvent, ...] = ()
 
 
-def _crisis_result(crisis: CrisisKind, footer: str) -> AnswerResult:
-    """Return the immediate, generation-free result for a crisis question."""
-    return AnswerResult(answer=_UNANSWERABLE_ANSWER, crisis=crisis, footer=footer)
+def _crisis_result(crisis: CrisisKind, state: str | None) -> AnswerResult:
+    """Return the immediate, generation-free result for a crisis question.
+
+    The footer leads with `crisis_response(crisis)` -- the category-specific
+    helpline numbers (police/NHRC, Tele-MANAS, the women's helpline, or the
+    trafficking numbers) -- followed by the standard `escalation_footer`. A
+    crisis short-circuit that surfaced only the generic NALSA footer would
+    hand a person in danger a lawyer referral instead of the emergency
+    numbers this code path exists to deliver; see the module docstring.
+    """
+    combined_footer = f"{crisis_response(crisis)}\n\n{escalation_footer(state)}"
+    return AnswerResult(
+        answer=_UNANSWERABLE_ANSWER, crisis=crisis, footer=combined_footer
+    )
 
 
-def _bounded_context(context: RetrievalContext) -> RetrievalContext:
-    """Return `context` capped to `MAX_CONTEXT_CHUNKS` chunks.
+def _bounded_context(question: str, context: RetrievalContext) -> RetrievalContext:
+    """Return a context carrying `question` as its query, capped to
+    `MAX_CONTEXT_CHUNKS` chunks.
 
     Never mutates `context`. Chunks are assumed already ordered by relevance
     (retrieval score, or a reranker upstream), so capping keeps the strongest
     chunks and drops the weakest ones off the end.
+
+    Always rewrites `query` to `question` rather than trusting
+    `context.query`: a caller can thread a `RetrievalContext` built from a
+    different string than the `question` argument (this happens in tests,
+    and nothing prevents it in production callers either), which would
+    otherwise let the text rendered into the generator's prompt diverge from
+    the text crisis detection and hallucination logging saw for the same
+    turn.
     """
-    if len(context.chunks) <= MAX_CONTEXT_CHUNKS:
-        return context
     return RetrievalContext(
-        query=context.query, chunks=context.chunks[:MAX_CONTEXT_CHUNKS]
+        query=question, chunks=context.chunks[:MAX_CONTEXT_CHUNKS]
     )
 
 
-def generate_answer(
+def _generate_from_context(
     question: str,
     context: RetrievalContext,
     adapter: LLMAdapter,
     registry: ModelRegistry,
-    state: str | None = None,
+    footer: str,
 ) -> AnswerResult:
-    """Generate, validate and package one answer.
+    """Generate, validate and package one answer, assuming crisis routing has
+    already cleared `question`.
 
-    Crisis routing runs first and short-circuits before `adapter` is ever
-    called. Otherwise a malformed or refused generation still yields an
-    unanswerable result, never an unvalidated one, and the answer is always
-    validated against the same bounded context that was actually rendered
-    into the generator's prompt.
+    Shared by `generate_answer` and `answer_question` so the latter never
+    re-runs crisis detection (and therefore never re-asks the classifier) for
+    a question it already checked once. A malformed or refused generation
+    still yields an unanswerable result, never an unvalidated one, and the
+    answer is always validated against the same bounded context that was
+    actually rendered into the generator's prompt.
     """
-    footer = escalation_footer(state)
-    crisis = detect_crisis(question)
-    if crisis is not None:
-        return _crisis_result(crisis, footer)
-
-    bounded = _bounded_context(context)
+    bounded = _bounded_context(question, context)
     completion = adapter.complete(
         model=registry.for_role(ModelRole.GENERATOR),
         system=SYSTEM_PROMPT,
@@ -166,6 +201,27 @@ def generate_answer(
         footer=footer,
         events=build_hallucination_events(question, validated, bounded),
     )
+
+
+def generate_answer(
+    question: str,
+    context: RetrievalContext,
+    adapter: LLMAdapter,
+    registry: ModelRegistry,
+    state: str | None = None,
+) -> AnswerResult:
+    """Generate, validate and package one answer.
+
+    Crisis routing (regex, then classifier -- see
+    `openlaw.answers.crisis_classifier.detect_crisis_with_classifier`) runs
+    first and short-circuits before `adapter` is ever called for generation.
+    """
+    crisis = detect_crisis_with_classifier(question, adapter, registry)
+    if crisis is not None:
+        return _crisis_result(crisis, state)
+
+    footer = escalation_footer(state)
+    return _generate_from_context(question, context, adapter, registry, footer)
 
 
 def build_retrieval_context(
@@ -218,16 +274,20 @@ def answer_question(
 ) -> AnswerResult:
     """The full path from a citizen's question to a verified answer.
 
-    Crisis routing comes first, ahead of retrieval and generation both: on a
-    crisis question, neither `search_client` nor `adapter` is ever touched --
-    a person in danger gets help resources immediately rather than waiting on
-    a round trip whose output would be discarded anyway.
+    Crisis routing (regex, then classifier) comes first, ahead of retrieval
+    and generation both: on a crisis question, neither `search_client` nor
+    `adapter` is ever touched for generation -- a person in danger gets help
+    resources immediately rather than waiting on a round trip whose output
+    would be discarded anyway. The check runs exactly once here (not again
+    inside generation), since `adapter` and `registry` are already available
+    and a question cleared once does not need re-checking.
     """
-    crisis = detect_crisis(question)
+    crisis = detect_crisis_with_classifier(question, adapter, registry)
     if crisis is not None:
-        return _crisis_result(crisis, escalation_footer(state))
+        return _crisis_result(crisis, state)
 
     context = build_retrieval_context(
         question, settings, search_client, embedder, expand_fn
     )
-    return generate_answer(question, context, adapter, registry, state)
+    footer = escalation_footer(state)
+    return _generate_from_context(question, context, adapter, registry, footer)
