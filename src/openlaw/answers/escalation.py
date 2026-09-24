@@ -37,6 +37,7 @@ and a labelled evaluation dataset produced free by production traffic. See
 import json
 import os
 import re
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -275,26 +276,43 @@ def build_hallucination_events(
     )
 
 
-def append_events(events: tuple[HallucinationEvent, ...], path: Path) -> int:
-    """Append `events` to the JSONL log at `path`. Returns the number written.
+def append_jsonl_records(records: Sequence[BaseModel], path: Path) -> int:
+    """Append `records` (any frozen pydantic model) to the JSONL log at `path`.
 
-    The file is created (if absent) with owner-only `0600` permissions, and
-    that mode is re-asserted after every write even if the file already
-    existed with looser permissions — this log can carry verbatim user text,
-    so it must never be group- or world-readable regardless of the
-    filesystem's default umask.
+    Returns the number written. The file is created (if absent) with
+    owner-only `0600` permissions, and that mode is re-asserted after every
+    write even if the file already existed with looser permissions — these
+    logs can carry verbatim user text, so they must never be group- or
+    world-readable regardless of the filesystem's default umask.
+
+    Shared by `append_events` (`HallucinationEvent`) and
+    `openlaw.answers.crisis_classifier.append_classifier_failure_events`
+    (`ClassifierFailureEvent`) — both need the identical append-only,
+    owner-only-permission JSONL write, and `purge_stale_events` below is
+    already generic enough (it only reads a `"timestamp"` field) to work
+    unmodified against either log.
     """
-    if not events:
+    if not records:
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
     file_descriptor = os.open(
         path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, _LOG_FILE_MODE
     )
     with os.fdopen(file_descriptor, "a", encoding="utf-8") as handle:
-        for event in events:
-            handle.write(json.dumps(event.model_dump()) + "\n")
+        for record in records:
+            handle.write(json.dumps(record.model_dump()) + "\n")
     path.chmod(_LOG_FILE_MODE)
-    return len(events)
+    return len(records)
+
+
+def append_events(events: tuple[HallucinationEvent, ...], path: Path) -> int:
+    """Append `events` to the JSONL log at `path`. Returns the number written.
+
+    A thin, type-named wrapper over `append_jsonl_records` — see that
+    function for the write mechanics and why they must be shared rather than
+    duplicated per event type.
+    """
+    return append_jsonl_records(events, path)
 
 
 def _event_is_within_retention(line: str, cutoff: datetime) -> bool:

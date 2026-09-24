@@ -3,15 +3,25 @@
 Unit tests use `StubAdapter` -- no network, no API key, matching the normal
 state of this environment. The two `@pytest.mark.integration` tests talk to
 the real Anthropic API and skip cleanly when no key is configured.
+
+Revised ruling (see the module docstring in `crisis_classifier.py`): a
+classifier failure must NOT declare a crisis -- it proceeds on the regex
+verdict (already "no crisis" by the time the classifier is reached) since
+every answer already carries the standard escalation footer regardless.
+The failure must still be loud (logged at ERROR) and recorded (returned as
+a `ClassifierFailureEvent`), never silently dropped.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.crisis_classifier import (
-    CLASSIFIER_FAILURE_FALLBACK,
+    ClassifierFailureEvent,
+    append_classifier_failure_events,
+    build_classifier_failure_event,
     classify_crisis,
     detect_crisis_with_classifier,
 )
@@ -96,7 +106,8 @@ def test_regex_hit_short_circuits_before_the_classifier_is_asked() -> None:
     result = detect_crisis_with_classifier(
         "my husband beats me", adapter, ModelRegistry()
     )
-    assert result is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.failure is None
     assert adapter.calls == []
 
 
@@ -105,7 +116,8 @@ def test_classifier_is_asked_exactly_once_when_the_regex_is_silent() -> None:
     result = detect_crisis_with_classifier(
         "I want to end it all", adapter, ModelRegistry()
     )
-    assert result is CrisisKind.SELF_HARM
+    assert result.crisis is CrisisKind.SELF_HARM
+    assert result.failure is None
     assert len(adapter.calls) == 1
 
 
@@ -114,50 +126,118 @@ def test_classifier_confirming_safety_lets_the_question_through() -> None:
     result = detect_crisis_with_classifier(
         "what is the rent control act", adapter, ModelRegistry()
     )
-    assert result is None
+    assert result.crisis is None
+    assert result.failure is None
 
 
-# --- fail-safe: a classifier failure must never look like "safe" -----------
+# --- revised fail-safe: a classifier failure proceeds on the regex verdict -
+# --- (no crisis), but is logged loudly and recorded, never silently lost --
 
 
-def test_a_raising_adapter_fails_safe_rather_than_crashing_or_looking_safe() -> None:
+def test_a_raising_adapter_does_not_declare_a_crisis() -> None:
+    """A classifier outage (network error, timeout, expired key) must not
+    turn an ordinary, regex-silent question into a fabricated crisis --
+    every answer already carries the standard escalation footer regardless,
+    so there is no missing-help cost to accept in exchange."""
     result = detect_crisis_with_classifier(
         "some ambiguous message", _RaisingAdapter(), ModelRegistry()
     )
-    assert result is CLASSIFIER_FAILURE_FALLBACK
-    assert result is not None
+    assert result.crisis is None
 
 
-def test_unparseable_classifier_output_fails_safe_rather_than_looking_safe() -> None:
+def test_a_raising_adapter_records_the_failure_rather_than_dropping_it() -> None:
+    result = detect_crisis_with_classifier(
+        "some ambiguous message", _RaisingAdapter(), ModelRegistry()
+    )
+    assert isinstance(result.failure, ClassifierFailureEvent)
+    assert result.failure.question == "some ambiguous message"
+    assert "RuntimeError" in result.failure.error
+    assert result.failure.timestamp
+
+
+def test_unparseable_classifier_output_does_not_declare_a_crisis() -> None:
     adapter = StubAdapter(["<<not json at all>>"])
     result = detect_crisis_with_classifier(
         "some ambiguous message", adapter, ModelRegistry()
     )
-    assert result is CLASSIFIER_FAILURE_FALLBACK
+    assert result.crisis is None
 
 
-def test_an_unrecognised_classifier_value_fails_safe_rather_than_looking_safe() -> None:
+def test_unparseable_classifier_output_is_recorded() -> None:
+    adapter = StubAdapter(["<<not json at all>>"])
+    result = detect_crisis_with_classifier(
+        "some ambiguous message", adapter, ModelRegistry()
+    )
+    assert result.failure is not None
+    assert "ValueError" in result.failure.error
+
+
+def test_an_unrecognised_classifier_value_does_not_declare_a_crisis() -> None:
     adapter = StubAdapter([json.dumps({"crisis": "made_up_category"})])
     result = detect_crisis_with_classifier(
         "some ambiguous message", adapter, ModelRegistry()
     )
-    assert result is CLASSIFIER_FAILURE_FALLBACK
+    assert result.crisis is None
+    assert result.failure is not None
 
 
-def test_an_exhausted_stub_adapter_fails_safe_rather_than_crashing() -> None:
+def test_an_exhausted_stub_adapter_does_not_declare_a_crisis() -> None:
     """`StubAdapter` raises `RuntimeError` when its queue is empty -- proves
-    the fail-safe wrapper catches adapter-side failures generically, not just
-    a hand-picked exception type."""
+    the fail-safe wrapper catches adapter-side failures generically, not
+    just a hand-picked exception type."""
     adapter = StubAdapter([])
     result = detect_crisis_with_classifier("some message", adapter, ModelRegistry())
-    assert result is CLASSIFIER_FAILURE_FALLBACK
+    assert result.crisis is None
+    assert result.failure is not None
 
 
-def test_classifier_failure_fallback_is_the_most_urgent_category() -> None:
-    """Chosen deliberately, not defaulted -- see the module docstring: this
-    reuses the same category `detect_crisis` already resolves to when a
-    message plausibly matches more than one crisis kind."""
-    assert CLASSIFIER_FAILURE_FALLBACK is CrisisKind.SELF_HARM
+def test_a_successful_classification_never_records_a_failure() -> None:
+    adapter = StubAdapter([_classifier_says(CrisisKind.TRAFFICKING)])
+    result = detect_crisis_with_classifier("some message", adapter, ModelRegistry())
+    assert result.failure is None
+
+
+# --- ClassifierFailureEvent / append_classifier_failure_events -------------
+
+
+def test_build_classifier_failure_event_captures_question_and_error_type() -> None:
+    event = build_classifier_failure_event("my message", RuntimeError("boom"))
+    assert event.question == "my message"
+    assert event.error == "RuntimeError: boom"
+    assert event.timestamp
+
+
+def test_append_classifier_failure_events_writes_jsonl(tmp_path: Path) -> None:
+    event = build_classifier_failure_event("my message", RuntimeError("boom"))
+    path = tmp_path / "classifier_failures.jsonl"
+
+    written = append_classifier_failure_events((event,), path)
+
+    assert written == 1
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["question"] == "my message"
+
+
+def test_append_classifier_failure_events_creates_owner_only_permissions(
+    tmp_path: Path,
+) -> None:
+    import stat
+
+    event = build_classifier_failure_event("my message", RuntimeError("boom"))
+    path = tmp_path / "classifier_failures.jsonl"
+
+    append_classifier_failure_events((event,), path)
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_append_classifier_failure_events_with_empty_tuple_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "classifier_failures.jsonl"
+    assert append_classifier_failure_events((), path) == 0
+    assert not path.exists()
 
 
 # --- measured gaps the regex misses, now caught by the classifier layer ----
@@ -194,7 +274,8 @@ def test_classifier_catches_phrasing_the_regex_measurably_misses(
     adapter = StubAdapter([_classifier_says(kind)])
     result = detect_crisis_with_classifier(text, adapter, ModelRegistry())
 
-    assert result is kind
+    assert result.crisis is kind
+    assert result.failure is None
     assert len(adapter.calls) == 1
 
 

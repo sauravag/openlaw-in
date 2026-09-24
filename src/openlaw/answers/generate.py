@@ -6,18 +6,30 @@ model refusal produces an unanswerable result, never an unvalidated one.
 
 **Crisis routing runs before anything else.** Both `answer_question` and
 `generate_answer` call `detect_crisis_with_classifier` first and return
-immediately when it fires, before any retrieval or generation call is made.
-That function itself runs two layers in a fixed order -- the fast, free,
-deterministic regex from `openlaw.answers.escalation` first, then, only when
-the regex stays silent, the CLASSIFIER-role model, which catches euphemism,
-third-person framing, and non-Latin-script/other-language phrasing that no
-realistic regex set reaches (see `openlaw.answers.crisis_classifier`'s
-module docstring for the measured gaps and its fail-safe behaviour on a
-model failure). `answer_question` performs this check exactly once and
-passes the already-cleared question straight through to generation, rather
-than letting `generate_answer` re-run it a second time -- a second
-classifier call per question would double the crisis-detection cost of every
-ordinary question for no benefit.
+immediately when it reports a crisis, before any retrieval or generation
+call is made. That function itself runs two layers in a fixed order -- the
+fast, free, deterministic regex from `openlaw.answers.escalation` first,
+then, only when the regex stays silent, the CLASSIFIER-role model, which
+catches euphemism, third-person framing, and non-Latin-script/other-language
+phrasing that no realistic regex set reaches (see
+`openlaw.answers.crisis_classifier`'s module docstring for the measured
+gaps). `answer_question` performs this check exactly once and passes the
+already-cleared question straight through to generation, rather than
+letting `generate_answer` re-run it a second time -- a second classifier
+call per question would double the crisis-detection cost of every ordinary
+question for no benefit.
+
+**A classifier failure does not short-circuit into a crisis.** If the
+classifier call errors or returns something unparseable,
+`detect_crisis_with_classifier` proceeds on the regex verdict (already "no
+crisis" by construction) rather than guessing at a category with no
+evidence -- see that module's docstring for why treating every classifier
+outage as a fabricated self-harm crisis would be a worse failure mode than
+the one it was meant to prevent. The failure is still never silent: it is
+logged at `ERROR` and returned as a `ClassifierFailureEvent` on
+`AnswerResult.classifier_failures`, so a caller can persist it (mirroring
+`HallucinationEvent`'s "build now, persist later" shape) and a sustained
+outage stays discoverable after the fact.
 
 A citizen in danger must get helpline numbers now, not after a
 search-and-generate round trip whose output would be discarded anyway -- see
@@ -76,7 +88,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from openlaw.answers.crisis_classifier import detect_crisis_with_classifier
+from openlaw.answers.crisis_classifier import (
+    ClassifierFailureEvent,
+    CrisisDetection,
+    detect_crisis_with_classifier,
+)
 from openlaw.answers.escalation import (
     CrisisKind,
     HallucinationEvent,
@@ -114,7 +130,18 @@ ExpandFn = Callable[[tuple[str, ...]], tuple[RetrievedChunk, ...]]
 
 
 class AnswerResult(BaseModel):
-    """Everything one turn produces."""
+    """Everything one turn produces.
+
+    `classifier_failures` is non-empty only when the crisis classifier could
+    not be consulted this turn (a failed call, or an unparseable response) --
+    see `openlaw.answers.crisis_classifier`'s module docstring for why that
+    does NOT set `crisis`. It is carried through here, unpersisted, following
+    the same "build now, persist later" shape as `events`
+    (`HallucinationEvent`): a caller can append it via
+    `crisis_classifier.append_classifier_failure_events` so a silent,
+    sustained classifier outage is countable and discoverable after the
+    fact, not just a single log line at the moment it happened.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -122,6 +149,7 @@ class AnswerResult(BaseModel):
     crisis: CrisisKind | None = None
     footer: str = ""
     events: tuple[HallucinationEvent, ...] = ()
+    classifier_failures: tuple[ClassifierFailureEvent, ...] = ()
 
 
 def _crisis_result(crisis: CrisisKind, state: str | None) -> AnswerResult:
@@ -167,6 +195,7 @@ def _generate_from_context(
     adapter: LLMAdapter,
     registry: ModelRegistry,
     footer: str,
+    classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
 ) -> AnswerResult:
     """Generate, validate and package one answer, assuming crisis routing has
     already cleared `question`.
@@ -176,7 +205,12 @@ def _generate_from_context(
     a question it already checked once. A malformed or refused generation
     still yields an unanswerable result, never an unvalidated one, and the
     answer is always validated against the same bounded context that was
-    actually rendered into the generator's prompt.
+    actually rendered into the generator's prompt. `classifier_failures` is
+    threaded through onto every returned `AnswerResult` unchanged -- a
+    classifier outage does not stop generation (see
+    `openlaw.answers.crisis_classifier`'s module docstring), but the record
+    of it must still reach the caller regardless of how generation itself
+    turns out.
     """
     bounded = _bounded_context(question, context)
     completion = adapter.complete(
@@ -188,19 +222,35 @@ def _generate_from_context(
     )
 
     if completion.stop_reason == "refusal" or not completion.text.strip():
-        return AnswerResult(answer=_UNANSWERABLE_ANSWER, footer=footer)
+        return AnswerResult(
+            answer=_UNANSWERABLE_ANSWER,
+            footer=footer,
+            classifier_failures=classifier_failures,
+        )
 
     try:
         draft = DraftAnswer.from_json(completion.text)
     except ValueError:
-        return AnswerResult(answer=_UNANSWERABLE_ANSWER, footer=footer)
+        return AnswerResult(
+            answer=_UNANSWERABLE_ANSWER,
+            footer=footer,
+            classifier_failures=classifier_failures,
+        )
 
     validated = validate_answer(draft, bounded)
     return AnswerResult(
         answer=validated,
         footer=footer,
         events=build_hallucination_events(question, validated, bounded),
+        classifier_failures=classifier_failures,
     )
+
+
+def _failures_of(detection: CrisisDetection) -> tuple[ClassifierFailureEvent, ...]:
+    """Return `(detection.failure,)` if a classifier failure was recorded,
+    else `()`. Shared by `generate_answer` and `answer_question` to build the
+    tuple `_generate_from_context` expects."""
+    return (detection.failure,) if detection.failure is not None else ()
 
 
 def generate_answer(
@@ -215,13 +265,17 @@ def generate_answer(
     Crisis routing (regex, then classifier -- see
     `openlaw.answers.crisis_classifier.detect_crisis_with_classifier`) runs
     first and short-circuits before `adapter` is ever called for generation.
+    A classifier failure does not short-circuit -- it proceeds to generation
+    with the failure recorded on the result (see that module's docstring).
     """
-    crisis = detect_crisis_with_classifier(question, adapter, registry)
-    if crisis is not None:
-        return _crisis_result(crisis, state)
+    detection = detect_crisis_with_classifier(question, adapter, registry)
+    if detection.crisis is not None:
+        return _crisis_result(detection.crisis, state)
 
     footer = escalation_footer(state)
-    return _generate_from_context(question, context, adapter, registry, footer)
+    return _generate_from_context(
+        question, context, adapter, registry, footer, _failures_of(detection)
+    )
 
 
 def build_retrieval_context(
@@ -282,12 +336,14 @@ def answer_question(
     inside generation), since `adapter` and `registry` are already available
     and a question cleared once does not need re-checking.
     """
-    crisis = detect_crisis_with_classifier(question, adapter, registry)
-    if crisis is not None:
-        return _crisis_result(crisis, state)
+    detection = detect_crisis_with_classifier(question, adapter, registry)
+    if detection.crisis is not None:
+        return _crisis_result(detection.crisis, state)
 
     context = build_retrieval_context(
         question, settings, search_client, embedder, expand_fn
     )
     footer = escalation_footer(state)
-    return _generate_from_context(question, context, adapter, registry, footer)
+    return _generate_from_context(
+        question, context, adapter, registry, footer, _failures_of(detection)
+    )

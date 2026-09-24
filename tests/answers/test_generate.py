@@ -142,6 +142,24 @@ class _ExhaustedAdapter:
         raise AssertionError("adapter.complete was called unexpectedly")
 
 
+class _ClassifierFailsThenGeneratorSucceedsAdapter:
+    """Simulates a classifier outage (network error/timeout/expired key):
+    the CLASSIFIER-role call always raises, but the GENERATOR-role call
+    succeeds normally with `generator_response` -- used to prove a
+    classifier failure does not stop generation, per the revised ruling in
+    `crisis_classifier.py`'s module docstring."""
+
+    def __init__(self, generator_response: str) -> None:
+        self._generator_response = generator_response
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, **kwargs: Any) -> Completion:
+        self.calls.append(kwargs)
+        if kwargs["model"] == ModelRegistry().for_role(ModelRole.CLASSIFIER):
+            raise RuntimeError("simulated classifier outage")
+        return Completion(text=self._generator_response)
+
+
 # --- Core generate/validate/escalate behaviour (task-8 brief, Step 1) ------
 
 
@@ -317,6 +335,37 @@ def test_crisis_footer_carries_a_real_helpline_number_for_a_classifier_hit() -> 
     )
     assert result.crisis is CrisisKind.SELF_HARM
     assert "14416" in result.footer
+
+
+# --- revised ruling (task 8b, round 2): a classifier failure must NOT ------
+# --- fabricate a crisis -- it proceeds on the regex verdict (no crisis)   --
+# --- since every answer already carries the standard escalation footer   --
+# --- regardless, but the failure must be recorded, never silently lost.  --
+
+
+def test_classifier_failure_yields_a_normal_answerable_result_with_the_footer() -> None:
+    """A classifier outage (network error, timeout, expired key) must not
+    turn an ordinary question into a crisis short-circuit: the user still
+    gets their legal answer and the standard escalation footer -- an
+    unclassifiable question is not a question left without help, since every
+    answer carries the NALSA footer regardless of crisis status."""
+    adapter = _ClassifierFailsThenGeneratorSucceedsAdapter(_response(["a"]))
+    result = generate_answer("q", _context("a"), adapter, ModelRegistry())
+
+    assert result.crisis is None
+    assert result.answer.is_answerable is True
+    assert "15100" in result.footer
+
+
+def test_classifier_failure_is_recorded_rather_than_silently_ignored() -> None:
+    adapter = _ClassifierFailsThenGeneratorSucceedsAdapter(_response(["a"]))
+    result = generate_answer("q", _context("a"), adapter, ModelRegistry())
+
+    assert len(result.classifier_failures) == 1
+    failure = result.classifier_failures[0]
+    assert failure.question == "q"
+    assert "RuntimeError" in failure.error
+    assert failure.timestamp
 
 
 def test_answer_question_skips_retrieval_and_generation_on_crisis() -> None:
@@ -567,3 +616,25 @@ def test_answer_question_delivers_a_real_helpline_for_a_classifier_detected_cris
     assert result.crisis is CrisisKind.SELF_HARM
     assert "14416" in result.footer
     assert len(adapter.calls) == 1
+
+
+def test_answer_question_records_a_classifier_failure_without_short_circuiting() -> None:
+    """A classifier outage must not stop `answer_question` from retrieving
+    and generating an ordinary answer -- it proceeds on the regex verdict
+    (no crisis) and records the failure for later persistence instead."""
+    settings = _settings(qdrant_url=_QDRANT_URL)
+    adapter = _ClassifierFailsThenGeneratorSucceedsAdapter(_response(["a1"]))
+
+    result = answer_question(
+        "my landlord kept my deposit",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+    )
+
+    assert result.crisis is None
+    assert result.answer.is_answerable is True
+    assert len(result.classifier_failures) == 1
+    assert result.classifier_failures[0].question == "my landlord kept my deposit"

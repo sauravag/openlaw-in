@@ -31,35 +31,55 @@ stays oblivious to which layer produced it.
 2. Only when the regex is silent does the classifier get asked, keeping the
    common case (an ordinary legal question) to a single cheap model call.
 
-Fail-safe direction: `classify_crisis` raises on any problem — a failed call
-(network error, timeout, or anything else the adapter surfaces) or a
-response that cannot be parsed into a known `CrisisKind` or "none". It does
-not guess. `detect_crisis_with_classifier` is what decides what "the
-classifier could not be consulted" should mean for routing: a missed crisis
-can cost a life, while an unnecessary helpline costs a reader one extra
-paragraph, so a classifier failure is treated as a crisis, never as "safe" —
-it resolves to `CLASSIFIER_FAILURE_FALLBACK` (`CrisisKind.SELF_HARM`), the
-same category `detect_crisis` already falls back to when a message
-plausibly matches more than one kind (see `escalation._SEVERITY_ORDER`).
-That keeps one "most urgent wins" policy for both kinds of uncertainty —
-ambiguity between categories, and not knowing the category at all — instead
-of inventing a second one just for this module.
+Fail-safe direction (revised): `classify_crisis` raises on any problem — a
+failed call (network error, timeout, or anything else the adapter surfaces)
+or a response that cannot be parsed into a known `CrisisKind` or "none". It
+does not guess. `detect_crisis_with_classifier` decides what "the classifier
+could not be consulted" should mean for routing, and here is the reasoning
+behind that decision, since an earlier version of this module got it wrong
+in the other direction:
+
+An earlier revision treated any classifier failure as a crisis (specifically
+`CrisisKind.SELF_HARM`), reasoning that a missed crisis costs more than an
+unwanted helpline. That reasoning holds for one question, but not at scale:
+the regex has already run and found nothing by the time the classifier is
+even asked, so a classifier *outage* — an expired key, a rate limit, a
+transient network failure — would turn **every** ordinary question asked
+during that outage into a fabricated self-harm crisis, for as long as the
+outage lasts. Someone asking how to register a property would get suicide
+helplines and no legal answer at all. That is a worse failure mode than the
+one it was trying to prevent, and unlike a single missed crisis it is
+silent, sustained, and affects every user, not one.
+
+The decisive fact: **every answer already carries the standard escalation
+footer regardless of crisis status** (see `escalation_footer`, called
+unconditionally in `openlaw.answers.generate`). A question the classifier
+could not be consulted about is therefore not a question left without
+help — it still gets the NALSA helpline (15100) and DLSA routing on the
+ordinary path. So on a classifier failure, `detect_crisis_with_classifier`
+now proceeds on the regex verdict alone (which, having reached the
+classifier step at all, was already "no crisis found") rather than
+declaring a crisis it has no evidence for. The failure is never silently
+swallowed, though: it is logged at `ERROR` (loud enough for an operator
+watching ordinary logs to notice) and returned as a `ClassifierFailureEvent`
+so a caller can persist it via `append_classifier_failure_events` — mirroring
+`openlaw.answers.escalation.HallucinationEvent`'s "build now, persist later"
+shape, so that a silent, sustained outage is countable and discoverable
+after the fact even if nobody was watching the logs in the moment.
 """
 
 import json
 import logging
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from openlaw.answers.escalation import CrisisKind, detect_crisis
+from pydantic import BaseModel, ConfigDict
+
+from openlaw.answers.escalation import CrisisKind, append_jsonl_records, detect_crisis
 from openlaw.answers.models import LLMAdapter, ModelRegistry, ModelRole
 
 logger = logging.getLogger(__name__)
-
-#: Fail-safe category returned when the classifier cannot be consulted at
-#: all (the call raised, or its response could not be parsed) — see the
-#: module docstring for why this specific category, and not a bare "treat as
-#: unsafe" flag, is the right shape for the fallback.
-CLASSIFIER_FAILURE_FALLBACK: CrisisKind = CrisisKind.SELF_HARM
 
 CLASSIFIER_SYSTEM_PROMPT = """\
 You are a safety classifier for a free legal-aid service used by ordinary \
@@ -156,24 +176,93 @@ def classify_crisis(
     return _parse_classification(completion.text)
 
 
+class ClassifierFailureEvent(BaseModel):
+    """A record of one crisis-classifier call that could not be completed.
+
+    Kept verbatim (the question text and the error) for the same reason
+    `openlaw.answers.escalation.HallucinationEvent` keeps its payload
+    verbatim: diagnosing *why* a sustained outage is happening needs the
+    actual failing input and error, not a hash or a bare counter. This event
+    does not, itself, change crisis routing — see the module docstring for
+    why a classifier failure proceeds on the regex verdict rather than
+    declaring a crisis. It exists purely so the failure is countable and
+    diagnosable after the fact, via `append_classifier_failure_events`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    question: str
+    error: str
+    timestamp: str
+
+
+def build_classifier_failure_event(
+    question: str, error: BaseException
+) -> ClassifierFailureEvent:
+    """Build the recordable event for one failed classifier call."""
+    return ClassifierFailureEvent(
+        question=question,
+        error=f"{type(error).__name__}: {error}",
+        timestamp=datetime.now(UTC).isoformat(),
+    )
+
+
+def append_classifier_failure_events(
+    events: tuple[ClassifierFailureEvent, ...], path: Path
+) -> int:
+    """Append `events` to the JSONL log at `path`. Returns the number written.
+
+    Delegates to `escalation.append_jsonl_records` — the same owner-only
+    permission, append-only write already used for `HallucinationEvent`; a
+    classifier-failure log carries the same verbatim, potentially sensitive
+    question text and needs the same guarantees. `escalation.
+    purge_stale_events` (already generic) applies to this log unmodified.
+    """
+    return append_jsonl_records(events, path)
+
+
+class CrisisDetection(BaseModel):
+    """The outcome of running both crisis-detection layers once.
+
+    `failure` is populated only when the classifier could not be consulted
+    at all (a failed call, or an unparseable/unrecognised response); it is
+    always `None` when `crisis` came from the regex or from a successful
+    classifier call. A classifier failure never sets `crisis` itself — see
+    the module docstring for why.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    crisis: CrisisKind | None
+    failure: ClassifierFailureEvent | None = None
+
+
 def detect_crisis_with_classifier(
     text: str, adapter: LLMAdapter, registry: ModelRegistry
-) -> CrisisKind | None:
+) -> CrisisDetection:
     """Run both crisis-detection layers, in order: regex first, then classifier.
 
-    Never raises: a classifier failure fails toward showing help (see the
-    module docstring) rather than crashing the request or silently letting
-    the question through as ordinary legal information.
+    Never raises. On a classifier failure, proceeds on the regex verdict
+    (already "no crisis" by the time the classifier is reached) rather than
+    guessing at a crisis category with no evidence — see the module
+    docstring for the full reasoning. The failure is logged loudly at
+    `ERROR` and returned as `CrisisDetection.failure` so a caller can persist
+    it with `append_classifier_failure_events`.
     """
     regex_hit = detect_crisis(text)
     if regex_hit is not None:
-        return regex_hit
+        return CrisisDetection(crisis=regex_hit)
     try:
-        return classify_crisis(text, adapter, registry)
-    except Exception:
-        logger.warning(
-            "crisis classifier failed; failing safe to %s",
-            CLASSIFIER_FAILURE_FALLBACK,
+        return CrisisDetection(crisis=classify_crisis(text, adapter, registry))
+    except Exception as error:
+        logger.error(
+            "crisis classifier call failed; proceeding on the regex verdict "
+            "(no crisis) rather than declaring an unevidenced crisis -- "
+            "every answer still carries the standard escalation footer. "
+            "error=%r",
+            error,
             exc_info=True,
         )
-        return CLASSIFIER_FAILURE_FALLBACK
+        return CrisisDetection(
+            crisis=None, failure=build_classifier_failure_event(text, error)
+        )
