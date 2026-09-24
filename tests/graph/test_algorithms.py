@@ -1,3 +1,10 @@
+import fcntl
+import tempfile
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
+
 import neo4j
 import pytest
 
@@ -47,6 +54,64 @@ def test_both_algorithms_run_over_the_same_projection() -> None:
     assert CITATION_PROJECTION in louvain_cypher(CITATION_PROJECTION)
 
 
+def _unique_projection_name() -> str:
+    """A GDS projection name unique to this test invocation.
+
+    The production code always projects under the fixed `CITATION_PROJECTION`
+    name, but these integration tests run against a shared Neo4j container
+    where multiple pytest processes may execute concurrently. Projecting,
+    running, and dropping under a fixed name would let two concurrent runs
+    collide -- one dropping or re-projecting the graph the other is mid-use
+    of. A random per-call suffix makes that collision impossible regardless
+    of how many processes run at once.
+    """
+    return f"{CITATION_PROJECTION}_test_{uuid.uuid4().hex}"
+
+
+def _unique_case_ids(*labels: str) -> list[str]:
+    """Build `Judgment.case_id` values unique to this test invocation.
+
+    A unique projection name alone is not enough: these tests `MERGE` on
+    fixed literal case_ids, so two concurrent processes running this file
+    resolve onto the *same* underlying nodes. When one process's cleanup
+    (`DETACH DELETE`) removes those nodes while the other still has a live
+    GDS projection over them, `gds.louvain.write` fails with
+    `EntityNotFoundException` -- a second, node-level collision distinct
+    from the projection-name one. A shared random suffix per test call
+    makes the node set unique too, so concurrent runs never touch each
+    other's data.
+    """
+    suffix = uuid.uuid4().hex
+    return [f"{label}_{suffix}" for label in labels]
+
+
+_GDS_CYCLE_LOCK_PATH = Path(tempfile.gettempdir()) / "openlaw_gds_integration_test.lock"
+
+
+@contextmanager
+def _serialize_live_gds_cycle() -> Iterator[None]:
+    """Serialize full project -> algorithm -> drop cycles across processes.
+
+    A unique projection name and unique per-test node ids are NOT enough on
+    their own: `project_citation_graph` snapshots every `Judgment` node and
+    `CITES` edge in the database, not just the handful this test adds, so
+    two processes each running a full cycle at the same time still race on
+    the SHARED underlying graph. One process's cleanup (`DETACH DELETE`) can
+    remove nodes from that shared graph while the other process's GDS write
+    is mid-flight over its own snapshot of it, which Neo4j reports as
+    `EntityNotFoundException` from `gds.louvain.write`/`gds.pageRank.write`.
+    That race is orthogonal to the projection's catalog name, so a
+    cross-process file lock is used to serialize only the full live-cycle
+    tests below, not the whole suite.
+    """
+    with open(_GDS_CYCLE_LOCK_PATH, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
 def _cleanup(driver: neo4j.Driver, case_ids: list[str]) -> None:
     with driver.session() as session:
         session.run(
@@ -72,56 +137,65 @@ def test_gds_pipeline_ranks_the_most_cited_judgment_highest(
     """End-to-end: project a toy citation graph, run both algorithms, and
     confirm the judgment with the most inbound citations outranks one with
     none, and that Louvain assigns every node a cluster."""
-    case_ids = ["TASK6_TEST_A", "TASK6_TEST_B", "TASK6_TEST_C", "TASK6_TEST_D"]
+    case_ids = _unique_case_ids(
+        "TASK6_TEST_A", "TASK6_TEST_B", "TASK6_TEST_C", "TASK6_TEST_D"
+    )
+    projection = _unique_projection_name()
     with live_driver.session() as session:
         session.run(
             "UNWIND $ids AS cid MERGE (:Judgment {case_id: cid})", ids=case_ids
         )
         session.run(
-            "MATCH (a:Judgment {case_id: 'TASK6_TEST_A'}), "
-            "(b:Judgment {case_id: 'TASK6_TEST_B'}), "
-            "(c:Judgment {case_id: 'TASK6_TEST_C'}), "
-            "(d:Judgment {case_id: 'TASK6_TEST_D'}) "
+            "MATCH (a:Judgment {case_id: $a}), (b:Judgment {case_id: $b}), "
+            "(c:Judgment {case_id: $c}), (d:Judgment {case_id: $d}) "
             "MERGE (b)-[:CITES]->(a) "
             "MERGE (c)-[:CITES]->(a) "
             "MERGE (d)-[:CITES]->(a) "
-            "MERGE (c)-[:CITES]->(b)"
+            "MERGE (c)-[:CITES]->(b)",
+            a=case_ids[0],
+            b=case_ids[1],
+            c=case_ids[2],
+            d=case_ids[3],
         )
 
-    try:
-        drop_projection(live_driver, CITATION_PROJECTION)
-        node_count = project_citation_graph(live_driver)
-        assert node_count >= len(case_ids)
+    with _serialize_live_gds_cycle():
+        try:
+            drop_projection(live_driver, projection)
+            node_count = project_citation_graph(live_driver, projection)
+            assert node_count >= len(case_ids)
 
-        properties_written = run_pagerank(live_driver)
-        assert properties_written >= len(case_ids)
+            properties_written = run_pagerank(live_driver, projection)
+            assert properties_written >= len(case_ids)
 
-        clusters_written = run_louvain(live_driver)
-        assert clusters_written >= len(case_ids)
+            clusters_written = run_louvain(live_driver, projection)
+            assert clusters_written >= len(case_ids)
 
-        rows = _fetch_properties(live_driver, case_ids)
-        properties = {row["case_id"]: row for row in rows}
-        assert all(row["cluster"] is not None for row in properties.values())
+            rows = _fetch_properties(live_driver, case_ids)
+            properties = {row["case_id"]: row for row in rows}
+            assert all(row["cluster"] is not None for row in properties.values())
 
-        # Compare scores directly rather than via most_authoritative's ranked
-        # position: the live graph may hold far more than these 4 judgments
-        # (e.g. a corpus slice loaded by scripts/build_graph.py), so A and D
-        # are not guaranteed to fall within any fixed `limit`.
-        score_a = properties["TASK6_TEST_A"]["pagerank"]
-        score_d = properties["TASK6_TEST_D"]["pagerank"]
-        assert score_a > score_d
+            # Compare scores directly rather than via most_authoritative's
+            # ranked position: the live graph may hold far more than these 4
+            # judgments (e.g. a corpus slice loaded by scripts/build_graph.py),
+            # so A and D are not guaranteed to fall within any fixed `limit`.
+            score_a = properties[case_ids[0]]["pagerank"]
+            score_d = properties[case_ids[3]]["pagerank"]
+            assert score_a > score_d
 
-        # most_authoritative itself still needs a smoke test: non-empty, capped
-        # at the limit, and sorted by descending pagerank. It must not assert
-        # exactly `limit` rows — that depends on how much unrelated data
-        # happens to be loaded, which is ambient state, not behaviour.
-        ranked = most_authoritative(live_driver, limit=10)
-        assert 0 < len(ranked) <= 10
-        assert ranked == sorted(ranked, key=lambda row: row["pagerank"], reverse=True)
-        assert all(authority_label(row) for row in ranked)
-    finally:
-        drop_projection(live_driver, CITATION_PROJECTION)
-        _cleanup(live_driver, case_ids)
+            # most_authoritative itself still needs a smoke test: non-empty,
+            # capped at the limit, and sorted by descending pagerank. It must
+            # not assert exactly `limit` rows -- that depends on how much
+            # unrelated data happens to be loaded, which is ambient state,
+            # not behaviour.
+            ranked = most_authoritative(live_driver, limit=10)
+            assert 0 < len(ranked) <= 10
+            assert ranked == sorted(
+                ranked, key=lambda row: row["pagerank"], reverse=True
+            )
+            assert all(authority_label(row) for row in ranked)
+        finally:
+            drop_projection(live_driver, projection)
+            _cleanup(live_driver, case_ids)
 
 
 @pytest.mark.integration
@@ -141,36 +215,40 @@ def test_full_cycle_is_safe_to_run_twice_back_to_back(
     so project -> PageRank -> Louvain -> drop must be safe to run twice in a
     row. A stale projection left over from a previous run must not make the
     second pass fail, or silently double-write its properties."""
-    case_ids = ["TASK6_RERUN_A", "TASK6_RERUN_B", "TASK6_RERUN_C"]
+    case_ids = _unique_case_ids("TASK6_RERUN_A", "TASK6_RERUN_B", "TASK6_RERUN_C")
+    projection = _unique_projection_name()
     with live_driver.session() as session:
         session.run(
             "UNWIND $ids AS cid MERGE (:Judgment {case_id: cid})", ids=case_ids
         )
         session.run(
-            "MATCH (a:Judgment {case_id: 'TASK6_RERUN_A'}), "
-            "(b:Judgment {case_id: 'TASK6_RERUN_B'}), "
-            "(c:Judgment {case_id: 'TASK6_RERUN_C'}) "
+            "MATCH (a:Judgment {case_id: $a}), (b:Judgment {case_id: $b}), "
+            "(c:Judgment {case_id: $c}) "
             "MERGE (b)-[:CITES]->(a) "
-            "MERGE (c)-[:CITES]->(a)"
+            "MERGE (c)-[:CITES]->(a)",
+            a=case_ids[0],
+            b=case_ids[1],
+            c=case_ids[2],
         )
 
     def run_full_cycle() -> tuple[int, int, int]:
-        drop_projection(live_driver, CITATION_PROJECTION)
-        node_count = project_citation_graph(live_driver)
-        properties_written = run_pagerank(live_driver)
-        clusters_written = run_louvain(live_driver)
-        drop_projection(live_driver, CITATION_PROJECTION)
+        drop_projection(live_driver, projection)
+        node_count = project_citation_graph(live_driver, projection)
+        properties_written = run_pagerank(live_driver, projection)
+        clusters_written = run_louvain(live_driver, projection)
+        drop_projection(live_driver, projection)
         return node_count, properties_written, clusters_written
 
-    try:
-        first_pass = run_full_cycle()
-        second_pass = run_full_cycle()
+    with _serialize_live_gds_cycle():
+        try:
+            first_pass = run_full_cycle()
+            second_pass = run_full_cycle()
 
-        assert first_pass[0] >= len(case_ids)
-        assert second_pass == first_pass
-    finally:
-        drop_projection(live_driver, CITATION_PROJECTION)
-        _cleanup(live_driver, case_ids)
+            assert first_pass[0] >= len(case_ids)
+            assert second_pass == first_pass
+        finally:
+            drop_projection(live_driver, projection)
+            _cleanup(live_driver, case_ids)
 
 
 # --- Task 2 whole-plan review: stub rows must be legible, not a crash ---------

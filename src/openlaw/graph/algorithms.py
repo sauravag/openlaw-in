@@ -78,24 +78,37 @@ def louvain_cypher(name: str) -> str:
     )
 
 
-def project_citation_graph(driver: neo4j.Driver) -> int:
-    """Project the citation graph into the GDS catalog. Returns node count."""
+def project_citation_graph(driver: neo4j.Driver, name: str = CITATION_PROJECTION) -> int:
+    """Project the citation graph into the GDS catalog under `name`.
+
+    Returns node count. `name` defaults to the production projection name;
+    tests pass a unique name so concurrent runs against a shared Neo4j
+    instance cannot collide on the same GDS catalog entry.
+    """
     with driver.session() as session:
-        record = session.run(projection_cypher(CITATION_PROJECTION)).single()
+        record = session.run(projection_cypher(name)).single()
     return int(record["nodeCount"]) if record else 0
 
 
-def run_pagerank(driver: neo4j.Driver) -> int:
-    """Write PageRank authority scores. Returns properties written."""
+def run_pagerank(driver: neo4j.Driver, name: str = CITATION_PROJECTION) -> int:
+    """Write PageRank authority scores over the `name` projection.
+
+    Returns properties written. See `project_citation_graph` for why `name`
+    is overridable.
+    """
     with driver.session() as session:
-        record = session.run(pagerank_cypher(CITATION_PROJECTION)).single()
+        record = session.run(pagerank_cypher(name)).single()
     return int(record["nodePropertiesWritten"]) if record else 0
 
 
-def run_louvain(driver: neo4j.Driver) -> int:
-    """Write Louvain doctrinal cluster ids. Returns properties written."""
+def run_louvain(driver: neo4j.Driver, name: str = CITATION_PROJECTION) -> int:
+    """Write Louvain doctrinal cluster ids over the `name` projection.
+
+    Returns properties written. See `project_citation_graph` for why `name`
+    is overridable.
+    """
     with driver.session() as session:
-        record = session.run(louvain_cypher(CITATION_PROJECTION)).single()
+        record = session.run(louvain_cypher(name)).single()
     return int(record["nodePropertiesWritten"]) if record else 0
 
 
