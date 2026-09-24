@@ -6,9 +6,10 @@ here is minted locally with a throwaway HMAC secret, exactly as
 treated: as untrusted, never as a shortcut past verification.
 
 `_claims()` builds a payload shaped like a real Supabase user-session token
-(`sub`, `email`, `aud="authenticated"`, a future `exp`) so "valid token"
-tests exercise the same claim set Supabase actually issues, and "rejects a
-token missing X" tests drop exactly one claim from that same baseline.
+(`sub`, `email`, `aud="authenticated"`, `role="authenticated"`, a future
+`exp`) so "valid token" tests exercise the same claim set Supabase actually
+issues, and "rejects a token missing X" tests drop exactly one claim from
+that same baseline.
 """
 
 import base64
@@ -39,6 +40,7 @@ def _claims(**overrides: object) -> dict:
         "sub": "user-123",
         "email": "person@example.com",
         "aud": "authenticated",
+        "role": "authenticated",
         "exp": int(time.time()) + 3600,
     }
     base.update(overrides)
@@ -114,6 +116,17 @@ def test_rejects_a_token_with_an_invalid_email_claim() -> None:
         decode_token(_token(_claims(email="not-an-email-address")), SECRET)
 
 
+def test_decode_folds_the_email_claims_case() -> None:
+    """`EmailStr` alone only lowercases the domain half of an address --
+
+    the local part ("Victim" vs "victim") is folded here, in decode_token,
+    so the same person's token always yields the same identity regardless
+    of how Supabase happens to have cased it.
+    """
+    identity = decode_token(_token(_claims(email="Victim@Example.com")), SECRET)
+    assert identity.email == "victim@example.com"
+
+
 def test_rejects_a_token_signed_with_none_algorithm() -> None:
     """`alg: none` must never be accepted, no matter what the header claims.
 
@@ -153,6 +166,21 @@ def test_rejects_a_token_without_an_audience() -> None:
 def test_rejects_a_token_with_the_wrong_audience() -> None:
     with pytest.raises(AuthError):
         decode_token(_token(_claims(aud="anon")), SECRET)
+
+
+def test_rejects_a_token_without_a_role() -> None:
+    with pytest.raises(AuthError):
+        decode_token(_token(_claims_without("role")), SECRET)
+
+
+def test_rejects_a_token_with_the_wrong_role() -> None:
+    """A service-role key that ever ships with `aud: authenticated` must
+
+    still fail on its `role` claim -- a second, independent check against
+    the same class of non-user token as the audience check above.
+    """
+    with pytest.raises(AuthError):
+        decode_token(_token(_claims(role="service_role")), SECRET)
 
 
 def test_rejects_a_token_shaped_like_the_supabase_anon_key() -> None:
@@ -252,6 +280,27 @@ def test_upsert_denies_an_existing_subjects_changed_email_if_it_collides() -> No
         )
 
     assert session.get(User, "user-a").email == "a@example.com"
+
+
+def test_upsert_folds_email_case_for_storage_and_conflict_detection() -> None:
+    """"Victim@x.com" and "victim@x.com" must be treated as one identity --
+
+    built directly here (bypassing decode_token's own folding) to prove the
+    guarantee lives in upsert_user too, at the persistence boundary, not
+    only at the token boundary.
+    """
+    session = _session()
+    stored = upsert_user(
+        session, AuthenticatedUser(user_id="user-a", email="Victim@Example.com")
+    )
+    assert stored.email == "victim@example.com"
+
+    with pytest.raises(AuthError):
+        upsert_user(
+            session,
+            AuthenticatedUser(user_id="user-b", email="VICTIM@example.com"),
+        )
+    assert session.query(User).count() == 1
 
 
 def test_flush_or_deny_denies_a_concurrent_email_collision() -> None:

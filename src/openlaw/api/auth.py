@@ -17,8 +17,8 @@ HTTP request and a database write:
   attacker-controlled algorithm) is presented for verification -- without a
   pinned algorithm list, some verifiers would honour whatever the token
   claims and skip signature checking entirely.
-- `exp`, `sub` and `aud` are all in `options={"require": [...]}`, not merely
-  checked if present. PyJWT only *verifies* `exp` when the claim exists in
+- `exp`, `sub`, `aud` and `role` are all in `options={"require": [...]}`, not
+  merely checked if present. PyJWT only *verifies* `exp` when the claim exists in
   the payload -- a token that omits it outright is otherwise treated as
   never expiring. That matters here specifically because a real, legitimately
   issued token can end up cached in a browser or a shared/cybercafe-device
@@ -31,6 +31,12 @@ HTTP request and a database write:
   omit `sub`/`email`. Verifying `aud == "authenticated"` (the claim Supabase
   puts on real user session tokens, and never on the anon/service keys)
   makes that rejection a guarantee rather than a coincidence.
+- `role` is checked against `"authenticated"` too, alongside `aud`. `aud`
+  alone is the primary defense against the anon/service-role keys above;
+  this is a second, independent claim carrying the same distinction, kept
+  cheap and separate so a token that is ever issued (by misconfiguration or
+  a future Supabase change) with `aud: authenticated` but a non-user `role`
+  still fails.
 - The signing secret itself is length-checked (`_MIN_SECRET_LENGTH`, 32
   bytes -- the minimum PyJWT itself warns is recommended for HS256 per RFC
   7518 Section 3.2) and must be non-empty. Both make `decode_token` fail
@@ -43,6 +49,13 @@ HTTP request and a database write:
 - Identity is bound to the token's `sub` (the Supabase subject), never to
   its `email` -- see `upsert_user`'s docstring for why matching on email
   alone was unsafe.
+- Email is folded to lowercase before it is ever stored or compared
+  (`_normalize_email`). `EmailStr` only lowercases the domain half of an
+  address, not the local part, so without this "Victim@x.com" and
+  "victim@x.com" would be two distinct rows -- harmless today (each still
+  gets its own account, nothing is inherited), but it silently breaks the
+  "one email, one person" assumption that any future email-keyed feature
+  would reasonably make.
 - `AuthError.__str__` is always the same fixed, uninformative string. The
   real reason lives in `.detail`, for a caller that wants to log it
   server-side, but is never meant to reach an HTTP client: a caller that
@@ -62,8 +75,9 @@ from openlaw.db.models import User
 
 _BEARER_PREFIX = "bearer "
 _ALLOWED_ALGORITHMS = ["HS256"]
-_REQUIRED_CLAIMS = ["exp", "sub", "aud"]
+_REQUIRED_CLAIMS = ["exp", "sub", "aud", "role"]
 _REQUIRED_AUDIENCE = "authenticated"
+_REQUIRED_ROLE = "authenticated"
 # RFC 7518 Section 3.2's recommended minimum HMAC key length for SHA-256 --
 # also what PyJWT itself warns about (InsecureKeyLengthWarning) below this.
 _MIN_SECRET_LENGTH = 32
@@ -101,12 +115,25 @@ def extract_bearer(header: str | None) -> str | None:
     return header[len(_BEARER_PREFIX) :].strip() or None
 
 
+def _normalize_email(email: str) -> str:
+    """Fold `email` to a single canonical form for storage and comparison.
+
+    `EmailStr` validates shape but only lowercases the domain half of an
+    address -- lowercasing the whole thing here is what actually makes
+    "Victim@x.com" and "victim@x.com" the same identity. Called both here
+    (the token boundary) and again in `upsert_user` (the persistence
+    boundary), so the guarantee holds even for an `AuthenticatedUser` built
+    directly rather than via `decode_token`.
+    """
+    return email.strip().lower()
+
+
 def _decode_claims(token: str, secret: str) -> dict:
     """Verify `token`'s signature, algorithm, audience and required claims.
 
-    Raises AuthError on any failure. Does not yet look at `sub`/`email`
-    individually -- that is `decode_token`'s job, since only the caller
-    knows what an empty-but-present claim should mean.
+    Raises AuthError on any failure. Does not yet look at `sub`/`email`/
+    `role` individually -- that is `decode_token`'s job, since only the
+    caller knows what an empty-but-present claim should mean.
     """
     if not secret:
         raise AuthError("no signing secret configured")
@@ -131,19 +158,26 @@ def decode_token(token: str, secret: str) -> AuthenticatedUser:
     Raises AuthError on any failure: a missing, empty or too-short secret; a
     bad signature; a malformed token; an expired token; a token whose
     audience is not "authenticated" (which excludes Supabase's public anon
-    key, signed with this same secret); a token missing the subject,
-    audience or email claims this service relies on; or an email claim that
-    is not a syntactically valid email address.
+    key, signed with this same secret) or whose role is not "authenticated"
+    (a second, independent check against the same class of non-user token);
+    a token missing the subject, audience, role or email claims this
+    service relies on; or an email claim that is not a syntactically valid
+    email address.
     """
     payload = _decode_claims(token, secret)
 
     subject = payload.get("sub")
     email = payload.get("email")
+    role = payload.get("role")
     if not subject or not email:
         raise AuthError("token is missing a subject or email claim")
+    if role != _REQUIRED_ROLE:
+        raise AuthError("token role is not authenticated")
 
     try:
-        return AuthenticatedUser(user_id=str(subject), email=str(email))
+        return AuthenticatedUser(
+            user_id=str(subject), email=_normalize_email(str(email))
+        )
     except ValidationError as error:
         raise AuthError("token email claim is not a valid email address") from error
 
@@ -189,18 +223,24 @@ def upsert_user(session: Session, identity: AuthenticatedUser) -> User:
     upgrading, since two different Supabase subjects could already be
     sharing one row's id under the old behaviour -- not applicable here,
     since this project holds no production data yet.
+
+    Email is re-normalized here (see `_normalize_email`) rather than trusted
+    from `identity.email` as-is, so the "one email, one person" guarantee
+    holds even for an `AuthenticatedUser` constructed directly instead of
+    via `decode_token`.
     """
-    if _email_owned_by_another_subject(session, identity.email, identity.user_id):
+    email = _normalize_email(identity.email)
+    if _email_owned_by_another_subject(session, email, identity.user_id):
         raise AuthError("email is registered to a different account")
 
     user = session.get(User, identity.user_id)
     if user is not None:
-        if user.email != identity.email:
-            user.email = identity.email
+        if user.email != email:
+            user.email = email
             _flush_or_deny(session)
         return user
 
-    user = User(id=identity.user_id, email=identity.email)
+    user = User(id=identity.user_id, email=email)
     session.add(user)
     _flush_or_deny(session)
     return user
@@ -215,6 +255,19 @@ def _flush_or_deny(session: Session) -> None:
     on `User.email` is the real backstop; this only turns its violation into
     the same denial the pre-check would have given, instead of an
     unhandled database error.
+
+    Side effect a future caller must know about: `session.rollback()` on an
+    IntegrityError discards *every* pending change in `session`, not just
+    this upsert -- SQLAlchemy rolls back the whole transaction, because a
+    failed flush leaves the session's state ambiguous with respect to what
+    the database actually holds. That is harmless today, since
+    authentication runs before anything else and the request aborts on
+    AuthError regardless. It stops being harmless the moment a caller (a
+    likely shape for the `/ask` endpoint, Task 4) stages other work -- a
+    quota increment, a message insert -- on the *same* session before
+    calling `upsert_user`: an email collision here would silently discard
+    that other work too. Call `upsert_user` on a session that holds nothing
+    else pending, or commit/flush prior work before calling it.
     """
     try:
         session.flush()
