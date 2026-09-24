@@ -24,6 +24,19 @@ genuinely-retrieved-but-irrelevant chunk will still pass. That is correct and
 out of scope for this module: it is not a correctness guarantee about the
 law, only a guarantee that every citation shown to the user points at
 something that was actually put in front of the model.
+
+A second, distinct hole: `DraftAnswer.summary` is free-form prose the model
+writes, has no `chunk_ids` of its own, and this validator has no way to check
+it. Nothing stops a model from keeping `claims` modest and well-cited while
+putting a hallucination straight into the summary text. The user-visible
+answer MUST therefore be composed from `ValidatedAnswer.claims` and
+`.sources` — never from the model's prose. This module surfaces that prose
+only as `unverified_summary`, named to say what it is: unchecked, for
+logging/debugging, and never safe to render to a user. Note too that
+`Claim.text` itself is model-written prose and may carry inline statutory
+references (e.g. "under Section 9") that nobody has checked against the
+claim's `chunk_ids` — validation here only proves the *cited chunks* were
+retrieved, not that every assertion inside `text` is supported by them.
 """
 
 import logging
@@ -58,17 +71,25 @@ class DroppedClaim(BaseModel):
 class ValidatedAnswer(BaseModel):
     """The answer after validation — only verifiable claims survive.
 
+    `unverified_summary` is the model's raw prose, never checked against any
+    chunk_ids. It is `None` whenever `is_answerable` is False, so a template
+    that carelessly renders it (e.g. `{{ answer.unverified_summary }}`)
+    renders nothing rather than a hallucination. It is deliberately not named
+    `summary`: a field named `summary` invites exactly that careless render.
+    The only content ever safe to show a user is built from `claims` and
+    `sources`; `unverified_summary` exists solely for logging/debugging.
+
     When every claim is dropped, `claims` and `sources` are empty and
-    `is_answerable` is False, but `summary` and `dropped` are preserved: the
-    caller decides how to present the "could not verify" state (e.g. showing
-    a fixed "we could not find a verifiable answer" message) rather than
-    silently handing back an empty-looking answer that could be mistaken for
-    "there is nothing to say" instead of "we caught a problem".
+    `is_answerable` is False, but `dropped` is preserved: the caller decides
+    how to present the "could not verify" state (e.g. showing a fixed "we
+    could not find a verifiable answer" message) rather than silently handing
+    back an empty-looking answer that could be mistaken for "there is nothing
+    to say" instead of "we caught a problem".
     """
 
     model_config = ConfigDict(frozen=True)
 
-    summary: str
+    unverified_summary: str | None
     claims: tuple[Claim, ...] = ()
     sources: tuple[Source, ...] = ()
     dropped: tuple[DroppedClaim, ...] = ()
@@ -142,15 +163,22 @@ def validate_answer(draft: DraftAnswer, context: RetrievalContext) -> ValidatedA
     Membership is exact string equality against the set of ids actually
     retrieved this turn — no case-folding, whitespace trimming, or prefix
     matching. Returns a new `ValidatedAnswer`; `draft` is never mutated.
+
+    `unverified_summary` carries `draft.summary` through only when the answer
+    is answerable, and is `None` otherwise — it is never itself part of the
+    is_answerable decision, and it is never safe to display regardless: see
+    the module and `ValidatedAnswer` docstrings for why the user-visible
+    answer must come from `claims`/`sources` instead.
     """
     permitted = context.chunk_ids
     kept, dropped = _split_claims(draft.claims, permitted)
     sources = _build_sources(kept, context)
+    is_answerable = bool(kept) and draft.sufficient
 
     return ValidatedAnswer(
-        summary=draft.summary,
+        unverified_summary=draft.summary if is_answerable else None,
         claims=kept,
         sources=sources,
         dropped=dropped,
-        is_answerable=bool(kept) and draft.sufficient,
+        is_answerable=is_answerable,
     )

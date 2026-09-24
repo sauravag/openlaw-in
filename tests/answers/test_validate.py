@@ -106,6 +106,26 @@ def test_answer_is_unanswerable_when_the_model_reports_insufficiency() -> None:
     assert validate_answer(draft, _context("a")).is_answerable is False
 
 
+def test_answer_is_unanswerable_when_insufficient_even_with_fully_valid_claims() -> (
+    None
+):
+    """Pins the `and draft.sufficient` term specifically: without a claim that
+    is itself fully grounded, a regression to `is_answerable = bool(kept)`
+    (dropping the `sufficient` check entirely) would still pass every other
+    test in this file, since the only prior insufficiency test used
+    claims=(). A model saying "I cannot answer" while still emitting
+    well-cited claims must not ship as answerable.
+    """
+    draft = DraftAnswer(
+        summary="cannot answer", claims=(Claim(text="c", chunk_ids=("a",)),), sufficient=False
+    )
+    result = validate_answer(draft, _context("a"))
+
+    assert len(result.claims) == 1
+    assert result.is_answerable is False
+    assert result.unverified_summary is None
+
+
 def test_validation_does_not_mutate_the_draft() -> None:
     draft = DraftAnswer(
         summary="s", claims=(Claim(text="c", chunk_ids=("a",)),), sufficient=True
@@ -178,10 +198,74 @@ def test_prefix_of_a_real_chunk_id_is_not_treated_as_a_match() -> None:
     assert result.dropped[0].unresolvable_chunk_ids == ("IND_central_00042_s012",)
 
 
-def test_fully_invalidated_answer_keeps_the_original_summary_text() -> None:
-    """A fully-dropped answer is not silently emptied; the summary is preserved
-    so the caller can decide how to present the "could not verify" state, and
-    every dropped claim is recorded rather than discarded."""
+def test_homoglyph_chunk_id_is_not_treated_as_a_match() -> None:
+    """A hallucinated id substituting a visually-identical Cyrillic letter for
+    a Latin one must NOT be accepted. `IND_central_...` becomes
+    `IND_сentral_...` with a Cyrillic 'с' (U+0441) in place of Latin 'c'
+    (U+0063) — indistinguishable to a human reader, distinct to `==`."""
+    real_id = "IND_central_00042_s012_p1"
+    homoglyph_id = "IND_сentral_00042_s012_p1"  # Cyrillic 'с' (U+0441)
+    assert real_id != homoglyph_id  # sanity: they really are different strings
+
+    draft = DraftAnswer(
+        summary="s", claims=(Claim(text="c", chunk_ids=(homoglyph_id,)),), sufficient=True
+    )
+    result = validate_answer(draft, _context(real_id))
+
+    assert result.claims == ()
+    assert result.dropped[0].unresolvable_chunk_ids == (homoglyph_id,)
+
+
+def test_nfd_normalized_chunk_id_is_not_treated_as_a_match_for_its_nfc_form() -> None:
+    """Unicode allows the same visible character to be encoded two ways: NFC
+    ('e' + acute accent as one codepoint, U+00E9) vs NFD ('e', U+0065, plus a
+    combining acute accent, U+0301). They render identically but compare
+    unequal — and must stay unequal here, since normalizing them would be
+    exactly the kind of "close enough" matching this validator must never
+    do."""
+    import unicodedata
+
+    base = "IND_r\u00e9sum\u00e9_00042"
+    nfc_id = unicodedata.normalize("NFC", base)
+    nfd_id = unicodedata.normalize("NFD", base)
+    assert nfc_id != nfd_id  # sanity: distinct code point sequences
+    assert unicodedata.normalize("NFC", nfd_id) == nfc_id  # same rendered text
+
+    draft = DraftAnswer(
+        summary="s", claims=(Claim(text="c", chunk_ids=(nfd_id,)),), sufficient=True
+    )
+    result = validate_answer(draft, _context(nfc_id))
+
+    assert result.claims == ()
+    assert result.dropped[0].unresolvable_chunk_ids == (nfd_id,)
+
+
+def test_zero_width_character_in_chunk_id_is_not_treated_as_a_match() -> None:
+    """A hallucinated id with an invisible zero-width space (U+200B) spliced
+    in looks identical when printed but must NOT be accepted as the real
+    id."""
+    real_id = "IND_central_00042_s012_p1"
+    zero_width_id = real_id + "\u200b"
+    assert zero_width_id != real_id  # sanity: distinct code point sequences
+
+    draft = DraftAnswer(
+        summary="s", claims=(Claim(text="c", chunk_ids=(zero_width_id,)),), sufficient=True
+    )
+    result = validate_answer(draft, _context(real_id))
+
+    assert result.claims == ()
+    assert result.dropped[0].unresolvable_chunk_ids == (zero_width_id,)
+
+
+def test_fully_invalidated_answer_clears_unverified_summary() -> None:
+    """A fully-dropped answer is not silently emptied — every dropped claim is
+    recorded rather than discarded — but `unverified_summary` is set to None,
+    not preserved. The model's raw prose is exactly the unchecked channel a
+    hallucination could hide in (it carries no chunk_ids and this validator
+    cannot check it), so once the answer is unanswerable nothing renderable
+    survives: a careless `{{ answer.unverified_summary }}` template shows
+    nothing rather than the hallucinated text.
+    """
     draft = DraftAnswer(
         summary="You are entitled to X under section Y.",
         claims=(Claim(text="bad", chunk_ids=("nope",)),),
@@ -189,11 +273,28 @@ def test_fully_invalidated_answer_keeps_the_original_summary_text() -> None:
     )
     result = validate_answer(draft, _context("a"))
 
-    assert result.summary == "You are entitled to X under section Y."
+    assert result.unverified_summary is None
     assert result.is_answerable is False
     assert result.claims == ()
     assert result.sources == ()
     assert len(result.dropped) == 1
+
+
+def test_answerable_result_carries_the_summary_through() -> None:
+    """When the answer IS answerable, `unverified_summary` does hold the
+    model's prose — it is only cleared on the unanswerable path. It remains
+    unchecked (see module docstring): callers must build the user-visible
+    answer from `claims`/`sources`, never from this field.
+    """
+    draft = DraftAnswer(
+        summary="Some prose.",
+        claims=(Claim(text="c", chunk_ids=("a",)),),
+        sufficient=True,
+    )
+    result = validate_answer(draft, _context("a"))
+
+    assert result.unverified_summary == "Some prose."
+    assert result.is_answerable is True
 
 
 def test_multiple_claims_each_citing_multiple_invalid_ids_are_all_dropped() -> None:
