@@ -3,7 +3,10 @@
 Models are chosen per pipeline role, not globally. The generator does grounded
 legal reasoning and warrants a frontier model; translation and classification do
 not, and paying frontier prices for them is waste. Per-language overrides exist
-because Indic-specialist models often beat general models on Indian languages.
+because Indic-specialist models often beat general models on Indian languages,
+and `from_settings` wires them from `OPENLAW_MODEL_TRANSLATOR_OVERRIDES` (a
+JSON map of language code to model name) so a deployment can use one without
+editing code.
 
 No call site names a model directly — every one resolves through the registry.
 That is deliberate: it makes "generation accidentally routed through the cheap
@@ -86,13 +89,23 @@ class ModelRegistry:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "ModelRegistry":
-        """Build a registry from environment-driven settings."""
+        """Build a registry from environment-driven settings.
+
+        `Settings.model_translator_overrides` (a JSON map of language code to
+        model name) becomes the per-language TRANSLATOR overrides, so the
+        per-language routing this class has always supported is actually
+        reachable from a deployment rather than only from code.
+        """
         return cls(
             {
                 ModelRole.GENERATOR: settings.model_generator,
                 ModelRole.TRANSLATOR: settings.model_translator,
                 ModelRole.CLASSIFIER: settings.model_classifier,
-            }
+            },
+            language_overrides={
+                (ModelRole.TRANSLATOR, language): model
+                for language, model in settings.model_translator_overrides.items()
+            },
         )
 
 

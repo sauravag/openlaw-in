@@ -1270,7 +1270,7 @@ git commit -m "feat: native-speaker translation review sheet generator"
 |---|---|
 | §7 multilingual in and out, English retrieval | Tasks 1, 3, 4 |
 | §7 regional judgment translations not indexed | Corpus-foundation Task 9; nothing here re-adds them |
-| §7 statutory quotations stay in English | Task 3 `ANSWER_SYSTEM_PROMPT` |
+| §7 statutory quotations stay in English | Task 3 `ANSWER_SYSTEM_PROMPT` — the rule covering QUOTED statutory text (not merely statute names and section numbers) was missing from the shipped prompt and was added in the final fix round; `test_answer_prompt_keeps_quoted_statutory_text_in_English` |
 | §8 translator role configured separately from generator | Task 3, tested |
 | §8 per-language translator override | Task 3, tested |
 | §6 validate before translating | Task 4 pipeline order, tested |

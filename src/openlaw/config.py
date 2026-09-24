@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     model_generator: str = "claude-opus-5"
     model_translator: str = "claude-haiku-4-5"
     model_classifier: str = "claude-haiku-4-5"
+    # Per-language translator overrides, e.g.
+    # OPENLAW_MODEL_TRANSLATOR_OVERRIDES='{"mr": "some-indic-specialist-model"}'.
+    # ModelRegistry has supported per-language routing from the start (Indic
+    # specialists often beat general models on Indian languages), but nothing
+    # wired it from the environment, so the capability was unreachable without
+    # editing code. Empty by default: every language uses model_translator.
+    model_translator_overrides: dict[str, str] = {}
     anthropic_api_key: str | None = None
     # Hallucination log (Plan 3 T7, fix round 1): the log can carry verbatim,
     # sensitive user text (abuse, immigration status, debt disclosures), so

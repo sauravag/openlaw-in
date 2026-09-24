@@ -64,7 +64,14 @@ through instead: built here, on every returned object (crisis or not), and
 left for the caller to persist -- this function takes no `Settings` and
 writes nothing itself, the same "build now, persist later" split
 `generate_answer` uses for `HallucinationEvent`/`ClassifierFailureEvent`.
-The second, regex-only check can never itself produce a classifier failure
+The caller does that persisting by handing the whole `LocalisedAnswer` to
+`openlaw.answers.generate.persist_answer_events`, which accepts it
+structurally (`AnswerEvents`) and writes both logs -- exactly what
+`scripts/review_translations.py` now does for every row it generates.
+Building the events and then never persisting them, as that script
+previously did, defeated the same ruling just as thoroughly as dropping
+them here would have. The second, regex-only check can never itself
+produce a classifier failure
 (it never calls a model), so the only source is the one classifier call on
 the original text.
 
@@ -161,8 +168,10 @@ class LocalisedAnswer(BaseModel):
     second, translated-text check can never itself produce one). It is
     build-only, same as `openlaw.answers.generate.AnswerResult
     .classifier_failures` -- this model carries no `Settings` and this
-    module writes nothing; a caller holding a `Settings` persists it via
-    `openlaw.answers.crisis_classifier.append_classifier_failure_events`.
+    module writes nothing; a caller holding a `Settings` persists it, and
+    `events`, by passing this object to
+    `openlaw.answers.generate.persist_answer_events` (it satisfies that
+    function's `AnswerEvents` protocol structurally).
     """
 
     model_config = ConfigDict(frozen=True)

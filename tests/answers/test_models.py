@@ -72,6 +72,37 @@ def test_registry_from_settings_reads_each_role_independently(monkeypatch) -> No
     assert registry.for_role(ModelRole.CLASSIFIER) == "claude-haiku-4-5"
 
 
+def test_registry_from_settings_wires_per_language_translator_overrides(
+    monkeypatch,
+) -> None:
+    """The per-language override was advertised but unreachable from the
+    environment: `from_settings` built none, so no deployment could point
+    Marathi at an Indic-specialist translator without writing code."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+    monkeypatch.setenv(
+        "OPENLAW_MODEL_TRANSLATOR_OVERRIDES", '{"mr": "indic-specialist-model"}'
+    )
+
+    registry = ModelRegistry.from_settings(Settings())
+
+    assert registry.for_role(ModelRole.TRANSLATOR, language="mr") == (
+        "indic-specialist-model"
+    )
+    assert registry.for_role(ModelRole.TRANSLATOR, language="hi") == "claude-haiku-4-5"
+    assert registry.for_role(ModelRole.GENERATOR, language="mr") == "claude-opus-5"
+
+
+def test_registry_from_settings_wires_no_overrides_by_default(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+    monkeypatch.delenv("OPENLAW_MODEL_TRANSLATOR_OVERRIDES", raising=False)
+
+    registry = ModelRegistry.from_settings(Settings())
+
+    assert registry.for_role(ModelRole.TRANSLATOR, language="mr") == "claude-haiku-4-5"
+
+
 def test_stub_adapter_returns_queued_responses_in_order() -> None:
     adapter: LLMAdapter = StubAdapter(["first", "second"])
     assert adapter.complete("m", "sys", [], None, 100).text == "first"
