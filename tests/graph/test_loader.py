@@ -202,7 +202,10 @@ def test_cites_edge_does_not_fan_out_when_citation_key_collides(
     data confirmed a collision (two 2007 Supreme Court judgments both keyed
     '2007SCR997'); a naive OPTIONAL MATCH creates one CITES edge per matching
     node instead of one, wrongly linking unrelated judgments. Exactly one
-    edge must be created, deterministically, per citing row."""
+    edge must be created, deterministically, per citing row — and since the
+    graph is dropped and rebuilt from scratch on every corpus release, a
+    second load of the same rows must pick the identical target, not just
+    "some" single target each time."""
     case_ids = ["TEST_CITING_CASE_3", "TEST_DUP_A", "TEST_DUP_B"]
     dup_key = "1950SCR1"
     try:
@@ -239,19 +242,25 @@ def test_cites_edge_does_not_fan_out_when_citation_key_collides(
                 },
             ],
         )
-        load_edges(
-            live_driver,
-            EdgeKind.CITES,
-            [Edge("TEST_CITING_CASE_3", dup_key, EdgeKind.CITES)],
+        edges = [Edge("TEST_CITING_CASE_3", dup_key, EdgeKind.CITES)]
+        query = (
+            "MATCH (:Judgment {case_id: 'TEST_CITING_CASE_3'})-[:CITES]->(t) "
+            "RETURN count(*) AS n, collect(DISTINCT t.case_id) AS targets"
         )
 
+        load_edges(live_driver, EdgeKind.CITES, edges)
         with live_driver.session() as session:
-            edge_count = session.run(
-                "MATCH (:Judgment {case_id: 'TEST_CITING_CASE_3'})-[:CITES]->() "
-                "RETURN count(*) AS n"
-            ).single()["n"]
+            first = session.run(query).single()
+        assert first["n"] == 1
+        assert first["targets"] == ["TEST_DUP_A"]  # lower case_id wins, deterministically
 
-        assert edge_count == 1
+        # Rebuilding from scratch (the real usage pattern) must not fan out or
+        # drift to a different target the second time.
+        load_edges(live_driver, EdgeKind.CITES, edges)
+        with live_driver.session() as session:
+            second = session.run(query).single()
+        assert second["n"] == 1
+        assert second["targets"] == first["targets"]
     finally:
         _cleanup(live_driver, case_ids)
 
