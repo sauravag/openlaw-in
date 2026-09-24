@@ -31,23 +31,41 @@ module's docstring. Nothing on the production answer path calls them; the
 request path always uses hybrid `search`.
 
 `hc_judgments_v1` (High Court judgments, `openlaw.index.hc_upsert`) is a third
-collection searched alongside the two above. It shares one collection across
-every registered High Court (`openlaw.corpus.high_courts`) rather than one
-collection per court, and carries `court_code` in its payload so a caller can
-pass `court_codes` to `search()` to scope a query to a single jurisdiction --
-High Court judgments bind only within their own state(s), unlike Supreme Court
-judgments, so an unscoped search across every High Court can surface
-persuasive-but-non-binding authority alongside binding authority. Its vectors
-were embedded with `voyage-4-lite`, not `voyage-4` -- verified (mean cosine
-0.961 against stored voyage-4 vectors) to share the same embedding space
-closely enough to be searched together with `acts_india_v1` and
-`sc_judgments_v1` at retrieval time.
+collection, searched ALONGSIDE the two above only when a caller explicitly
+asks for a High Court jurisdiction via `court_codes`. It shares one collection
+across every registered High Court (`openlaw.corpus.high_courts`) rather than
+one collection per court, and carries `court_code` in its payload so a caller
+can pass `court_codes` to `search()` to scope a query to a single
+jurisdiction -- High Court judgments bind only within their own state(s),
+unlike Supreme Court judgments. **This collection is excluded by default**
+(no production caller passes `court_codes` today): an unscoped nationwide
+query must never silently merge one High Court's persuasive-but-non-binding
+authority in as if it applied everywhere. `_collections_to_search` is the
+single gate this goes through -- see its docstring. Its vectors are embedded
+locally with `voyage-4-nano`, the SAME model that embeds queries by default
+(`openlaw.retrieval.local_nano.LocalNanoQueryEmbedder`) -- not
+`voyage-4-lite`: measured, nano queries against voyage-4-lite HC documents
+scored only 15.0% top-1 / 31.7% top-10 (median rank 61 of 300), because nano
+and lite's independent approximation errors against full voyage-4 do not
+cancel against each other.
+
+**Merging across collections is by RANK, not raw score** (`_merge_by_rank`,
+reciprocal-rank fusion). Raw Qdrant scores are not comparable across
+collections -- different models and different content give different score
+scales -- and that is strictly worse now that HC documents are nano-embedded
+alongside voyage-4-embedded acts and Supreme Court judgments: nothing bounds
+one collection's scores from structurally outrunning another's. Each
+collection's own best-first order is instead fused via each hit's reciprocal
+rank, so no collection can out-rank another purely by running a higher score
+scale. The `score` on a returned `RetrievedChunk` is therefore the fused
+rank-based score, not the raw per-collection Qdrant score.
 """
 
 from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from openlaw.corpus.high_courts import HIGH_COURTS
 from openlaw.index.hc_upsert import HC_COLLECTION
 from openlaw.index.sparse import token_index, tokenise
 from openlaw.index.upsert import SC_COLLECTION
@@ -55,8 +73,17 @@ from openlaw.retrieval.context import ChunkKind, RetrievedChunk
 
 ACTS_INDIA_V1 = "acts_india_v1"
 SEARCH_COLLECTIONS: tuple[str, ...] = (ACTS_INDIA_V1, SC_COLLECTION, HC_COLLECTION)
+# Every registered High Court's jurisdiction code -- the set `court_codes`
+# must intersect for `_collections_to_search` to include HC_COLLECTION.
+HIGH_COURT_CODES: frozenset[str] = frozenset(
+    court.vaquill_court_code for court in HIGH_COURTS.values()
+)
 PREFETCH_MULTIPLIER = 4
 SPARSE_QUERY_WEIGHT = 1.0
+# Standard reciprocal-rank-fusion constant (Qdrant, Elasticsearch, and the
+# original Cormack et al. RRF paper all use 60) -- large enough that a hit's
+# exact rank matters more than which collection it came from.
+RRF_K = 60
 
 
 class _PostResponse(Protocol):
@@ -201,22 +228,68 @@ def _search_collection(
     return [chunk for chunk in chunks if chunk is not None]
 
 
+def _collections_to_search(court_codes: tuple[str, ...] | None) -> tuple[str, ...]:
+    """Return which corpus collections this request actually queries.
+
+    `HC_COLLECTION` is excluded unless `court_codes` names at least one
+    registered High Court jurisdiction -- an unscoped (or Supreme-Court-only)
+    query must never silently pull in one High Court's persuasive-but-non-
+    binding authority as though it bound the whole country. Passing
+    `court_codes` that name only non-High-Court jurisdictions (e.g. the
+    Supreme Court's own code) does not open this gate either -- the caller
+    must actually be asking about a High Court.
+    """
+    if court_codes and HIGH_COURT_CODES.intersection(court_codes):
+        return SEARCH_COLLECTIONS
+    return tuple(collection for collection in SEARCH_COLLECTIONS if collection != HC_COLLECTION)
+
+
+def _merge_by_rank(
+    results_by_collection: list[list[RetrievedChunk]], limit: int
+) -> tuple[RetrievedChunk, ...]:
+    """Fuse each collection's own best-first hits by reciprocal rank.
+
+    Raw scores are not comparable across collections -- see the module
+    docstring. Each chunk's contribution is `1 / (RRF_K + rank)`, summed
+    across every collection it appears in (rank 1-based, within that
+    collection's own returned order); chunks are then ordered by that summed
+    score, descending, and capped to `limit`. The chunk kept for a duplicate
+    id is whichever collection returned it first (arbitrary but deterministic
+    -- duplicates across these collections are not expected in practice). The
+    returned `score` is the fused rank score, not any collection's raw score.
+    """
+    fused_score: dict[str, float] = {}
+    first_seen: dict[str, RetrievedChunk] = {}
+    for chunks in results_by_collection:
+        for rank, chunk in enumerate(chunks, start=1):
+            fused_score[chunk.chunk_id] = fused_score.get(chunk.chunk_id, 0.0) + 1.0 / (
+                RRF_K + rank
+            )
+            first_seen.setdefault(chunk.chunk_id, chunk)
+
+    ordered_ids = sorted(fused_score, key=lambda chunk_id: fused_score[chunk_id], reverse=True)
+    return tuple(
+        first_seen[chunk_id].model_copy(update={"score": fused_score[chunk_id]})
+        for chunk_id in ordered_ids[:limit]
+    )
+
+
 def _run_across_collections(
     client: _PostClient,
     qdrant_url: str,
     request: dict[str, Any],
     limit: int,
+    court_codes: tuple[str, ...] | None,
 ) -> tuple[RetrievedChunk, ...]:
-    """Run `request` against every corpus collection and return the merged,
-    score-ordered, limit-capped hits. Shared by `search`, `search_dense_only`,
+    """Run `request` against every applicable corpus collection and return the
+    rank-merged, limit-capped hits. Shared by `search`, `search_dense_only`,
     and `search_sparse_only` -- only the request body differs between them.
     """
-    chunks: list[RetrievedChunk] = []
-    for collection in SEARCH_COLLECTIONS:
-        chunks.extend(_search_collection(client, qdrant_url, collection, request))
-
-    chunks.sort(key=lambda chunk: chunk.score, reverse=True)
-    return tuple(chunks[:limit])
+    results_by_collection = [
+        _search_collection(client, qdrant_url, collection, request)
+        for collection in _collections_to_search(court_codes)
+    ]
+    return _merge_by_rank(results_by_collection, limit)
 
 
 def search(
@@ -227,7 +300,10 @@ def search(
     limit: int = 10,
     court_codes: tuple[str, ...] | None = None,
 ) -> tuple[RetrievedChunk, ...]:
-    """Search every corpus collection and return the merged, score-ordered hits.
+    """Search every applicable corpus collection and return the rank-merged
+    hits (see the module docstring: `hc_judgments_v1` only joins when
+    `court_codes` names a High Court jurisdiction, and the merge is by
+    reciprocal rank, not raw score).
 
     `text` is the raw query -- needed to build the sparse side, which is
     independent of `vector` (the dense embedding of the same query). Both are
@@ -236,7 +312,7 @@ def search(
     """
     sparse_vector = build_sparse_query_vector(text)
     request = build_hybrid_request(vector, sparse_vector, limit, court_codes)
-    return _run_across_collections(client, qdrant_url, request, limit)
+    return _run_across_collections(client, qdrant_url, request, limit, court_codes)
 
 
 def search_dense_only(
@@ -253,7 +329,7 @@ def search_dense_only(
     the sparse signal is helping or hurting rather than assume it.
     """
     request = build_dense_only_request(vector, limit, court_codes)
-    return _run_across_collections(client, qdrant_url, request, limit)
+    return _run_across_collections(client, qdrant_url, request, limit, court_codes)
 
 
 def search_sparse_only(
@@ -271,4 +347,4 @@ def search_sparse_only(
     """
     sparse_vector = build_sparse_query_vector(text)
     request = build_sparse_only_request(sparse_vector, limit, court_codes)
-    return _run_across_collections(client, qdrant_url, request, limit)
+    return _run_across_collections(client, qdrant_url, request, limit, court_codes)

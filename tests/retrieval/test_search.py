@@ -242,7 +242,10 @@ class _FakeClient:
         return _FakeResponse([])
 
 
-def test_search_queries_every_collection_and_merges_by_score() -> None:
+def test_search_queries_the_default_collections_and_merges_by_rank() -> None:
+    """Both collections' top hits are rank 1 in their own results, so they
+    must tie in the fused score -- the assertion only relies on both being
+    present and HC being excluded, not on a specific tie-break order."""
     client = _FakeClient(
         {
             ACTS_INDIA_V1: [
@@ -271,17 +274,60 @@ def test_search_queries_every_collection_and_merges_by_score() -> None:
 
     result = search(client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=10)
 
-    assert [chunk.chunk_id for chunk in result] == ["j1", "a1"]
-    assert len(client.requests) == len(SEARCH_COLLECTIONS)
+    assert {chunk.chunk_id for chunk in result} == {"j1", "a1"}
+    assert len(client.requests) == len(SEARCH_COLLECTIONS) - 1  # HC excluded by default
     urls = {url for url, _ in client.requests}
     assert any(ACTS_INDIA_V1 in url for url in urls)
     assert any(SC_COLLECTION in url for url in urls)
+    assert not any(HC_COLLECTION in url for url in urls)
+
+
+def test_search_omits_the_high_court_collection_by_default() -> None:
+    """High Court judgments bind only within their own jurisdiction. An
+    unscoped, nationwide query must not silently merge Punjab & Haryana
+    authority in as if it applied everywhere."""
+    client = _FakeClient({ACTS_INDIA_V1: [], SC_COLLECTION: [], HC_COLLECTION: []})
+
+    search(client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=5)
+
+    urls = {url for url, _ in client.requests}
+    assert not any(HC_COLLECTION in url for url in urls)
+    assert len(client.requests) == 2
+
+
+def test_search_omits_the_high_court_collection_for_a_non_high_court_jurisdiction() -> None:
+    """Passing court_codes for a non-High-Court jurisdiction (e.g. the
+    Supreme Court's own code) must not open the HC gate either."""
+    client = _FakeClient({ACTS_INDIA_V1: [], SC_COLLECTION: [], HC_COLLECTION: []})
+
+    search(
+        client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=5,
+        court_codes=("SCI",),
+    )
+
+    urls = {url for url, _ in client.requests}
+    assert not any(HC_COLLECTION in url for url in urls)
+
+
+def test_search_includes_the_high_court_collection_for_a_matching_jurisdiction() -> None:
+    client = _FakeClient({ACTS_INDIA_V1: [], SC_COLLECTION: [], HC_COLLECTION: []})
+
+    search(
+        client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=5,
+        court_codes=("3_22",),
+    )
+
+    urls = {url for url, _ in client.requests}
+    assert any(HC_COLLECTION in url for url in urls)
+    assert len(client.requests) == len(SEARCH_COLLECTIONS)
 
 
 def test_search_respects_the_limit_across_merged_collections() -> None:
+    # Listed best-first, as Qdrant itself returns hits -- the fused rank
+    # order must follow this, not the raw score value.
     many_points = [
         {
-            "score": float(i),
+            "score": float(20 - i),
             "payload": {
                 "chunk_id": f"c{i}",
                 "text": "t",
@@ -294,8 +340,75 @@ def test_search_respects_the_limit_across_merged_collections() -> None:
 
     result = search(client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=3)
 
-    assert len(result) == 3
-    assert [chunk.score for chunk in result] == [19.0, 18.0, 17.0]
+    assert [chunk.chunk_id for chunk in result] == ["c0", "c1", "c2"]
+
+
+def test_search_merges_by_reciprocal_rank_not_raw_score() -> None:
+    """A low-scoring rank-1 hit from one collection must outrank a much
+    higher-scoring rank-2 hit from another -- raw scores are not comparable
+    across collections (different models, different content, different score
+    scales)."""
+    client = _FakeClient(
+        {
+            ACTS_INDIA_V1: [
+                {
+                    "score": 0.05,
+                    "payload": {
+                        "chunk_id": "a_rank1",
+                        "text": "t",
+                        "source_url": "https://indiacode.nic.in/a",
+                    },
+                },
+            ],
+            SC_COLLECTION: [
+                {
+                    "score": 0.99,
+                    "payload": {
+                        "chunk_id": "s_rank1",
+                        "case_id": "c1",
+                        "text": "t",
+                        "source_url": "https://s3.amazonaws.com/s1",
+                    },
+                },
+                {
+                    "score": 0.95,
+                    "payload": {
+                        "chunk_id": "s_rank2",
+                        "case_id": "c2",
+                        "text": "t",
+                        "source_url": "https://s3.amazonaws.com/s2",
+                    },
+                },
+            ],
+        }
+    )
+
+    result = search(client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=10)
+
+    ids = [chunk.chunk_id for chunk in result]
+    assert ids.index("a_rank1") < ids.index("s_rank2")
+
+
+def test_search_returns_the_fused_rank_score_not_the_raw_qdrant_score() -> None:
+    client = _FakeClient(
+        {
+            ACTS_INDIA_V1: [
+                {
+                    "score": 12.5,  # deliberately far outside cosine's [-1, 1]
+                    "payload": {
+                        "chunk_id": "a1",
+                        "text": "t",
+                        "source_url": "https://indiacode.nic.in/a1",
+                    },
+                }
+            ],
+            SC_COLLECTION: [],
+        }
+    )
+
+    result = search(client, "http://127.0.0.1:6333", "theft", [0.1] * 1024, limit=5)
+
+    assert result[0].score == pytest.approx(1.0 / 61)  # RRF_K=60, rank=1
 
 
 def test_search_builds_a_sparse_vector_from_the_query_text() -> None:
@@ -365,7 +478,7 @@ def test_sparse_only_request_applies_a_court_filter_when_given() -> None:
     assert request["filter"]["must"][0]["match"]["any"] == ["SCI"]
 
 
-def test_search_dense_only_queries_every_collection_and_merges_by_score() -> None:
+def test_search_dense_only_queries_the_default_collections_and_merges_by_rank() -> None:
     client = _FakeClient(
         {
             ACTS_INDIA_V1: [
@@ -389,12 +502,14 @@ def test_search_dense_only_queries_every_collection_and_merges_by_score() -> Non
                     },
                 }
             ],
+            HC_COLLECTION: [],
         }
     )
 
     result = search_dense_only(client, "http://127.0.0.1:6333", [0.1] * 1024, limit=10)
 
-    assert [chunk.chunk_id for chunk in result] == ["j1", "a1"]
+    assert {chunk.chunk_id for chunk in result} == {"j1", "a1"}
+    assert not any(HC_COLLECTION in url for url, _ in client.requests)
     for _, body in client.requests:
         assert body["using"] == "dense"
         assert "prefetch" not in body
@@ -412,9 +527,10 @@ def test_search_sparse_only_builds_its_vector_from_the_query_text() -> None:
 
 
 def test_search_sparse_only_respects_the_requested_limit() -> None:
+    # Listed best-first, as Qdrant itself returns hits.
     many_points = [
         {
-            "score": float(i),
+            "score": float(20 - i),
             "payload": {
                 "chunk_id": f"c{i}",
                 "text": "t",
@@ -427,8 +543,7 @@ def test_search_sparse_only_respects_the_requested_limit() -> None:
 
     result = search_sparse_only(client, "http://127.0.0.1:6333", "theft", limit=3)
 
-    assert len(result) == 3
-    assert [chunk.score for chunk in result] == [19.0, 18.0, 17.0]
+    assert [chunk.chunk_id for chunk in result] == ["c0", "c1", "c2"]
 
 
 @pytest.mark.integration
