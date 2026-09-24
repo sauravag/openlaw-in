@@ -1,16 +1,21 @@
 import json
+import stat
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from openlaw.answers.escalation import (
     CRISIS_PATTERNS,
+    DEFAULT_HALLUCINATION_LOG_RETENTION_DAYS,
     NALSA_HELPLINE,
     CrisisKind,
+    HallucinationEvent,
     append_events,
     build_hallucination_events,
     crisis_response,
     detect_crisis,
     escalation_footer,
+    purge_stale_events,
 )
 from openlaw.answers.schema import Claim
 from openlaw.answers.validate import DroppedClaim, ValidatedAnswer
@@ -110,6 +115,82 @@ def test_when_multiple_crises_are_signalled_the_most_urgent_wins() -> None:
     direction is to resolve to whichever response gets help fastest, not to
     silently pick one at random or refuse to classify."""
     text = "my husband beats me and i want to end my life"
+    assert detect_crisis(text) is CrisisKind.SELF_HARM
+
+
+# --- fix round 1: adjacency, reversed constructions, non-obvious wording ---
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "my husband keeps beating me",
+        "he keeps hurting me",
+        "my in-laws are constantly hitting me",
+    ],
+)
+def test_intervening_words_between_subject_and_verb_do_not_defeat_a_match(
+    text: str,
+) -> None:
+    """A strict-adjacency pattern ("husband beats") misses "husband keeps
+    beating" -- the gap must not defeat detection."""
+    assert detect_crisis(text) is CrisisKind.DOMESTIC_VIOLENCE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "tortured by police",
+        "assaulted by cops at the station",
+        "he was beaten by the police last night",
+    ],
+)
+def test_reversed_victim_first_custodial_phrasing_is_detected(text: str) -> None:
+    """"police beat him" is easy; "beaten by the police" (victim first, no
+    "lockup"/"custody" keyword at all) must be detected too."""
+    assert detect_crisis(text) is CrisisKind.CUSTODIAL_ABUSE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "she was kidnapped for marriage",
+        "he was sold to a family for work",
+    ],
+)
+def test_trafficking_phrased_without_the_word_trafficking_is_detected(
+    text: str,
+) -> None:
+    assert detect_crisis(text) is CrisisKind.TRAFFICKING
+
+
+# --- fix round 1: transliterated Hindi/Hinglish coverage -------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "mera pati mujhe maarta hai",
+        "meri saas mujhe maarti hai",
+        "mera pati mujhe roz peeta hai",
+    ],
+)
+def test_hindi_hinglish_domestic_violence_phrasing_is_detected(text: str) -> None:
+    """This product's users routinely code-mix; English-only patterns would
+    silently exclude a large share of the people this feature exists for."""
+    assert detect_crisis(text) is CrisisKind.DOMESTIC_VIOLENCE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "marna chahta hoon",
+        "mar jaana chahti hoon",
+        "ab jeena nahi chahta",
+        "meri zindagi khatam karna chahti hoon",
+    ],
+)
+def test_hindi_hinglish_self_harm_phrasing_is_detected(text: str) -> None:
     assert detect_crisis(text) is CrisisKind.SELF_HARM
 
 
@@ -253,3 +334,132 @@ def test_append_events_creates_parent_directories(tmp_path) -> None:
 
     assert append_events(events, path) == 1
     assert path.exists()
+
+
+# --- fix round 1: log file permissions and retention -----------------------
+
+
+def _mode(path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_append_events_creates_file_with_owner_only_permissions(tmp_path) -> None:
+    answer = ValidatedAnswer(
+        unverified_summary=None,
+        claims=(),
+        dropped=(DroppedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),),
+        is_answerable=False,
+    )
+    events = build_hallucination_events("q", answer, _context("real"))
+    path = tmp_path / "hallucinations.jsonl"
+
+    append_events(events, path)
+
+    assert _mode(path) == 0o600
+
+
+def test_append_events_fixes_looser_permissions_on_an_existing_file(tmp_path) -> None:
+    """The log can carry verbatim, sensitive user text, so a pre-existing
+    file with looser permissions (e.g. created by some other process) must
+    be corrected, not left as-is."""
+    path = tmp_path / "hallucinations.jsonl"
+    path.write_text("", encoding="utf-8")
+    path.chmod(0o644)
+    assert _mode(path) == 0o644
+
+    answer = ValidatedAnswer(
+        unverified_summary=None,
+        claims=(),
+        dropped=(DroppedClaim(text="bad", unresolvable_chunk_ids=("ghost",)),),
+        is_answerable=False,
+    )
+    events = build_hallucination_events("q", answer, _context("real"))
+    append_events(events, path)
+
+    assert _mode(path) == 0o600
+
+
+def test_default_retention_is_ninety_days() -> None:
+    assert DEFAULT_HALLUCINATION_LOG_RETENTION_DAYS == 90
+
+
+def _event_at(timestamp: datetime) -> HallucinationEvent:
+    return HallucinationEvent(
+        question="q",
+        dropped_chunk_ids=("ghost",),
+        retrieved_chunk_ids=("real",),
+        claim_text="bad",
+        timestamp=timestamp.isoformat(),
+    )
+
+
+def test_purge_stale_events_removes_events_older_than_max_age(tmp_path) -> None:
+    path = tmp_path / "hallucinations.jsonl"
+    old = _event_at(datetime.now(UTC) - timedelta(days=100))
+    fresh = _event_at(datetime.now(UTC) - timedelta(days=1))
+    append_events((old, fresh), path)
+
+    removed = purge_stale_events(path, max_age_days=90)
+
+    assert removed == 1
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["claim_text"] == "bad"
+    assert json.loads(lines[0])["retrieved_chunk_ids"] == ["real"]
+
+
+def test_purge_stale_events_keeps_everything_within_retention(tmp_path) -> None:
+    path = tmp_path / "hallucinations.jsonl"
+    events = (
+        _event_at(datetime.now(UTC) - timedelta(days=1)),
+        _event_at(datetime.now(UTC) - timedelta(days=2)),
+    )
+    append_events(events, path)
+
+    assert purge_stale_events(path, max_age_days=90) == 0
+    assert len(path.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_purge_stale_events_on_missing_file_returns_zero(tmp_path) -> None:
+    path = tmp_path / "does-not-exist.jsonl"
+    assert purge_stale_events(path) == 0
+
+
+def test_purge_stale_events_drops_unparsable_lines(tmp_path) -> None:
+    """A line whose timestamp cannot be read must not survive retention
+    indefinitely just because its age is unknown."""
+    path = tmp_path / "hallucinations.jsonl"
+    fresh = _event_at(datetime.now(UTC) - timedelta(days=1))
+    append_events((fresh,), path)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("not valid json\n")
+        handle.write(json.dumps({"claim_text": "no timestamp field"}) + "\n")
+
+    removed = purge_stale_events(path, max_age_days=90)
+
+    assert removed == 2
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+
+
+def test_purge_stale_events_preserves_owner_only_permissions(tmp_path) -> None:
+    path = tmp_path / "hallucinations.jsonl"
+    old = _event_at(datetime.now(UTC) - timedelta(days=100))
+    fresh = _event_at(datetime.now(UTC) - timedelta(days=1))
+    append_events((old, fresh), path)
+
+    purge_stale_events(path, max_age_days=90)
+
+    assert _mode(path) == 0o600
+
+
+def test_purge_stale_events_uses_the_documented_default_when_unspecified(
+    tmp_path,
+) -> None:
+    path = tmp_path / "hallucinations.jsonl"
+    just_over_default = _event_at(
+        datetime.now(UTC) - timedelta(days=DEFAULT_HALLUCINATION_LOG_RETENTION_DAYS + 1)
+    )
+    append_events((just_over_default,), path)
+
+    assert purge_stale_events(path) == 1

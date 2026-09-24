@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     model_translator: str = "claude-haiku-4-5"
     model_classifier: str = "claude-haiku-4-5"
     anthropic_api_key: str | None = None
+    # Hallucination log (Plan 3 T7, fix round 1): the log can carry verbatim,
+    # sensitive user text (abuse, immigration status, debt disclosures), so
+    # its location must be a deployment decision -- e.g. a restricted-access
+    # volume -- rather than a literal hard-coded at a call site. See
+    # openlaw.answers.escalation.append_events / purge_stale_events.
+    hallucination_log_path: Path = Path("data/hallucinations.jsonl")
 
 
 @lru_cache

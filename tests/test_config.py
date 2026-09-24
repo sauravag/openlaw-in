@@ -103,3 +103,21 @@ def test_anthropic_api_key_reads_from_environment(monkeypatch) -> None:
     monkeypatch.setenv("OPENLAW_ANTHROPIC_API_KEY", "sk-ant-test")
 
     assert Settings().anthropic_api_key == "sk-ant-test"
+
+
+def test_hallucination_log_path_has_a_default(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+
+    assert Settings().hallucination_log_path == Path("data/hallucinations.jsonl")
+
+
+def test_hallucination_log_path_is_configurable_via_environment(monkeypatch) -> None:
+    """Plan 3 T7 fix round 1: the path must not be hard-coded at a call
+    site, because the log can carry verbatim, sensitive user text and a
+    deployment may need it on a restricted-access volume."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/vaquill")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/kanoon")
+    monkeypatch.setenv("OPENLAW_HALLUCINATION_LOG_PATH", "/secure/hallucinations.jsonl")
+
+    assert Settings().hallucination_log_path == Path("/secure/hallucinations.jsonl")
