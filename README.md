@@ -46,14 +46,20 @@ Stated plainly, because a legal tool that overstates its coverage is dangerous:
   there by the gate is a real defect, not an accepted gap.
 - `hc_judgments_v1` holds High Court judgments and is built to the same strict
   standard as `sc_judgments_v1` (`scripts/build_hc_index.py`). It is a **shared**
-  collection designed to hold multiple High Courts, distinguished by the
-  `court_code` payload field — currently only **Punjab & Haryana High Court**
-  (Chandigarh; covers Punjab, Haryana, and the Chandigarh UT) is onboarded
-  (`openlaw.corpus.high_courts`). **Delhi High Court is deliberately NOT
-  included** — an explicit product decision, not an oversight. Its vectors are
-  embedded with `voyage-4-lite`, not `voyage-4` (a deliberate cost choice,
-  verified to share the voyage-4 embedding space closely enough for retrieval:
-  mean cosine 0.961 against stored voyage-4 vectors, min 0.932).
+  collection holding multiple High Courts, distinguished by the `court_code`
+  payload field — two are onboarded (`openlaw.corpus.high_courts`): **Punjab &
+  Haryana High Court** (Chandigarh; covers Punjab, Haryana, and the Chandigarh
+  UT) and **Delhi High Court** (the NCT of Delhi). A High Court's judgments
+  bind only within its own jurisdiction, which is why retrieval only searches
+  this collection when a caller explicitly scopes a query to one of these
+  jurisdictions (`openlaw.retrieval.search`). Its vectors are embedded LOCALLY
+  with `voyage-4-nano` — the same model that embeds queries by default — not
+  the Voyage API's `voyage-4-lite`: measured, nano queries against
+  `voyage-4-lite` HC documents scored only 15.0% top-1 / 31.7% top-10 (median
+  rank 61 of 300), because nano and lite's independent approximation errors
+  against full `voyage-4` do not cancel against each other. `--restart` on
+  `scripts/build_hc_index.py` clears only the points of the court being
+  rebuilt (filtered on `court_code`), never the whole shared collection.
 
 **This is legal information, not legal advice.** Always verify against the official
 source before relying on anything here.
@@ -86,7 +92,8 @@ Calling the `local_nano` backend without the extra installed raises a clear
     python scripts/make_fixtures.py            # test fixtures (once)
     python scripts/restore_acts_india.py       # 1,098,269 provisions (~11.2 GB)
     python scripts/build_sc_index.py           # 371,247 Supreme Court chunks
-    python scripts/build_hc_index.py           # ~1.85M Punjab & Haryana HC chunks
+    python scripts/build_hc_index.py           # ~1.85M Punjab & Haryana HC chunks (default --court)
+    python scripts/build_hc_index.py --court delhi  # ~1.06M Delhi HC chunks, same shared collection
     python scripts/validate_corpus.py          # the gate: all citations resolve
 
 `build_hc_index.py` streams and checkpoints per court (`data/hc_index_checkpoint_<court>.json`,

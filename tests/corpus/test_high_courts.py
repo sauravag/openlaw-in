@@ -1,6 +1,7 @@
 import pytest
 
 from openlaw.corpus.high_courts import (
+    DELHI,
     HIGH_COURTS,
     PUNJAB_AND_HARYANA,
     HighCourt,
@@ -20,14 +21,29 @@ def test_punjab_and_haryana_is_registered() -> None:
     assert HIGH_COURTS["punjab-and-haryana"] == PUNJAB_AND_HARYANA
 
 
-def test_delhi_high_court_is_not_registered() -> None:
-    """Explicit product decision -- Delhi is deliberately excluded from v1."""
-    assert "delhi" not in HIGH_COURTS
-    assert all("delhi" not in slug for slug in HIGH_COURTS)
+def test_delhi_carries_the_measured_court_codes() -> None:
+    """vaquill spells the court `7_26`; KanoonGPT spells the same court `7~26`."""
+    assert DELHI.slug == "delhi"
+    assert DELHI.vaquill_court_code == "7_26"
+    assert DELHI.kanoongpt_court_code == "7~26"
+    assert DELHI.source_file == "in_delhi_judgments.parquet"
+
+
+def test_delhi_is_registered() -> None:
+    assert HIGH_COURTS["delhi"] == DELHI
+
+
+def test_both_registered_courts_have_distinct_slugs_and_codes() -> None:
+    """Two courts must never collide on slug or either court-code spelling --
+    a collision would silently merge two jurisdictions' points/checkpoints."""
+    assert PUNJAB_AND_HARYANA.slug != DELHI.slug
+    assert PUNJAB_AND_HARYANA.vaquill_court_code != DELHI.vaquill_court_code
+    assert PUNJAB_AND_HARYANA.kanoongpt_court_code != DELHI.kanoongpt_court_code
 
 
 def test_get_high_court_returns_the_registered_entry() -> None:
     assert get_high_court("punjab-and-haryana") is PUNJAB_AND_HARYANA
+    assert get_high_court("delhi") is DELHI
 
 
 def test_get_high_court_raises_a_helpful_error_for_an_unknown_slug() -> None:
