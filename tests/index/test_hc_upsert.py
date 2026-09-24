@@ -6,7 +6,7 @@ from openlaw.index.hc_upsert import (
     HC_COLLECTION,
     build_hc_collection_payload,
     build_hc_point,
-    delete_hc_collection,
+    delete_hc_court_points,
     ensure_hc_collection,
     upsert_hc_points,
 )
@@ -33,10 +33,15 @@ class FakeClient:
     def __init__(self, status_code: int = 200) -> None:
         self.status_code = status_code
         self.put_calls: list[dict] = []
+        self.post_calls: list[dict] = []
         self.delete_calls: list[dict] = []
 
     def put(self, url: str, **kwargs: object) -> FakeResponse:
         self.put_calls.append({"url": url, **kwargs})
+        return FakeResponse(self.status_code)
+
+    def post(self, url: str, **kwargs: object) -> FakeResponse:
+        self.post_calls.append({"url": url, **kwargs})
         return FakeResponse(self.status_code)
 
     def delete(self, url: str, **kwargs: object) -> FakeResponse:
@@ -44,15 +49,43 @@ class FakeClient:
         return FakeResponse(self.status_code)
 
 
-def _chunk() -> JudgmentChunk:
+class FakeQdrantStore:
+    """An in-memory double for the tiny slice of the Qdrant HTTP surface this
+    module calls -- faithful enough (it actually filters by `court_code` on
+    delete) to prove `delete_hc_court_points` only removes the targeted
+    court's points, not merely that it sends the expected request shape."""
+
+    def __init__(self) -> None:
+        self._points: dict[str, dict] = {}
+
+    def put(self, url: str, *, json: dict, **kwargs: object) -> FakeResponse:
+        for point in json["points"]:
+            self._points[point["id"]] = point
+        return FakeResponse(200)
+
+    def post(self, url: str, *, json: dict, **kwargs: object) -> FakeResponse:
+        target_court = json["filter"]["must"][0]["match"]["value"]
+        surviving = {
+            pid: point
+            for pid, point in self._points.items()
+            if point["payload"]["court_code"] != target_court
+        }
+        self._points = surviving
+        return FakeResponse(200)
+
+    def has_point(self, point: dict) -> bool:
+        return point["id"] in self._points
+
+
+def _chunk(court_code: str = "3_22", case_id: str = "PHHC010641322019") -> JudgmentChunk:
     return JudgmentChunk.from_row(
         {
-            "chunk_id": "PHHC010641322019_001",
-            "case_id": "PHHC010641322019",
+            "chunk_id": f"{case_id}_001",
+            "case_id": case_id,
             "chunk_index": 1,
             "text": "the writ petition is allowed",
             "text_original": "the writ petition is allowed",
-            "court_code": "3_22",
+            "court_code": court_code,
             "judges": ["A.B. SHARMA"],
             "decision_date": "2019-05-10",
             "language_code": "en",
@@ -92,26 +125,50 @@ def test_ensure_hc_collection_raises_on_a_real_server_error() -> None:
         ensure_hc_collection("http://qdrant.test", client)
 
 
-def test_delete_hc_collection_deletes_the_shared_hc_collection_by_name() -> None:
-    """`hc_judgments_v1` is our own derived collection -- a --restart must be
-    able to discard it entirely so a rebuild with a new embedding model can
-    never mix old and new vectors in the same collection."""
+def test_delete_hc_court_points_sends_a_filtered_delete_scoped_to_one_court() -> None:
+    """A --restart must clear only the rebuilt court's points, filtered on
+    the `court_code` payload -- never the whole shared collection."""
     client = FakeClient(status_code=200)
-    delete_hc_collection("http://qdrant.test", client)
-    assert client.delete_calls[0]["url"] == "http://qdrant.test/collections/hc_judgments_v1"
+    delete_hc_court_points("3_22", "http://qdrant.test", client)
+    call = client.post_calls[0]
+    assert call["url"] == "http://qdrant.test/collections/hc_judgments_v1/points/delete"
+    assert call["params"] == {"wait": "true"}
+    assert call["json"] == {"filter": {"must": [{"key": "court_code", "match": {"value": "3_22"}}]}}
 
 
-def test_delete_hc_collection_tolerates_not_found() -> None:
+def test_delete_hc_court_points_tolerates_not_found() -> None:
     """A --restart before anything has ever been indexed must not fail just
     because the collection does not exist yet."""
     client = FakeClient(status_code=404)
-    delete_hc_collection("http://qdrant.test", client)  # must not raise
+    delete_hc_court_points("3_22", "http://qdrant.test", client)  # must not raise
 
 
-def test_delete_hc_collection_raises_on_a_real_server_error() -> None:
+def test_delete_hc_court_points_raises_on_a_real_server_error() -> None:
     client = FakeClient(status_code=500)
     with pytest.raises(httpx.HTTPStatusError):
-        delete_hc_collection("http://qdrant.test", client)
+        delete_hc_court_points("3_22", "http://qdrant.test", client)
+
+
+def test_delete_hc_court_points_leaves_other_courts_points_intact() -> None:
+    """The core per-court-restart guarantee: restarting one court's build must
+    never destroy another already-indexed court's points. Proven against a
+    store that actually applies the filter, not just against the request
+    shape sent to it."""
+    store = FakeQdrantStore()
+    punjab_point = build_hc_point(
+        _chunk(court_code="3_22", case_id="PHHC1"), [0.1] * 1024, _sparse(), PDF_URL,
+        headnote=None,
+    )
+    delhi_point = build_hc_point(
+        _chunk(court_code="7_26", case_id="DLHC1"), [0.2] * 1024, _sparse(), PDF_URL,
+        headnote=None,
+    )
+    upsert_hc_points([punjab_point, delhi_point], "http://qdrant.test", store)
+
+    delete_hc_court_points("7_26", "http://qdrant.test", store)
+
+    assert store.has_point(punjab_point)
+    assert not store.has_point(delhi_point)
 
 
 def test_point_carries_dense_and_sparse_vectors() -> None:

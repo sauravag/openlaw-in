@@ -33,14 +33,19 @@ Point IDs are also a deterministic UUID5 of `chunk_id` (see
 previous one updates points rather than duplicating them -- the checkpoint is
 an optimization, not a correctness requirement.
 
-`--restart` clears BOTH the checkpoint AND every point already in the shared
-`hc_judgments_v1` collection (`openlaw.index.hc_upsert.delete_hc_collection`),
-not just the checkpoint -- a rebuild that only cleared the checkpoint would
-silently mix points embedded by whatever model produced the collection's
-existing points (voyage-4-lite, on the very first run of this script) with
+`--restart` clears BOTH the checkpoint AND every point of THIS RUN'S COURT
+ONLY already in the shared `hc_judgments_v1` collection
+(`openlaw.index.hc_upsert.delete_hc_court_points`, filtered on the
+`court_code` payload) -- not just the checkpoint, and NOT the whole
+collection. A rebuild that only cleared the checkpoint would silently mix
+points embedded by whatever model produced this court's existing points with
 points embedded by the current model, and a nearest-neighbour search across a
 collection mixing two embedding spaces returns *something* for every query,
-just not reliably the right thing.
+just not reliably the right thing. Because the collection is shared across
+every registered High Court (`openlaw.corpus.high_courts`), the delete is
+scoped to `--court`'s `court_code` specifically: `--restart`ing one court's
+build must never destroy another already-indexed court's points, which is why
+this is a filtered points-delete rather than a collection drop.
 
 `--limit` caps the number of chunks processed before exiting cleanly -- it
 exists to prove the pipeline end to end on a bounded slice without waiting
@@ -72,7 +77,7 @@ from openlaw.datasets.vaquill import read_judgment_chunks
 from openlaw.index.embed import DEFAULT_BATCH_SIZE, MAX_BATCH_TOKENS, Embedder, batched_by_tokens
 from openlaw.index.hc_upsert import (
     build_hc_point,
-    delete_hc_collection,
+    delete_hc_court_points,
     ensure_hc_collection,
     upsert_hc_points,
 )
@@ -150,7 +155,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--restart",
         action="store_true",
-        help="ignore and clear any existing checkpoint for this court, and start over",
+        help="clear this --court's checkpoint AND every one of its points already "
+        "in the shared hc_judgments_v1 collection, then start over. Scoped "
+        "strictly to --court's court_code -- every OTHER registered High "
+        "Court's points are left untouched.",
     )
     parser.add_argument(
         "--limit",
@@ -187,14 +195,19 @@ def _log_progress(processed: int, indexed: int, unresolved: int, started_at: flo
     )
 
 
-def _restart(checkpoint_path: Path, qdrant_url: str, client: httpx.Client) -> None:
-    """Discard all progress for `--restart`: the checkpoint AND every point in
-    the shared HC collection, so a rebuild can never mix an old model's
-    vectors with the new one's in the same collection. See the module
-    docstring for why a merely cleared checkpoint is not enough.
+def _restart(
+    checkpoint_path: Path, court_code: str, qdrant_url: str, client: httpx.Client
+) -> None:
+    """Discard all progress for `--restart`: the checkpoint AND every point
+    for `court_code` (the vaquill spelling) in the shared HC collection, so a
+    rebuild can never mix an old model's vectors with the new one's for that
+    same court. See the module docstring for why a merely cleared checkpoint
+    is not enough -- and why this deletes by `court_code` rather than
+    dropping the whole shared collection: every OTHER registered High
+    Court's points must survive.
     """
     clear_checkpoint(checkpoint_path)
-    delete_hc_collection(qdrant_url, client)
+    delete_hc_court_points(court_code, qdrant_url, client)
 
 
 def _index_batch(
@@ -249,12 +262,11 @@ def _prepare_indexing(
     if args.restart:
         print(
             f"[Index] --restart: clearing the checkpoint for {court.slug} and "
-            "every point in the shared hc_judgments_v1 collection (embedding-"
-            "space consistency requires discarding the whole collection, "
-            "which -- until a second court is registered -- holds only this "
-            "court's points)"
+            f"every existing point with court_code={court.vaquill_court_code!r} "
+            "in the shared hc_judgments_v1 collection ONLY -- every other "
+            "registered High Court's points are left untouched"
         )
-        _restart(checkpoint_path, settings.qdrant_url, client)
+        _restart(checkpoint_path, court.vaquill_court_code, settings.qdrant_url, client)
 
     checkpoint = read_checkpoint(checkpoint_path)
     resume_count = resume_offset(checkpoint, settings.corpus_version, court.slug)

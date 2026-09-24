@@ -178,6 +178,26 @@ def test_court_flag_can_be_overridden() -> None:
     assert build_hc_index.parse_args(["--court", "bombay"]).court == "bombay"
 
 
+def test_court_flag_accepts_delhi() -> None:
+    assert build_hc_index.parse_args(["--court", "delhi"]).court == "delhi"
+
+
+def test_restart_help_text_makes_the_per_court_scoping_unmistakable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A slip in this help text is exactly what would let someone --restart
+    Delhi believing it only touches Delhi, when an earlier version of this
+    script's --restart wiped the ENTIRE shared collection. The text must say,
+    in plain words, that only the named court's points are cleared."""
+    with pytest.raises(SystemExit):
+        build_hc_index.parse_args(["--help"])
+
+    help_text = capsys.readouterr().out
+    assert "hc_judgments_v1" in help_text
+    assert "court_code" in help_text
+    assert "other" in help_text.lower()
+
+
 def test_restart_flag_defaults_to_false() -> None:
     assert build_hc_index.parse_args([]).restart is False
 
@@ -231,10 +251,15 @@ class _RecordingClient:
     def __init__(self, status_code: int = 200) -> None:
         self.status_code = status_code
         self.put_calls: list[dict] = []
+        self.post_calls: list[dict] = []
         self.delete_calls: list[dict] = []
 
     def put(self, url: str, **kwargs: object) -> "_RecordingClient":
         self.put_calls.append({"url": url, **kwargs})
+        return self
+
+    def post(self, url: str, **kwargs: object) -> "_RecordingClient":
+        self.post_calls.append({"url": url, **kwargs})
         return self
 
     def delete(self, url: str, **kwargs: object) -> "_RecordingClient":
@@ -248,21 +273,28 @@ class _RecordingClient:
 # --- _restart: --restart must clear the checkpoint AND the HC collection ----
 
 
-def test_restart_clears_the_checkpoint_and_deletes_the_hc_collection(tmp_path: Path) -> None:
+def test_restart_clears_the_checkpoint_and_deletes_only_this_courts_points(
+    tmp_path: Path,
+) -> None:
     """A --restart that only cleared the checkpoint would leave points
-    embedded by a stale model (voyage-4-lite, on the first run of this
-    script) mixed in with points from the new model -- silently unfindable
-    at query time. Both must be discarded together."""
+    embedded by a stale model mixed in with points from the new model --
+    silently unfindable at query time. Both must be discarded together --
+    but the delete must be filtered to this court's `court_code`, never the
+    whole shared collection, so restarting one court can never destroy
+    another already-indexed court's points."""
     path = tmp_path / "checkpoint.json"
     build_hc_index.write_checkpoint(
         path, processed=999, corpus_version=CORPUS_VERSION, court_slug=COURT_SLUG
     )
     client = _RecordingClient()
 
-    build_hc_index._restart(path, "http://qdrant.test", client)
+    build_hc_index._restart(path, "3_22", "http://qdrant.test", client)
 
     assert build_hc_index.read_checkpoint(path) is None
-    assert client.delete_calls[0]["url"] == "http://qdrant.test/collections/hc_judgments_v1"
+    call = client.post_calls[0]
+    assert call["url"] == "http://qdrant.test/collections/hc_judgments_v1/points/delete"
+    assert call["json"] == {"filter": {"must": [{"key": "court_code", "match": {"value": "3_22"}}]}}
+    assert client.delete_calls == []
 
 
 def test_restart_tolerates_no_checkpoint_and_no_existing_collection(tmp_path: Path) -> None:
@@ -271,9 +303,22 @@ def test_restart_tolerates_no_checkpoint_and_no_existing_collection(tmp_path: Pa
     path = tmp_path / "checkpoint.json"
     client = _RecordingClient(status_code=404)
 
-    build_hc_index._restart(path, "http://qdrant.test", client)  # must not raise
+    build_hc_index._restart(path, "3_22", "http://qdrant.test", client)  # must not raise
 
     assert build_hc_index.read_checkpoint(path) is None
+
+
+def test_restart_for_one_court_never_names_another_courts_code(tmp_path: Path) -> None:
+    """Restarting Delhi must filter on Delhi's court_code, not Punjab &
+    Haryana's -- proves the court_code passed through is actually used, not
+    a hard-coded constant left over from the single-court era."""
+    path = tmp_path / "checkpoint.json"
+    client = _RecordingClient()
+
+    build_hc_index._restart(path, "7_26", "http://qdrant.test", client)
+
+    call = client.post_calls[0]
+    assert call["json"] == {"filter": {"must": [{"key": "court_code", "match": {"value": "7_26"}}]}}
 
 
 def _make_chunk(chunk_id: str, join_key: str):

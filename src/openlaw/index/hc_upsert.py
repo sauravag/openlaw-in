@@ -61,24 +61,30 @@ def ensure_hc_collection(qdrant_url: str, client: httpx.Client) -> None:
         response.raise_for_status()
 
 
-def delete_hc_collection(qdrant_url: str, client: httpx.Client) -> None:
-    """Delete the shared HC collection and every point in it, tolerating 404
-    when it does not already exist.
+def delete_hc_court_points(court_code: str, qdrant_url: str, client: httpx.Client) -> None:
+    """Delete every point for `court_code` from the shared HC collection,
+    tolerating 404 when the collection does not already exist.
 
-    Used only by `scripts/build_hc_index.py --restart`: `hc_judgments_v1` is
-    our own derived collection -- unlike `acts_india`, `acts_india_v1`, and
-    `sc_judgments_v1`, which this function never touches -- so discarding and
-    recreating it is safe. A rebuild that instead skipped ahead via a merely
+    Used only by `scripts/build_hc_index.py --restart`. `hc_judgments_v1` is
+    shared by every registered High Court (`openlaw.corpus.high_courts`),
+    distinguished by the `court_code` payload field, so a restart must clear
+    ONLY the points belonging to the court being rebuilt -- never the whole
+    collection. `court_code` here is the vaquill spelling stored on every
+    point's payload (`build_hc_point`), e.g. `"3_22"` for Punjab & Haryana or
+    `"7_26"` for Delhi. A rebuild that instead skipped ahead via a merely
     cleared checkpoint would leave points embedded with a stale model mixed
     in with the new ones, silently unfindable at query time (a nearest-
     neighbour search still returns *something*, just not the stale point,
-    since it sits in the wrong region of vector space). NOTE: since every
-    registered High Court shares this one collection (see
-    `openlaw.corpus.high_courts`), a --restart for one court currently
-    discards every other court's points too -- fine while only Punjab &
-    Haryana is registered, but worth revisiting once a second court is added.
+    since it sits in the wrong region of vector space); scoping the delete to
+    `court_code` prevents that same hazard from also destroying every OTHER
+    court's already-indexed points, which a whole-collection delete would.
     """
-    response = client.delete(f"{qdrant_url}/collections/{HC_COLLECTION}")
+    response = client.post(
+        f"{qdrant_url}/collections/{HC_COLLECTION}/points/delete",
+        params={"wait": "true"},
+        json={"filter": {"must": [{"key": "court_code", "match": {"value": court_code}}]}},
+        timeout=120,
+    )
     if response.status_code != COLLECTION_NOT_FOUND:
         response.raise_for_status()
 
