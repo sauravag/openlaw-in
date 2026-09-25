@@ -16,6 +16,7 @@ const baseAnswer: AnswerData = {
   corpus_version: 'v2026.08',
   footer: 'This is legal information, not legal advice. NALSA: 15100',
   crisis_response: null,
+  helplines: [{ number: '15100', label: 'Free legal aid (NALSA)' }],
   is_answerable: true,
   quota_remaining: 29,
 }
@@ -40,7 +41,7 @@ describe('AnswerView', () => {
 
   it('always shows the legal-aid escalation footer', () => {
     render(<AnswerView data={baseAnswer} />)
-    expect(screen.getByText(/15100/)).toBeInTheDocument()
+    expect(screen.getAllByText(/15100/).length).toBeGreaterThan(0)
   })
 
   it('renders the crisis response above the answer', () => {
@@ -71,5 +72,67 @@ describe('AnswerView', () => {
     render(<AnswerView data={{ ...baseAnswer, sources: [] }} />)
     expect(screen.queryByRole('heading', { name: /where this comes from/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /model tenancy act/i })).not.toBeInTheDocument()
+  })
+
+  it('renders tap-to-call links from structured helplines inside the crisis box, not from prose (C2)', () => {
+    render(
+      <AnswerView
+        data={{
+          ...baseAnswer,
+          crisis_response: 'Call 112 for help now.',
+          helplines: [
+            { number: '112', label: 'Emergency' },
+            { number: '181', label: "Women's helpline" },
+          ],
+        }}
+      />,
+    )
+    const alert = screen.getByRole('alert')
+    expect(alert.querySelector('a[href="tel:112"]')).toHaveTextContent('Emergency: 112')
+    expect(alert.querySelector('a[href="tel:181"]')).toHaveTextContent("Women's helpline: 181")
+  })
+
+  it('does not duplicate the helpline list in the footer when a crisis box is already showing it', () => {
+    render(
+      <AnswerView
+        data={{ ...baseAnswer, crisis_response: 'Call 112 for help now.' }}
+      />,
+    )
+    expect(screen.getAllByRole('link', { name: /15100/ })).toHaveLength(1)
+  })
+
+  it('renders the NALSA helpline as a tap-to-call link in the footer on an ordinary (non-crisis) turn', () => {
+    render(<AnswerView data={baseAnswer} />)
+    expect(screen.getByRole('link', { name: /15100/ })).toHaveAttribute('href', 'tel:15100')
+  })
+
+  it('does not render a source as a clickable link when its URL is not https (M6)', () => {
+    render(
+      <AnswerView
+        data={{
+          ...baseAnswer,
+          sources: [{ chunk_id: 'b', source_url: 'http://example.com/insecure', title: 'Bad Source' }],
+        }}
+      />,
+    )
+    expect(screen.queryByRole('link', { name: /bad source/i })).not.toBeInTheDocument()
+    expect(screen.getByText(/bad source/i)).toBeInTheDocument()
+  })
+
+  it('renders its own strings in Hindi when the answer language is hi (H3)', () => {
+    render(<AnswerView data={{ ...baseAnswer, language: 'hi' }} />)
+    expect(screen.getByText('यह जानकारी कहाँ से है')).toBeInTheDocument()
+    expect(screen.getByText(/v2026\.08.*स्नैपशॉट/)).toBeInTheDocument()
+  })
+
+  it('shows the unanswerable framing sentence outside the answer paragraph, in the answer language', () => {
+    render(
+      <AnswerView
+        data={{ ...baseAnswer, is_answerable: false, sources: [], language: 'hi' }}
+      />,
+    )
+    expect(
+      screen.getByText('आप फिर भी एक निःशुल्क कानूनी सहायता वकील से मदद पा सकते हैं।'),
+    ).toBeInTheDocument()
   })
 })

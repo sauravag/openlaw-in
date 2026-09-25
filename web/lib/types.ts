@@ -17,6 +17,27 @@ export interface SourceCard {
 }
 
 /**
+ * One phone number safe to render as a tap-to-call `tel:` link, with a
+ * short label naming what it is for. Mirrors `openlaw.answers.escalation
+ * .Helpline`.
+ *
+ * Task 6 fix round, C2. A prior version had the frontend pattern-match a
+ * fixed allowlist of numbers against `crisis_response`/`footer` prose to
+ * decide what to linkify (`PhoneLinkedText`, `lib/helplineNumbers.ts` --
+ * both removed). That could never display a WRONG number, but it depended
+ * on every number staying in ASCII digits forever, including under future
+ * localisation -- a Hindi crisis message rendered with Devanagari numerals
+ * would silently defeat an ASCII-digit regex. `helplines` replaces that: the
+ * backend says explicitly which numbers are helplines and what to call
+ * them, so `HelplineList` renders `tel:` links straight from this array,
+ * never by scanning text for digits.
+ */
+export interface Helpline {
+  number: string
+  label: string
+}
+
+/**
  * Mirrors `AskResponse`. Deliberately has no `unverified_summary` field --
  * the API never returns one (see `schemas.py`'s module docstring: a model
  * could otherwise hide a hallucination in prose while its claims stayed
@@ -29,18 +50,32 @@ export interface AnswerData {
   corpus_version: string
   footer: string
   crisis_response: string | null
+  helplines: Helpline[]
   is_answerable: boolean
   quota_remaining: number
 }
 
-/** Mirrors `QuotaExceeded` -- the body returned on both HTTP 429 causes
- * (exhausted allowance, tripped short-burst rate limit). */
+/**
+ * A refusal, with everything needed to route the user to help instead of a
+ * dead end.
+ *
+ * `detail` and `escalation_footer` are the only fields every refusal body
+ * is guaranteed to carry. `QuotaExceeded` (`schemas.py`, HTTP 429 -- an
+ * exhausted allowance or a tripped short-burst rate limit) sends all seven
+ * fields. The app-level 500 handler's body (`app.py`'s
+ * `_unhandled_error_content`) is deliberately narrower -- `detail`,
+ * `escalation_footer`, `crisis_response` only, no quota fields at all, since
+ * an unhandled error has no quota decision to report -- so the four
+ * quota-specific fields are optional here rather than required (Task 6 fix
+ * round, C1). `RefusalNotice` renders each one only when present.
+ */
 export interface RefusalData {
   detail: string
-  quota_remaining: number
-  signup_required: boolean
   escalation_footer: string
   crisis_response: string | null
-  quota_reset_at: string | null
-  signup_url: string | null
+  helplines: Helpline[]
+  quota_remaining?: number
+  signup_required?: boolean
+  quota_reset_at?: string | null
+  signup_url?: string | null
 }

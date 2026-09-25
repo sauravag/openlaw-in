@@ -160,6 +160,46 @@ _CRISIS_RESPONSES: dict[CrisisKind, str] = {
     ),
 }
 
+# Hindi crisis responses (Task 6 fix round, H3). STATIC, hand-authored pairs
+# -- never a live model translation -- for the same reason
+# `openlaw.api.refusal._REFUSAL_DETAIL` is static: this is the text that
+# tells someone which number to call, and a translation failure (or a
+# mistranslated number) is a worse outcome than staying in English. Every
+# phone number below is written in plain ASCII digits (0-9), not Devanagari
+# numerals (०-९) -- this matches how phone numbers are actually printed in
+# Hindi-language government and NALSA material, and it is also what keeps
+# `web/lib/helplineNumbers.ts`'s `\b(112|181|...)\b` pattern matching at all:
+# a Devanagari digit is a different Unicode code point and would not match
+# that pattern, silently turning a tap-to-call link into a dead sentence. See
+# `tests/answers/test_helpline_consistency.py`, which renders these strings
+# and fails if a number ever stops appearing in ASCII form.
+#
+# Best-effort Hindi pending a native-speaker review pass, same caveat the
+# project already carries for `_REFUSAL_DETAIL` and for glossary
+# translations without one yet -- flagged, not claimed verified.
+_CRISIS_RESPONSES_HI: dict[CrisisKind, str] = {
+    CrisisKind.SELF_HARM: (
+        "अगर आप खुद को नुकसान पहुँचाने के बारे में सोच रहे हैं, तो अभी किसी से बात करें। "
+        "टेली-मानस निःशुल्क है और 14416 पर चौबीसों घंटे उपलब्ध है। "
+        "आपको यह अकेले नहीं झेलना है।"
+    ),
+    CrisisKind.TRAFFICKING: (
+        "अगर कोई तुरंत खतरे में है, तो 112 पर कॉल करें। "
+        "बच्चों के लिए हेल्पलाइन 1098 है और महिलाओं के लिए 181। "
+        "दोनों निःशुल्क हैं और हर समय उपलब्ध हैं।"
+    ),
+    CrisisKind.CUSTODIAL_ABUSE: (
+        "अगर किसी को हिरासत में नुकसान पहुँचाया जा रहा है, तो यह तुरंत ध्यान देने योग्य है। "
+        "112 पर कॉल करें, और राष्ट्रीय मानवाधिकार आयोग से 14433 पर संपर्क करें। "
+        "मुफ़्त कानूनी सहायता वकील के लिए तुरंत 15100 पर अनुरोध किया जा सकता है।"
+    ),
+    CrisisKind.DOMESTIC_VIOLENCE: (
+        "अगर आप अभी खतरे में हैं, तो 112 पर कॉल करें। "
+        "महिला हेल्पलाइन 181 है, और पुलिस महिला हेल्पलाइन 1091 है। "
+        "दोनों निःशुल्क हैं और चौबीसों घंटे उपलब्ध हैं।"
+    ),
+}
+
 # Severity order — the most urgent category wins when a message matches
 # several (fail-safe: resolve to whichever response gets help fastest rather
 # than picking arbitrarily or refusing to classify).
@@ -191,13 +231,111 @@ def detect_crisis(text: str) -> CrisisKind | None:
     return None
 
 
-def crisis_response(kind: CrisisKind) -> str:
-    """Return the helpline-first response for `kind`."""
-    return _CRISIS_RESPONSES[kind]
+class Helpline(BaseModel):
+    """One phone number safe to render as a tap-to-call `tel:` link, with a
+    short label naming what it is for.
+
+    Task 6 fix round, C2. A prior version had the frontend pattern-match a
+    fixed, hand-copied allowlist of numbers (`web/lib/helplineNumbers.ts`)
+    against the free-text `crisis_response`/`escalation_footer` prose to
+    decide what to linkify -- reviewed as correct-but-fragile: it could never
+    display a WRONG number, but it depended on every number in every crisis
+    string staying in ASCII digits forever, including under future
+    localisation, with nothing enforcing that except a test. This model is
+    the fix: the backend says explicitly which numbers are helplines and
+    what to call them, and the frontend renders tap-to-call links straight
+    from this list, never by scanning prose for digits.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    number: str
+    label: str
 
 
-def escalation_footer(state: str | None = None) -> str:
-    """Return the free-legal-aid routing appended to every answer."""
+#: (label in English, label in Hindi) for every phone number this module or
+#: `openlaw.api.refusal` ever cites. Static and hand-authored, same
+#: "pending native-speaker review" caveat as the crisis prose itself --
+#: see the Hindi crisis-response dict's comment below.
+_HELPLINE_LABELS: dict[str, tuple[str, str]] = {
+    "112": ("Emergency", "आपातकालीन सेवा"),
+    "181": ("Women's helpline", "महिला हेल्पलाइन"),
+    "1091": ("Police women's helpline", "पुलिस महिला हेल्पलाइन"),
+    "1098": ("Child helpline", "बाल हेल्पलाइन"),
+    "14416": ("Tele-MANAS (mental health support)", "टेली-मानस (मानसिक स्वास्थ्य सहायता)"),
+    "14433": ("National Human Rights Commission", "राष्ट्रीय मानवाधिकार आयोग"),
+    NALSA_HELPLINE: ("Free legal aid (NALSA)", "मुफ़्त कानूनी सहायता (NALSA)"),
+}
+
+#: Which numbers `crisis_response` actually cites for each category -- kept
+#: as data, one place, rather than re-deriving it from the prose strings
+#: (which `tests/answers/test_helpline_consistency.py` cross-checks stay in
+#: sync with the labels above and the frontend's own former allowlist).
+_CRISIS_HELPLINE_NUMBERS: dict[CrisisKind, tuple[str, ...]] = {
+    CrisisKind.SELF_HARM: ("14416",),
+    CrisisKind.TRAFFICKING: ("112", "1098", "181"),
+    CrisisKind.CUSTODIAL_ABUSE: ("112", "14433", NALSA_HELPLINE),
+    CrisisKind.DOMESTIC_VIOLENCE: ("112", "181", "1091"),
+}
+
+
+def helpline_for(number: str, language: str = "en") -> Helpline:
+    """Return the structured `Helpline` for a known `number`, labelled in
+    `language`. Shared by this module and `openlaw.api.refusal` so a label
+    is written once, not duplicated per caller."""
+    label_en, label_hi = _HELPLINE_LABELS[number]
+    return Helpline(number=number, label=label_hi if language == "hi" else label_en)
+
+
+def crisis_helplines(kind: CrisisKind, language: str = "en") -> tuple[Helpline, ...]:
+    """Return the structured, tap-to-call numbers `crisis_response(kind)`
+    cites, in `language` (Task 6 fix round, C2)."""
+    return tuple(
+        helpline_for(number, language) for number in _CRISIS_HELPLINE_NUMBERS[kind]
+    )
+
+
+def nalsa_helpline(language: str = "en") -> Helpline:
+    """The one number every `escalation_footer` mentions, structured."""
+    return helpline_for(NALSA_HELPLINE, language)
+
+
+def crisis_response(kind: CrisisKind, language: str = "en") -> str:
+    """Return the helpline-first response for `kind`, in `language`.
+
+    Falls back to English for any language other than `"hi"` -- same rule as
+    `openlaw.api.refusal.refusal_detail`, and for the same reason: only
+    English and Hindi have a static, human-reviewable pair today (Plan 4's
+    launch gate), and there is never a live-translation fallback for crisis
+    text (see the module-level Hindi dict's comment above).
+    """
+    return _CRISIS_RESPONSES_HI[kind] if language == "hi" else _CRISIS_RESPONSES[kind]
+
+
+def escalation_footer(state: str | None = None, language: str = "en") -> str:
+    """Return the free-legal-aid routing appended to every answer, in `language`.
+
+    Falls back to English for any language other than `"hi"` -- see
+    `crisis_response`'s docstring; the same static-pair rule applies here.
+    """
+    if language == "hi":
+        authority = (
+            f"{state} राज्य विधिक सेवा प्राधिकरण"
+            if state
+            else "अपने जिला विधिक सेवा प्राधिकरण"
+        )
+        return (
+            "यह कानूनी जानकारी है, कानूनी सलाह नहीं, और यह आपके मामले को जानने "
+            "वाले वकील की जगह नहीं ले सकती।\n\n"
+            "भारत में मुफ़्त कानूनी सहायता एक वैधानिक अधिकार है। इसके लिए पात्रता "
+            "विधिक सेवा प्राधिकरण अधिनियम, 1987 की धारा 12 में दी गई है — इसमें "
+            "महिलाएं और बच्चे, अनुसूचित जाति और अनुसूचित जनजाति के सदस्य, हिरासत "
+            "में मौजूद लोग, और वे सभी लोग शामिल हैं जिनकी आय उनके राज्य द्वारा तय "
+            "सीमा से कम है।\n\n"
+            f"यह जानने के लिए कि आप पात्र हैं या नहीं, {authority} से संपर्क करें, "
+            f"या NALSA हेल्पलाइन {NALSA_HELPLINE} पर कॉल करें।"
+        )
+
     authority = (
         f"the {state} State Legal Services Authority"
         if state

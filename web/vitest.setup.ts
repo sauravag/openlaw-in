@@ -11,3 +11,12 @@ import '@testing-library/jest-dom/vitest'
 afterEach(() => {
   cleanup()
 })
+
+// jsdom does not implement `scrollIntoView` at all -- calling it throws
+// "not a function" (`app/page.tsx`'s `useScrollIntoViewOnChange`, Task 6
+// review H2, calls it on every new result/error). A no-op stub is enough:
+// this test environment only needs the call not to crash, not to actually
+// move a viewport that does not exist.
+if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {}
+}

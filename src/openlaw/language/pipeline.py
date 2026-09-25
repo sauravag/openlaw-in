@@ -116,9 +116,12 @@ from openlaw.answers.crisis_classifier import (
 from openlaw.answers.escalation import (
     CrisisKind,
     HallucinationEvent,
+    Helpline,
+    crisis_helplines,
     crisis_response,
     detect_crisis,
     escalation_footer,
+    nalsa_helpline,
 )
 from openlaw.answers.generate import _failures_of, _generate_from_context
 from openlaw.answers.models import LLMAdapter, ModelRegistry
@@ -182,6 +185,13 @@ class LocalisedAnswer(BaseModel):
     english_query: str
     crisis: CrisisKind | None = None
     footer: str = ""
+    #: Structured, tap-to-call numbers for `footer` (Task 6 fix round, C2) --
+    #: at minimum the NALSA number every footer cites, plus the
+    #: category-specific numbers on a crisis turn. The API layer
+    #: (`schemas.to_response`) forwards this verbatim as `AskResponse
+    #: .helplines`; the frontend renders links from it directly rather than
+    #: pattern-matching `footer`/`crisis_response` prose for digits.
+    helplines: tuple[Helpline, ...] = ()
     events: tuple[HallucinationEvent, ...] = ()
     classifier_failures: tuple[ClassifierFailureEvent, ...] = ()
 
@@ -205,14 +215,20 @@ def _crisis_answer(
 
     Mirrors `openlaw.answers.generate._crisis_result`: the footer leads with
     the category-specific helpline (`crisis_response`) followed by the
-    standard `escalation_footer`, never the standard footer alone. Left in
-    English regardless of `language` -- these are phone numbers and a short,
-    fixed set of instructions, not content a translation failure should ever
-    be allowed to hold hostage. `classifier_failures` is forwarded
-    unconditionally -- a crisis found by the translated-text regex does not
-    erase a classifier failure the original-text check already recorded.
+    standard `escalation_footer`, never the standard footer alone.
+    Rendered in `language` when it is `"hi"`, English otherwise (Task 6 fix
+    round, H3) -- but never via live translation: both functions select
+    between two STATIC, hand-authored strings (see their docstrings and
+    `openlaw.answers.escalation`'s Hindi dict comment), so a translation
+    failure can never hold this content hostage the way a model call could.
+    `classifier_failures` is forwarded unconditionally -- a crisis found by
+    the translated-text regex does not erase a classifier failure the
+    original-text check already recorded.
     """
-    footer = f"{crisis_response(crisis)}\n\n{escalation_footer(state)}"
+    footer = (
+        f"{crisis_response(crisis, language)}\n\n{escalation_footer(state, language)}"
+    )
+    helplines = crisis_helplines(crisis, language) + (nalsa_helpline(language),)
     return LocalisedAnswer(
         answer=_UNANSWERABLE,
         english_answer=_UNANSWERABLE,
@@ -220,6 +236,7 @@ def _crisis_answer(
         english_query=english_query,
         crisis=crisis,
         footer=footer,
+        helplines=helplines,
         classifier_failures=classifier_failures,
     )
 
@@ -306,7 +323,7 @@ def answer_in_language(
     english_query, classifier_failures = cleared
 
     context = retriever.retrieve(english_query)
-    footer = escalation_footer(state)
+    footer = escalation_footer(state, target)
     result = _generate_from_context(
         english_query, context, adapter, registry, footer, classifier_failures
     )
@@ -319,6 +336,10 @@ def answer_in_language(
         english_query=english_query,
         crisis=result.crisis,
         footer=result.footer,
+        # Every footer cites the NALSA number, crisis or not (Task 6 fix
+        # round, C2) -- structured here so the frontend never has to
+        # pattern-match it out of `footer`'s prose.
+        helplines=(nalsa_helpline(target),),
         events=result.events,
         classifier_failures=result.classifier_failures,
     )

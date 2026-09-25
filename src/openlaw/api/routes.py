@@ -215,13 +215,14 @@ def _raise_rate_limited(
     not be a dead end either. `quota_reset_at` is None here (a burst limit
     has no calendar reset); `Retry-After` carries the actual wait instead.
     """
-    footer, crisis = crisis_extras(question, state)
+    footer, crisis, helplines = crisis_extras(question, state, language)
     body = QuotaExceeded(
         detail=refusal_detail("rate_limited", language),
         quota_remaining=0,
         signup_required=False,
         escalation_footer=footer,
         crisis_response=crisis,
+        helplines=helplines,
         quota_reset_at=None,
         signup_url=settings.signup_url,
     )
@@ -275,7 +276,7 @@ def _raise_quota_exceeded(
     caller when the allowance actually comes back (Task 4 review, M6);
     `signup_url` gives both refusal types a concrete next step.
     """
-    footer, crisis = crisis_extras(question, state)
+    footer, crisis, helplines = crisis_extras(question, state, language)
     reset_date = next_period_start()
     body = QuotaExceeded(
         detail=refusal_detail("quota_exceeded", language),
@@ -283,6 +284,7 @@ def _raise_quota_exceeded(
         signup_required=signup_required,
         escalation_footer=footer,
         crisis_response=crisis,
+        helplines=helplines,
         quota_reset_at=reset_date.isoformat(),
         signup_url=settings.signup_url,
     )

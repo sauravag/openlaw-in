@@ -37,7 +37,15 @@ answer pipeline's full language coverage, and documented as such rather than
 silently mistranslating.
 """
 
-from openlaw.answers.escalation import crisis_response, detect_crisis, escalation_footer
+from openlaw.answers.escalation import (
+    Helpline,
+    crisis_helplines,
+    crisis_response,
+    detect_crisis,
+    escalation_footer,
+    helpline_for,
+    nalsa_helpline,
+)
 from openlaw.language.detect import SCRIPT_RANGES
 
 #: Shown on a refusal when the free regex found nothing but the question is
@@ -50,6 +58,30 @@ GENERIC_SAFETY_NOTE = (
     "Tele-MANAS (mental health support) is 14416. All are free and "
     "available 24 hours."
 )
+
+#: Hindi pair for `GENERIC_SAFETY_NOTE` (Task 6 fix round, H3) -- static,
+#: hand-authored, ASCII digits, same rules as
+#: `openlaw.answers.escalation._CRISIS_RESPONSES_HI`. Worth having precisely
+#: because this note fires when the question LOOKS non-Latin-script -- the
+#: single case most likely to actually be a Hindi speaker -- yet an explicit
+#: `language="hi"` still wins over the script heuristic, same as everywhere
+#: else. Best-effort pending a native-speaker review pass.
+_GENERIC_SAFETY_NOTE_HI = (
+    "अगर आप तुरंत खतरे में हैं, तो 112 पर कॉल करें। महिला हेल्पलाइन 181 है, "
+    "पुलिस महिला हेल्पलाइन 1091 है, बाल हेल्पलाइन 1098 है, और टेली-मानस "
+    "(मानसिक स्वास्थ्य सहायता) 14416 है। सभी निःशुल्क हैं और चौबीसों घंटे "
+    "उपलब्ध हैं।"
+)
+
+#: The numbers `GENERIC_SAFETY_NOTE`/`_GENERIC_SAFETY_NOTE_HI` actually cite,
+#: as data (Task 6 fix round, C2) -- mirrors
+#: `escalation._CRISIS_HELPLINE_NUMBERS`'s role for the categorised prose.
+_GENERIC_SAFETY_NUMBERS: tuple[str, ...] = ("112", "181", "1091", "1098", "14416")
+
+
+def generic_safety_helplines(language: str = "en") -> tuple[Helpline, ...]:
+    """Structured, tap-to-call numbers for `GENERIC_SAFETY_NOTE`, in `language`."""
+    return tuple(helpline_for(number, language) for number in _GENERIC_SAFETY_NUMBERS)
 
 
 def _looks_non_latin(text: str) -> bool:
@@ -66,22 +98,40 @@ def _looks_non_latin(text: str) -> bool:
     )
 
 
-def crisis_extras(question: str, state: str | None) -> tuple[str, str | None]:
-    """Return `(escalation_footer, crisis_response)` for ANY refusal path.
+def crisis_extras(
+    question: str, state: str | None, language: str | None = None
+) -> tuple[str, str | None, tuple[Helpline, ...]]:
+    """Return `(escalation_footer, crisis_response, helplines)` for ANY
+    refusal path.
 
-    Always returns a non-empty footer. Returns a non-None `crisis_response`
-    when the free regex layer fires, or -- the M3 fix -- when it stays
-    silent but the question is written in a script that layer cannot match
-    at all. See the module docstring for why this stops short of the paid
-    CLASSIFIER-role check the main answer path uses.
+    Always returns a non-empty footer and at least one helpline (the NALSA
+    number the footer itself always cites). Returns a non-None
+    `crisis_response`, plus its category-specific helplines, when the free
+    regex layer fires, or -- the M3 fix -- when it stays silent but the
+    question is written in a script that layer cannot match at all. See the
+    module docstring for why this stops short of the paid CLASSIFIER-role
+    check the main answer path uses.
+
+    `language` selects between the static English/Hindi pairs (Task 6 fix
+    round, H3) -- same "explicit caller choice wins" rule as everywhere else
+    in this codebase, never a live translation. `None` and anything other
+    than `"hi"` fall back to English.
+
+    `helplines` is structured data (Task 6 fix round, C2), not prose the
+    caller must pattern-match: the frontend renders tap-to-call links
+    directly from it rather than scanning `crisis_response`/`footer` text
+    for digits.
     """
-    footer = escalation_footer(state)
+    lang = language or "en"
+    footer = escalation_footer(state, lang)
+    base_helplines = (nalsa_helpline(lang),)
     kind = detect_crisis(question)
     if kind is not None:
-        return footer, crisis_response(kind)
+        return footer, crisis_response(kind, lang), crisis_helplines(kind, lang) + base_helplines
     if _looks_non_latin(question):
-        return footer, GENERIC_SAFETY_NOTE
-    return footer, None
+        note = _GENERIC_SAFETY_NOTE_HI if lang == "hi" else GENERIC_SAFETY_NOTE
+        return footer, note, generic_safety_helplines(lang) + base_helplines
+    return footer, None, base_helplines
 
 
 #: Static, pre-written refusal copy -- English and Hindi only (see the

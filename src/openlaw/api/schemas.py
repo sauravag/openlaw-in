@@ -18,6 +18,7 @@ text. `_render_answer` below mirrors `scripts/review_translations.py`'s
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from openlaw.answers.escalation import Helpline
 from openlaw.answers.escalation import crisis_response as crisis_text
 from openlaw.answers.validate import ValidatedAnswer
 from openlaw.api.jurisdictions import INDIAN_STATES_AND_UTS
@@ -118,7 +119,16 @@ class SourceCard(BaseModel):
 
 
 class AskResponse(BaseModel):
-    """A verified answer with everything needed to render it responsibly."""
+    """A verified answer with everything needed to render it responsibly.
+
+    `helplines` is structured tap-to-call data (Task 6 fix round, C2) --
+    always at least the NALSA number `footer` cites, plus category-specific
+    numbers on a crisis turn. It exists so a client renders `tel:` links
+    directly from this list rather than pattern-matching digits out of
+    `footer`/`crisis_response` prose, which cannot survive localisation (a
+    Hindi crisis message using Devanagari numerals would silently defeat a
+    regex built for ASCII digits).
+    """
 
     answer: str
     sources: list[SourceCard]
@@ -126,6 +136,7 @@ class AskResponse(BaseModel):
     corpus_version: str
     footer: str
     crisis_response: str | None = None
+    helplines: tuple[Helpline, ...] = ()
     is_answerable: bool
     quota_remaining: int
 
@@ -155,6 +166,9 @@ class QuotaExceeded(BaseModel):
     signup_required: bool = False
     escalation_footer: str
     crisis_response: str | None = None
+    #: Structured tap-to-call data (Task 6 fix round, C2) -- see
+    #: `AskResponse.helplines`'s docstring; same rule here.
+    helplines: tuple[Helpline, ...] = ()
     quota_reset_at: str | None = None
     signup_url: str | None = None
 
@@ -193,7 +207,7 @@ def to_response(
     claim.
     """
     if localised.crisis is not None:
-        help_text = crisis_text(localised.crisis)
+        help_text = crisis_text(localised.crisis, localised.language)
         return AskResponse(
             answer=f"{_HELP_IS_AVAILABLE}\n\n{help_text}",
             sources=[],
@@ -201,6 +215,7 @@ def to_response(
             corpus_version=corpus_version,
             footer=localised.footer,
             crisis_response=help_text,
+            helplines=localised.helplines,
             is_answerable=True,
             quota_remaining=quota_remaining,
         )
@@ -219,6 +234,7 @@ def to_response(
         corpus_version=corpus_version,
         footer=localised.footer,
         crisis_response=None,
+        helplines=localised.helplines,
         is_answerable=localised.answer.is_answerable,
         quota_remaining=quota_remaining,
     )

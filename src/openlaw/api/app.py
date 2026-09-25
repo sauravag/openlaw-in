@@ -105,11 +105,15 @@ def _unhandled_error_content(request: Request) -> dict:
     question = getattr(request.state, "question", "")
     state = getattr(request.state, "state", None)
     language = getattr(request.state, "language", None)
-    footer, crisis = crisis_extras(question, state)
+    footer, crisis, helplines = crisis_extras(question, state, language)
     return {
         "detail": refusal_detail("server_error", language),
         "escalation_footer": footer,
         "crisis_response": crisis,
+        # Plain dicts, not `Helpline` instances -- `JSONResponse` serialises
+        # this dict with the stdlib `json` module directly, which does not
+        # know how to encode a pydantic model (Task 6 fix round, C2).
+        "helplines": [helpline.model_dump() for helpline in helplines],
     }
 
 

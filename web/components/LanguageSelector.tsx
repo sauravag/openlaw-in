@@ -3,6 +3,11 @@ import { LANGUAGES, type Language } from '@/lib/languages'
 interface LanguageSelectorProps {
   value: Language['code']
   onChange: (code: Language['code']) => void
+  /** Set so the browser's native, no-JS form submission (Task 6 review, M5)
+   * includes this field on its own -- without it, a submit that happens
+   * before React hydrates would fall back to whatever `defaultValue` the
+   * `<select>` started at, not what the user actually picked. */
+  name?: string
 }
 
 /**
@@ -16,11 +21,12 @@ interface LanguageSelectorProps {
  * is always sent to `/ask` explicitly (`lib/api.ts`), never left for the
  * server to guess.
  */
-export default function LanguageSelector({ value, onChange }: LanguageSelectorProps) {
+export default function LanguageSelector({ value, onChange, name }: LanguageSelectorProps) {
   return (
     <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
       Language / भाषा
       <select
+        name={name}
         className="rounded-md border border-slate-300 px-3 py-2 text-base text-slate-900"
         value={value}
         onChange={(event) => onChange(event.target.value as Language['code'])}
