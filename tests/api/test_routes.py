@@ -713,13 +713,26 @@ def test_crisis_turn_is_not_marked_unanswerable() -> None:
 _ASCII_WORD = re.compile(r"[A-Za-z]{4,}")
 
 
-def test_hindi_crisis_answer_contains_no_english_sentence() -> None:
+@pytest.mark.parametrize("kind", list(CrisisKind))
+def test_hindi_crisis_answer_contains_no_english_sentence(kind: CrisisKind) -> None:
     """Final review, H1: reproduced live -- a Hindi domestic-violence crisis
     turn used to open with the hardcoded English `_HELP_IS_AVAILABLE`
     sentence, above otherwise-correct Hindi helpline text. The most
     safety-critical response this system produces must be entirely in the
-    language the caller chose."""
-    client = _client(_localised(crisis=CrisisKind.DOMESTIC_VIOLENCE, language="hi"))
+    language the caller chose.
+
+    Parametrised over every `CrisisKind` deliberately. The final re-review
+    noted this guard originally covered only `DOMESTIC_VIOLENCE`, so the
+    other three categories were protected by nothing but the fact that
+    nobody had broken them yet -- the same "carried by convention across a
+    seam nothing tests" class the whole fix round exists to close.
+
+    If a future Hindi crisis string legitimately needs an English legal
+    acronym (FIR, IPC, POCSO), do NOT relax `_ASCII_WORD` -- that empties
+    the guard for every string at once. Add the acronym to an explicit
+    allowlist here instead, so the exemption is visible and bounded.
+    """
+    client = _client(_localised(crisis=kind, language="hi"))
     body = client.post(
         "/ask", json={"question": "मेरा पति मुझे मारता है", "language": "hi"}
     ).json()
