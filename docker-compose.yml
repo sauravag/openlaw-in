@@ -1,40 +1,203 @@
-# Local development only. Every port is bound to 127.0.0.1 so these
-# datastores are not reachable from the local network — the credentials
-# below are development defaults and Qdrant runs without authentication.
-# Production deployment must supply real secrets and its own network policy.
+# One-command self-hosting (Task 7, spec success criterion 12.7).
 #
-# Datastore ports MUST stay bound to 127.0.0.1 — this is a hard project
-# constraint, not a default to reconsider. When the `api` service and a
-# reverse proxy are added here (self-hosting, one-command deployment), set
-# OPENLAW_TRUSTED_PROXY_IPS (see .env.example) to that proxy's address on
-# this network — otherwise every request reaches `api` from the same
-# address and per-IP rate limiting/anonymous quota collapse into one shared
-# bucket for the whole deployment. `production_app()` refuses to start
-# unless that is set OR OPENLAW_NO_REVERSE_PROXY=true is set instead
-# (openlaw.api.deps._require_proxy_acknowledgement) — the `api` service's
-# environment block must set one of the two.
+# `docker compose up -d` brings up every datastore, runs migrations, and
+# starts the API and web frontend. It does NOT bring up a working corpus --
+# Qdrant starts empty. `/readyz` (openlaw.api.routes) reports that honestly
+# (status "degraded" until the corpus collections are populated), and `api`'s
+# healthcheck below surfaces the same thing to `docker compose ps`/`docker
+# inspect` rather than reporting a broken stack as healthy. See README's
+# "Self-hosting" section for how the corpus is actually built -- it is not,
+# and cannot be, part of this command: it is ~1.5M vectors built over many
+# hours from two large datasets, not something `docker compose up` can ship.
+#
+# Local development only in the sense that every DATASTORE port (Qdrant,
+# Postgres, Neo4j) is bound to 127.0.0.1 so they are not reachable from the
+# local network -- the credentials below are development defaults and Qdrant
+# runs without authentication. `api` and `web` are the intended reachable
+# surface (their ports are NOT loopback-restricted, unlike the datastores)
+# and MUST sit behind your own TLS-terminating reverse proxy for any
+# deployment reachable over the public internet; the Postgres/Neo4j
+# passwords below should also be overridden (`POSTGRES_PASSWORD`,
+# `NEO4J_PASSWORD` in your `.env`) before that.
+#
+# Datastore ports MUST stay bound to 127.0.0.1 -- this is a hard project
+# constraint, not a default to reconsider.
+#
+# --- Reverse-proxy trust (binding requirement 1) ---------------------------
+# `web` (Next.js) proxies `/ask` to `api` server-side (see
+# `web/next.config.ts`'s `rewrites()`) so that the anonymous-quota cookie
+# round-trips with zero CORS configuration -- which means `api` NEVER sees a
+# browser connect to it directly in this topology. Every request `api`
+# receives arrives from `web`'s own container, so `web` -- not some generic
+# "reverse proxy" -- is the address `OPENLAW_TRUSTED_PROXY_IPS` must trust,
+# or every caller behind it (i.e. everyone) collapses into one shared rate-
+# limit/anonymous-quota bucket (see `openlaw.api.routes._client_key` and
+# `Settings.trusted_proxy_ips`'s docstring). `web` is given a fixed address
+# on the `default` network below (`172.28.5.10`, via the custom `ipam`
+# block) specifically so this value is a stable constant here rather than
+# something to discover after `docker compose up` -- `docker compose config`
+# validates this file's syntax without starting anything.
+#
+# If you put your OWN reverse proxy (nginx/Caddy/Traefik) in front of this
+# stack for TLS -- required for any deployment reachable over the public
+# internet -- point it at `web`, not `api`, and set that proxy to forward
+# `X-Forwarded-For` the normal way (every mainstream reverse proxy does this
+# by default). Next.js only ever SETS `x-forwarded-for` when the header is
+# absent (`req.headers['x-forwarded-for'] ??= ...`, see
+# `node_modules/next/dist/server/base-server.js`); a value your proxy
+# already set is passed through unchanged. `api` still only ever sees `web`
+# as its peer either way, so `OPENLAW_TRUSTED_PROXY_IPS` below needs NO
+# change for that common case. The one case that DOES need a change: a proxy
+# that talks to `api` directly, bypassing `web`'s rewrite (or a future
+# multi-replica `api` behind a load balancer) -- then set
+# `OPENLAW_TRUSTED_PROXY_IPS` to THAT proxy's/load balancer's actual address
+# on the network `api` receives connections from instead of `172.28.5.10`.
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.5.0/24
 
 services:
   qdrant:
     image: qdrant/qdrant:v1.16.3
+    restart: unless-stopped
     ports: ["127.0.0.1:6333:6333", "127.0.0.1:6334:6334"]
     volumes: ["./data/qdrant:/qdrant/storage"]
 
   postgres:
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: openlaw
-      POSTGRES_PASSWORD: openlaw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openlaw}
       POSTGRES_DB: openlaw
     ports: ["127.0.0.1:5432:5432"]
     volumes: ["./data/postgres:/var/lib/postgresql/data"]
+    # Needed so `migrate` below can wait for a Postgres that can actually
+    # accept connections, not merely a container that has started.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openlaw"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   neo4j:
     image: neo4j:2026.06.0-community
+    restart: unless-stopped
     environment:
-      NEO4J_AUTH: neo4j/openlawdev
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-openlawdev}
       NEO4J_PLUGINS: '["graph-data-science"]'
       NEO4J_server_memory_pagecache_size: 4G
       NEO4J_server_memory_heap_max__size: 4G
     ports: ["127.0.0.1:7474:7474", "127.0.0.1:7687:7687"]
     volumes: ["./data/neo4j:/data"]
+
+  # One-shot: applies pending Alembic migrations, then exits. `api` will not
+  # start until this exits 0 (binding requirement 5 -- migrations run as
+  # part of bringing the stack up). Safe to re-run on every `docker compose
+  # up`: `alembic upgrade head` against an already-current database is a
+  # no-op (see README's "Database migrations" section for the one case it
+  # is NOT safe to assume -- a database with these tables created some
+  # other way -- and the `alembic stamp head` fix for that case).
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      OPENLAW_DATABASE_URL: postgresql+psycopg://openlaw:${POSTGRES_PASSWORD:-openlaw}@postgres:5432/openlaw
+      # Required by openlaw.config.Settings but never read by `alembic
+      # upgrade head` itself (they only matter to the corpus-build scripts,
+      # which this compose file does not run -- see README's "Corpus
+      # build" section). Any value satisfies the shared Settings model.
+      OPENLAW_VAQUILL_ROOT: /corpus-build-only/vaquill
+      OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_started
+      neo4j:
+        condition: service_started
+    environment:
+      OPENLAW_DATABASE_URL: postgresql+psycopg://openlaw:${POSTGRES_PASSWORD:-openlaw}@postgres:5432/openlaw
+      OPENLAW_QDRANT_URL: http://qdrant:6333
+      OPENLAW_NEO4J_URI: bolt://neo4j:7687
+      OPENLAW_NEO4J_USER: neo4j
+      OPENLAW_NEO4J_PASSWORD: ${NEO4J_PASSWORD:-openlawdev}
+      # Required by Settings; unused by the running service (corpus-build
+      # scripts only -- see the `migrate` service's comment above).
+      OPENLAW_VAQUILL_ROOT: /corpus-build-only/vaquill
+      OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
+      # Query embedding defaults to the local, open-weight voyage-4-nano
+      # baked into this image (see Dockerfile) -- no Voyage key needed for
+      # self-hosters who never rebuild the corpus themselves.
+      OPENLAW_QUERY_EMBEDDER_BACKEND: ${OPENLAW_QUERY_EMBEDDER_BACKEND:-local_nano}
+      OPENLAW_VOYAGE_API_KEY: ${OPENLAW_VOYAGE_API_KEY:-}
+      # Required -- production_app() refuses to start without it (binding
+      # requirement 4: fail loudly at startup, never a half-working
+      # service). Set it in your .env (copied from .env.example).
+      OPENLAW_ANTHROPIC_API_KEY: ${OPENLAW_ANTHROPIC_API_KEY:?set OPENLAW_ANTHROPIC_API_KEY in .env -- see .env.example}
+      # A legal-aid body running its own instance should not inherit the
+      # hosted tier's rate limit -- see .env.example and the README.
+      OPENLAW_QUOTA_ENABLED: ${OPENLAW_QUOTA_ENABLED:-false}
+      OPENLAW_MONTHLY_QUOTA: ${OPENLAW_MONTHLY_QUOTA:-30}
+      OPENLAW_ANONYMOUS_QUOTA: ${OPENLAW_ANONYMOUS_QUOTA:-3}
+      # Left blank: sign-in is optional infrastructure, not required for the
+      # anonymous Q&A path this compose file ships working out of the box.
+      # Set both to enable Supabase email/Google auth.
+      OPENLAW_SUPABASE_URL: ${OPENLAW_SUPABASE_URL:-}
+      OPENLAW_SUPABASE_JWT_SECRET: ${OPENLAW_SUPABASE_JWT_SECRET:-}
+      # See the "Reverse-proxy trust" note above this file's `services:`
+      # block -- `web`'s fixed address on this compose network, not a
+      # generic reverse-proxy placeholder.
+      OPENLAW_TRUSTED_PROXY_IPS: '["172.28.5.10"]'
+      # This stack ships with no TLS termination out of the box (plain HTTP
+      # on localhost) -- a `Secure` cookie would never round-trip, silently
+      # breaking anonymous-quota tracking the moment OPENLAW_QUOTA_ENABLED
+      # is turned on. Put a TLS-terminating reverse proxy in front of `web`
+      # for any deployment reachable over the public internet and set this
+      # back to `true` (the safe default `Settings.cookie_secure` itself
+      # uses) once you do.
+      OPENLAW_COOKIE_SECURE: ${OPENLAW_COOKIE_SECURE:-false}
+    ports: ["8000:8000"]
+    healthcheck:
+      # Binding requirement 2: wired to /readyz, not /health -- an empty or
+      # unbuilt corpus must show this container as unhealthy, not merely
+      # "the process is up" (which /health alone would report even with a
+      # totally empty Qdrant). curl is installed in the Dockerfile
+      # specifically for this.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  web:
+    build:
+      context: ./web
+      args:
+        OPENLAW_API_URL: http://api:8000
+    restart: unless-stopped
+    # `service_started`, deliberately not `service_healthy`: `api`'s
+    # healthcheck above is tied to a POPULATED corpus, which will not exist
+    # yet on a fresh self-host (binding requirement 6 -- the application
+    # must come up around an empty corpus, not refuse to come up at all
+    # until a many-hour corpus build finishes elsewhere).
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      OPENLAW_API_URL: http://api:8000
+    networks:
+      default:
+        ipv4_address: 172.28.5.10
+    ports: ["3000:3000"]

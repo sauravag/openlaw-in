@@ -220,14 +220,32 @@ def test_readyz_reports_degraded_and_503_when_postgres_is_unreachable(
     }
 
 
-def test_check_qdrant_reports_ok_for_a_healthy_response() -> None:
-    """Unit-level check of `_check_qdrant` itself, with an injected fake
-    client -- proves the function's own logic without any network access."""
-    from openlaw.api.routes import _check_qdrant
+def _fake_qdrant_client(points_by_collection: dict[str, int]):
+    """Build a fake `httpx.Client`-shaped factory for `_check_qdrant`.
+
+    Answers `/healthz` unconditionally, and `/collections/<name>` with a
+    `points_count` looked up in `points_by_collection` -- a collection not
+    present in that dict responds 404, matching real Qdrant's behaviour for
+    a collection that was never created.
+    """
+    import httpx
 
     class _FakeResponse:
+        def __init__(self, status_code: int, payload: dict | None = None) -> None:
+            self.status_code = status_code
+            self._payload = payload or {}
+
         def raise_for_status(self) -> None:
-            return None
+            if self.status_code >= 400:
+                request = httpx.Request("GET", "http://q:6333/x")
+                raise httpx.HTTPStatusError(
+                    "error", request=request, response=httpx.Response(
+                        self.status_code, request=request
+                    )
+                )
+
+        def json(self) -> dict:
+            return self._payload
 
     class _FakeClient:
         def __init__(self, timeout: float) -> None:
@@ -240,10 +258,51 @@ def test_check_qdrant_reports_ok_for_a_healthy_response() -> None:
             return None
 
         def get(self, url: str) -> _FakeResponse:
-            assert url == "http://q:6333/healthz"
-            return _FakeResponse()
+            if url.endswith("/healthz"):
+                return _FakeResponse(200)
+            collection = url.rsplit("/", 1)[-1]
+            if collection not in points_by_collection:
+                return _FakeResponse(404)
+            payload = {"result": {"points_count": points_by_collection[collection]}}
+            return _FakeResponse(200, payload)
 
-    assert _check_qdrant("http://q:6333", client_factory=_FakeClient) == "ok"
+    return _FakeClient
+
+
+def test_check_qdrant_reports_ok_when_corpus_collections_are_populated() -> None:
+    """Unit-level check of `_check_qdrant` itself, with an injected fake
+    client -- proves the function's own logic without any network access."""
+    from openlaw.api.routes import _check_qdrant
+
+    client_factory = _fake_qdrant_client(
+        {"acts_india_v1": 961_136, "sc_judgments_v1": 371_247}
+    )
+
+    assert _check_qdrant("http://q:6333", client_factory=client_factory) == "ok"
+
+
+def test_check_qdrant_reports_empty_when_a_corpus_collection_has_zero_points() -> None:
+    """Task 7 requirement 2: an empty corpus must not report readiness --
+    the exact "stack up, then every question 500s" failure mode this check
+    exists to prevent."""
+    from openlaw.api.routes import _check_qdrant
+
+    client_factory = _fake_qdrant_client(
+        {"acts_india_v1": 0, "sc_judgments_v1": 371_247}
+    )
+
+    assert _check_qdrant("http://q:6333", client_factory=client_factory) == "empty"
+
+
+def test_check_qdrant_reports_empty_when_a_corpus_collection_does_not_exist() -> None:
+    """A collection that was never created (a self-host before its first
+    corpus build) reads the same as "empty", not "unreachable" -- Qdrant
+    itself is fine, the corpus just is not there yet."""
+    from openlaw.api.routes import _check_qdrant
+
+    client_factory = _fake_qdrant_client({"acts_india_v1": 961_136})
+
+    assert _check_qdrant("http://q:6333", client_factory=client_factory) == "empty"
 
 
 def test_check_qdrant_reports_unreachable_on_any_failure() -> None:

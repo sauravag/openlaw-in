@@ -85,11 +85,23 @@ from openlaw.db.quota import (
     current_period,
     next_period_start,
 )
+from openlaw.index.upsert import SC_COLLECTION
+from openlaw.retrieval.search import ACTS_INDIA_V1
 
 #: Timeout for the /readyz datastore probes -- short, since this endpoint
 #: exists to be polled frequently by an orchestrator and must never itself
 #: become the slow thing blocking a deploy.
 _READINESS_TIMEOUT_SECONDS = 3.0
+
+#: Collections `/ask` searches on EVERY request by default (Task 7
+#: requirement 2; see `openlaw.retrieval.search._collections_to_search`).
+#: `hc_judgments_v1` is deliberately excluded here: it only joins a search
+#: when a caller explicitly scopes a query to an onboarded High Court
+#: jurisdiction, so an instance with no High Court data yet is still ready
+#: to answer the ordinary Supreme-Court-and-statute question -- requiring it
+#: here would report a self-host "not ready" for a corpus gap that never
+#: blocks an actual answer.
+_REQUIRED_CORPUS_COLLECTIONS: tuple[str, ...] = (ACTS_INDIA_V1, SC_COLLECTION)
 
 logger = logging.getLogger(__name__)
 
@@ -394,16 +406,56 @@ def _check_postgres(session_factory: Callable) -> str:
         return "unreachable"
 
 
+def _collection_points_count(
+    client: httpx.Client, qdrant_url: str, collection: str
+) -> int:
+    """Return how many points `collection` holds, or `0` if it does not
+    exist yet -- both read as "not ready to answer" to `_check_qdrant`, and
+    a self-host between `docker compose up` and its first corpus build is
+    exactly the "does not exist yet" case (see the README's corpus-build
+    section). Any OTHER failure (timeout, connection refused) is left to
+    propagate -- that is a genuine reachability problem, not an empty
+    corpus, and `_check_qdrant` reports it as `"unreachable"`, not
+    `"empty"`.
+    """
+    try:
+        response = client.get(f"{qdrant_url}/collections/{collection}")
+        response.raise_for_status()
+    except httpx.HTTPStatusError:
+        return 0
+    return int(response.json()["result"]["points_count"])
+
+
 def _check_qdrant(
     qdrant_url: str, client_factory: Callable[..., httpx.Client] = httpx.Client
 ) -> str:
-    """Return `"ok"` if Qdrant's own health endpoint responds, else a short
-    reason. `client_factory` is injectable for tests -- never invoked
-    against a live server here."""
+    """Return `"ok"` only if Qdrant is reachable AND every collection `/ask`
+    searches by default (`_REQUIRED_CORPUS_COLLECTIONS`) actually holds
+    vectors; `"empty"` if Qdrant is reachable but the corpus is not there
+    yet; `"unreachable"` for anything else. `client_factory` is injectable
+    for tests -- never invoked against a live server here.
+
+    Task 7 requirement 2: before this checked point counts, a freshly
+    installed self-host with an empty (or entirely absent) corpus reported
+    `/readyz` healthy -- the stack looked fine, then every real question
+    500'd on an empty retrieval context. This is what makes `/readyz` prove
+    the service can actually answer, not merely that Qdrant's process is up.
+    """
     try:
         with client_factory(timeout=_READINESS_TIMEOUT_SECONDS) as client:
             response = client.get(f"{qdrant_url}/healthz")
             response.raise_for_status()
+            empty = [
+                collection
+                for collection in _REQUIRED_CORPUS_COLLECTIONS
+                if _collection_points_count(client, qdrant_url, collection) <= 0
+            ]
+        if empty:
+            logger.warning(
+                "readiness check: corpus collection(s) empty or missing: %s",
+                ", ".join(empty),
+            )
+            return "empty"
         return "ok"
     except Exception as exc:  # pragma: no cover - depends on live environment
         logger.warning("readiness check: Qdrant unreachable: %s", exc)
@@ -421,9 +473,14 @@ def readyz(request: Request) -> JSONResponse:
     Qdrant, or a down Postgres starts clean, reports healthy, and fails only
     on a real user's question (a generic 500) -- the exact "starts and only
     fails once a user asks a question" outcome this task's requirements
-    forbid. Checks Postgres (a session round-trip) and Qdrant (its own
-    `/healthz`) -- never Neo4j or the Anthropic API, both of which
-    `production_app()` already either validates or does not require for a
+    forbid. Checks Postgres (a session round-trip) and Qdrant -- both its own
+    `/healthz` AND that `_REQUIRED_CORPUS_COLLECTIONS` actually hold vectors
+    (Task 7 requirement 2: a reachable-but-empty Qdrant is exactly the state
+    a self-host is in immediately after `docker compose up`, before its
+    first corpus build, and reporting THAT healthy is what let every real
+    question 500 while the stack looked fine) -- never Neo4j or the
+    Anthropic API, both of which `production_app()` already either validates
+    or does not require for a
     degraded-but-functional (graph expansion off, or crisis classifier
     absorbing a failure) service.
     """

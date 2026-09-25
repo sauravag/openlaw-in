@@ -158,3 +158,134 @@ git-ignored) so an interrupted multi-hour run resumes with `python scripts/build
 (no flag needed) rather than re-embedding from the start; `--restart` discards the
 checkpoint, and `--limit N` stops after N chunks to prove the pipeline on a
 bounded slice.
+
+## Self-hosting
+
+**This is spec success criterion 12.7: someone other than the author can
+self-host this from the README alone.** `docker compose up -d` brings up the
+whole *application* -- Postgres, Qdrant, Neo4j, database migrations, the API,
+and the web frontend -- in one command. It does **not** bring up a working
+corpus. Be clear-eyed about what that means before you start:
+
+- **The corpus is not downloadable and does not ship in an image.** It is
+  roughly **1.5 million vectors** (`acts_india_v1` + `sc_judgments_v1` +
+  `hc_judgments_v1`, see "Corpus build" above), built from the two datasets
+  under "Data attribution" by running this project's own scripts against
+  them. There is no shortcut -- building it takes **many hours** of
+  embedding (mostly network- and API-bound, not CPU-bound) and **tens of
+  gigabytes of disk** (the restored `acts_india` snapshot alone is ~11.2 GB;
+  budget for the built Qdrant collections on top of that). `docker compose
+  up` cannot ship this for the same reason it cannot ship a Wikipedia
+  mirror: it is somebody else's dataset, redistributed under CC BY
+  4.0/Apache-2.0 attribution terms this project honours by pointing at the
+  source, not by silently re-hosting a multi-GB derivative in a container
+  registry.
+- **Until that build finishes, the service runs and tells you so.** The
+  application comes up immediately and answers HTTP requests; every
+  question it is asked before the corpus exists comes back `unanswerable`,
+  never a fabricated citation. `GET /readyz` reports this honestly (`status:
+  "degraded"` until `acts_india_v1`/`sc_judgments_v1` actually hold vectors
+  -- see `openlaw.api.routes._check_qdrant`), and that same check is wired
+  as the `api` container's Compose healthcheck, so `docker compose ps` shows
+  an incomplete self-host as unhealthy instead of looking fine right up
+  until a real user's question 500s.
+
+### Steps
+
+1. **Copy the environment file.**
+
+       cp .env.example .env
+
+2. **Set the two secrets `production_app()` refuses to start without:**
+   `OPENLAW_ANTHROPIC_API_KEY` (every answer -- generation, translation,
+   crisis classification -- goes through it) and, if you plan to rebuild or
+   extend the corpus yourself, `OPENLAW_VOYAGE_API_KEY` (only the Supreme
+   Court/High Court build scripts need it; the running service's default
+   query embedder is the local, open-weight `voyage-4-nano` baked into the
+   `api` image, so ordinary self-hosting needs no Voyage key at all).
+   `docker-compose.yml` fails immediately with a named, readable error if
+   `OPENLAW_ANTHROPIC_API_KEY` is missing -- never a stack trace, never a
+   service that starts and only fails on a real user's question.
+
+3. **Build the corpus** (separately from `docker compose up` -- see above;
+   this needs the Python environment on your host, not a container, since
+   these scripts read the raw HuggingFace dataset snapshots directly):
+
+       pip install -e ".[dev,local-nano]"
+       python scripts/make_fixtures.py
+       python scripts/restore_acts_india.py       # ~11.2 GB, tens of minutes
+       python scripts/build_sc_index.py           # needs OPENLAW_VOYAGE_API_KEY
+       python scripts/build_hc_index.py            # needs OPENLAW_VOYAGE_API_KEY, hours
+       python scripts/build_hc_index.py --court delhi
+       python scripts/validate_corpus.py           # the gate: all citations resolve
+
+   You can skip straight to step 4 and come back to this once the
+   application is confirmed up -- the two do not depend on each other.
+
+4. **Bring up the stack.**
+
+       docker compose up -d
+
+   This starts Postgres, Qdrant, and Neo4j; runs `alembic upgrade head`
+   against Postgres via the one-shot `migrate` service (the `api` container
+   will not start until migrations succeed -- see `docker-compose.yml`); and
+   starts `api` (port 8000) and `web` (port 3000, proxying `/ask` to `api`
+   server-side). Migrations do not assume an empty database -- see
+   "Database migrations" above for the `alembic stamp head` escape hatch if
+   these tables already exist some other way.
+
+5. **Verify it.**
+
+       ./scripts/verify_selfhost.sh
+
+   Expected: `[Selfhost] PASS`. This confirms the stack is up, every
+   datastore is reachable, and the API and frontend are both serving --
+   it does **not** require the corpus build from step 3 to be finished
+   first (see that script's own comments for exactly what it does and does
+   not check, and why). Re-run it after the corpus build finishes: with
+   `/readyz` reporting ready, its final check asks a real question and
+   verifies a genuinely cited answer comes back.
+
+6. Open **http://localhost:3000** and ask a question.
+
+### Quota is disabled by default for self-hosters
+
+`OPENLAW_QUOTA_ENABLED` defaults to `false` in `docker-compose.yml` -- a
+legal-aid body running its own instance should not inherit the hosted
+tier's anonymous-3/signed-in-30-per-month limit. Set it to `true` (and, if
+you are not behind HTTPS, leave `OPENLAW_COOKIE_SECURE=false` -- see the
+next section) if you specifically want that limit on your own deployment.
+
+**This is legal information, not legal advice.** Every answer carries this
+notice and routes to DLSA/NALSA for anything beyond what a citation can
+responsibly settle -- self-hosting this does not change that; see
+"Coverage limits" above for exactly how far the underlying corpus goes.
+
+### Reverse-proxy trust, and what changes if you add your own
+
+`docker-compose.yml` sets `OPENLAW_TRUSTED_PROXY_IPS` to `web`'s own fixed
+address on the Compose network (`172.28.5.10`), because `web` (Next.js)
+proxies every `/ask` request to `api` server-side -- `api` never sees a
+browser connect to it directly in this topology, so `web` is the one
+address that needs trusting for per-caller rate limiting and the anonymous
+quota to work correctly (see `docker-compose.yml`'s own comments, and
+`openlaw.api.routes._client_key`, for the mechanics and what goes wrong if
+this is left unset behind a real proxy). If you put your own TLS-
+terminating reverse proxy in front of this stack -- required for any
+deployment reachable over the public internet -- point it at `web`, not
+`api`, and let it forward `X-Forwarded-For` the way every mainstream
+reverse proxy does by default; no change to `OPENLAW_TRUSTED_PROXY_IPS` is
+needed for that case. The one case that DOES need a change is a proxy that
+talks to `api` directly (bypassing `web`'s rewrite), or a future multi-
+replica `api` behind a load balancer -- set `OPENLAW_TRUSTED_PROXY_IPS` to
+that proxy's/load balancer's actual address instead.
+
+### Datastore ports never leave the host
+
+Qdrant, Neo4j and Postgres are bound to `127.0.0.1` in `docker-compose.yml`
+and must stay that way -- this is a hard project constraint, not a default
+to reconsider. `api` and `web` are the only intended reachable surface.
+Their default development credentials (`openlaw`/`openlaw`,
+`neo4j`/`openlawdev`) are fine behind that loopback binding; override them
+via `POSTGRES_PASSWORD`/`NEO4J_PASSWORD` in your `.env` before putting a
+reverse proxy in front of this stack for anything beyond your own machine.

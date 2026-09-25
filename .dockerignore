@@ -1,0 +1,21 @@
+# Keep the build context (and the resulting image) small and free of local
+# state. `data/*` on a dev machine holds the bind-mounted Qdrant/Postgres/
+# Neo4j volumes and multi-GB corpus-build checkpoints (see .gitignore) --
+# none of that belongs in an image; the curated glossary is the one thing
+# under `data/` the running service actually reads (see
+# `openlaw.language.glossary.DEFAULT_GLOSSARY_PATH`), so it is re-included
+# below the same way `.gitignore` re-includes it from version control.
+data/*
+!data/glossary
+!data/glossary/*.json
+
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.coverage
+.git/
+.env
+node_modules/
+web/node_modules/
+web/.next/
