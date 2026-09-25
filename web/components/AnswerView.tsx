@@ -88,7 +88,7 @@ export default function AnswerView({ data }: AnswerViewProps) {
       </div>
 
       {data.sources.length > 0 && (
-        <section aria-label="Sources" className="flex flex-col gap-2">
+        <section aria-label={strings.sourcesHeading} className="flex flex-col gap-2">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
             {strings.sourcesHeading}
           </h2>

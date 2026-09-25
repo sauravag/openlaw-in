@@ -113,34 +113,65 @@ describe('askQuestion', () => {
     expect(outcome).toEqual({ kind: 'refused', status: 500, data: serverErrorRefusal })
   })
 
-  it('throws AskError when the network request fails outright', async () => {
+  it('falls back to the static helpline set, not a bare error, when the network fails outright (re-review HIGH)', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
 
-    await expect(askQuestion({ question: 'q', language: 'en' })).rejects.toBeInstanceOf(
-      AskError,
-    )
+    const outcome = await askQuestion({ question: 'q', language: 'en' })
+
+    expect(outcome.kind).toBe('refused')
+    if (outcome.kind === 'refused') {
+      expect(outcome.data.crisis_response).toMatch(/could not reach the server/i)
+      expect(outcome.data.helplines.length).toBeGreaterThan(0)
+    }
   })
 
-  it('throws a localised AskError when the request times out', async () => {
+  it('falls back to the static Hindi helpline set when the request times out (re-review HIGH)', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockRejectedValue(new DOMException('The operation was aborted.', 'TimeoutError')),
     )
 
-    await expect(askQuestion({ question: 'q', language: 'hi' })).rejects.toThrow(
-      /समय लग गया/,
-    )
+    const outcome = await askQuestion({ question: 'q', language: 'hi' })
+
+    expect(outcome.kind).toBe('refused')
+    if (outcome.kind === 'refused') {
+      expect(outcome.data.crisis_response).toMatch(/सर्वर से जुड़ नहीं सके/)
+      expect(outcome.data.helplines).toContainEqual({ number: '112', label: 'आपातकालीन सेवा' })
+    }
   })
 
-  it('throws AskError for an unexpected error status with no refusal shape', async () => {
+  it('falls back to the static helpline set for a non-2xx body with no refusal shape (re-review HIGH)', async () => {
+    // A load balancer's own JSON error page, or any 500 whose body isn't
+    // shaped like `_unhandled_error_content`'s output.
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(jsonResponse(500, { detail: 'server exploded' })),
+      vi.fn().mockResolvedValue(jsonResponse(502, { error: 'Bad Gateway' })),
     )
 
-    await expect(askQuestion({ question: 'q', language: 'en' })).rejects.toThrow(
-      'server exploded',
-    )
+    const outcome = await askQuestion({ question: 'q', language: 'en' })
+
+    expect(outcome).toEqual({
+      kind: 'refused',
+      status: 502,
+      data: expect.objectContaining({
+        crisis_response: expect.stringMatching(/could not reach the server/i),
+      }),
+    })
+  })
+
+  it('falls back to the static helpline set for a non-JSON (e.g. proxy HTML error page) body (re-review HIGH)', async () => {
+    const htmlResponse = new Response('<html><body>502 Bad Gateway</body></html>', {
+      status: 502,
+      headers: { 'Content-Type': 'text/html' },
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(htmlResponse))
+
+    const outcome = await askQuestion({ question: 'q', language: 'en' })
+
+    expect(outcome.kind).toBe('refused')
+    if (outcome.kind === 'refused') {
+      expect(outcome.data.helplines.length).toBeGreaterThan(0)
+    }
   })
 
   it('throws AskError instead of returning a malformed 200 body (M2)', async () => {

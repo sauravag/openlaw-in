@@ -1,3 +1,4 @@
+import { getFallbackHelplineSet } from "./fallbackHelplines";
 import { getStrings } from "./strings";
 import type { AnswerData, Helpline, RefusalData, SourceCard } from "./types";
 
@@ -26,6 +27,11 @@ const ASK_ENDPOINT = "/api/openlaw/ask";
 //: round trip (retrieval + generation) while still bounding the wait.
 const REQUEST_TIMEOUT_MS = 30_000;
 
+//: `askQuestion` never has a real HTTP status for a network failure or a
+//: timeout (`fetch` throws before one exists) -- `0` is the conventional
+//: "no response was ever received" sentinel, distinct from any real status.
+const NO_RESPONSE_STATUS = 0;
+
 export interface AskParams {
   question: string;
   /** Never omitted: an explicit choice, not left for the server to guess.
@@ -38,9 +44,11 @@ export type AskOutcome =
   | { kind: "answer"; data: AnswerData }
   | { kind: "refused"; status: number; data: RefusalData };
 
-/** Raised for anything that is not a well-formed `/ask` response: the
- * network failing outright, a timeout, a malformed body, or a status code
- * this client cannot otherwise render. */
+/** Raised only for a malformed 200 response -- the server claimed success
+ * but the body does not match `AnswerData`'s shape. Every other failure mode
+ * (network error, timeout, a non-2xx response with no usable body) now
+ * resolves to a `{kind: 'refused'}` outcome carrying the static fallback
+ * helplines instead of throwing -- see `fallbackRefusalData` below. */
 export class AskError extends Error {}
 
 function isSourceCard(value: unknown): value is SourceCard {
@@ -108,12 +116,31 @@ function isRefusalData(value: unknown): value is RefusalData {
 }
 
 /**
- * Perform the fetch, translating a hard network failure or a stalled
- * request (H4's `AbortSignal.timeout`) into `AskError` immediately, before
- * any body parsing.
+ * Build a `RefusalData` from the static client-side fallback
+ * (`lib/fallbackHelplines.ts`) for the case the server told us nothing at
+ * all -- see that module's docstring for why this is not the prose
+ * pattern-matcher C2 removed. Used for a network failure, a timeout, or a
+ * non-2xx response whose body is not recognisable `RefusalData` JSON (Task
+ * 6 second fix round, re-review HIGH).
  */
-async function postQuestion(params: AskParams): Promise<Response> {
-  const strings = getStrings(params.language);
+function fallbackRefusalData(language: string): RefusalData {
+  const fallback = getFallbackHelplineSet(language);
+  return {
+    detail: getStrings(language).genericError,
+    escalation_footer: fallback.escalationFooter,
+    crisis_response: fallback.crisisResponse,
+    helplines: fallback.helplines,
+  };
+}
+
+/**
+ * Perform the fetch. Returns the `Response` on success; on a hard network
+ * failure or a stalled request (H4's `AbortSignal.timeout`), returns `null`
+ * rather than throwing -- `askQuestion` turns that into the static fallback
+ * refusal, not a bare error, since a connectivity failure is exactly the
+ * moment the person asking may need a helpline the most.
+ */
+async function postQuestion(params: AskParams): Promise<Response | null> {
   try {
     return await fetch(ASK_ENDPOINT, {
       method: "POST",
@@ -126,34 +153,48 @@ async function postQuestion(params: AskParams): Promise<Response> {
       }),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-  } catch (error: unknown) {
-    if (error instanceof DOMException && error.name === "TimeoutError") {
-      throw new AskError(strings.timeoutError);
-    }
-    const message = error instanceof Error ? error.message : "Network request failed.";
-    throw new AskError(`${strings.genericError} (${message})`);
+  } catch {
+    return null;
   }
 }
 
 /**
  * Ask one question and return either a verified answer or a structured
- * refusal. Never throws for a refusal body -- any non-2xx response whose
- * body carries `escalation_footer` (429 quota/rate-limit, OR the app-level
- * 500 handler) is `RefusalData`, an expected, fully-typed outcome the
- * caller must render (crisis help first, then quota state and the
- * escalation footer), not an error to swallow.
+ * refusal. Only throws `AskError` for a malformed 200 body (see the class
+ * docstring) -- every other failure resolves to a `{kind: 'refused'}`
+ * outcome, never a dead end.
  *
  * **Task 6 review, C1.** A prior version only treated HTTP 429 this way and
  * discarded any other non-2xx body, including the 500 body's
  * `escalation_footer`/`crisis_response` -- the exact dead end
  * `_unhandled_error_content` (`app.py`) was written to prevent. Checking
- * for `escalation_footer` on the body, not the status code, is what closes
- * that gap for good: any future refusal-shaped response the backend adds
- * is covered automatically, not just the two causes known today.
+ * for `escalation_footer` on the body, not the status code, closed that for
+ * a well-formed 500. It did not close it for an INFRASTRUCTURE-level
+ * failure -- a proxy/CDN/load balancer's own error page, an empty body, or
+ * no response at all -- where there is no server JSON to check in the first
+ * place.
+ *
+ * **Task 6 second fix round, re-review HIGH.** That gap is closed here: a
+ * network error, a timeout, or a non-2xx body that fails `isRefusalData`
+ * (unparseable, empty, or missing `escalation_footer`) all resolve to
+ * `fallbackRefusalData` -- the client's own static helpline set -- instead
+ * of throwing. The principle is that the client must be able to deliver
+ * help with zero server cooperation: an outage is exactly when the server
+ * cannot be relied on, and it is also exactly when someone may be in
+ * trouble.
  */
 export async function askQuestion(params: AskParams): Promise<AskOutcome> {
   const strings = getStrings(params.language);
   const response = await postQuestion(params);
+
+  if (response === null) {
+    return {
+      kind: "refused",
+      status: NO_RESPONSE_STATUS,
+      data: fallbackRefusalData(params.language),
+    };
+  }
+
   const body: unknown = await response.json().catch(() => null);
 
   if (response.ok) {
@@ -167,9 +208,13 @@ export async function askQuestion(params: AskParams): Promise<AskOutcome> {
     return { kind: "refused", status: response.status, data: body };
   }
 
-  const detail =
-    body && typeof body === "object" && typeof (body as { detail?: unknown }).detail === "string"
-      ? (body as { detail: string }).detail
-      : strings.genericError;
-  throw new AskError(detail);
+  // The server itself could not tell us anything usable about this failure
+  // -- a proxy/CDN/load balancer's own error page, an empty body, or JSON
+  // that is not shaped like a refusal. Fall back to the static helpline set
+  // rather than a bare error message (see the function docstring's C1 note).
+  return {
+    kind: "refused",
+    status: response.status,
+    data: fallbackRefusalData(params.language),
+  };
 }

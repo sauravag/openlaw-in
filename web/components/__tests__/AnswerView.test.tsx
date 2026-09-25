@@ -125,6 +125,11 @@ describe('AnswerView', () => {
     expect(screen.getByText(/v2026\.08.*स्नैपशॉट/)).toBeInTheDocument()
   })
 
+  it('localises the Sources region aria-label instead of hardcoding English (LOW, re-review)', () => {
+    render(<AnswerView data={{ ...baseAnswer, language: 'hi' }} />)
+    expect(screen.getByRole('region', { name: 'यह जानकारी कहाँ से है' })).toBeInTheDocument()
+  })
+
   it('shows the unanswerable framing sentence outside the answer paragraph, in the answer language', () => {
     render(
       <AnswerView

@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "../page";
 import { askQuestion } from "@/lib/api";
+import { getFallbackHelplineSet } from "@/lib/fallbackHelplines";
 import type { AnswerData, RefusalData } from "@/lib/types";
 
 vi.mock("@/lib/api", async () => {
@@ -117,6 +118,33 @@ describe("HomePage", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("If you are in danger right now, call 112.");
     expect(alert.querySelector('a[href="tel:112"]')).toBeInTheDocument();
+  });
+
+  it("shows the static fallback helplines when the server told us nothing at all (re-review HIGH)", async () => {
+    // Exactly what askQuestion() itself now returns for a network failure,
+    // a timeout, or a proxy/gateway error page with no usable body -- see
+    // lib/api.ts's fallbackRefusalData(). Asserted end-to-end at the page so
+    // the wiring, not just the function, is proven to reach the DOM.
+    const fallback = getFallbackHelplineSet("en");
+    mockedAskQuestion.mockResolvedValue({
+      kind: "refused",
+      status: 0,
+      data: {
+        detail: "Something went wrong. Please try again.",
+        escalation_footer: fallback.escalationFooter,
+        crisis_response: fallback.crisisResponse,
+        helplines: fallback.helplines,
+      },
+    });
+
+    render(<HomePage />);
+    await userEvent.type(screen.getByLabelText(/your question/i), "q");
+    await userEvent.click(screen.getByRole("button", { name: /ask/i }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/could not reach the server/i);
+    expect(alert.querySelector('a[href="tel:112"]')).toHaveTextContent("Emergency: 112");
+    expect(alert.querySelector('a[href="tel:15100"]')).toBeInTheDocument();
   });
 
   it("keeps a previously rendered crisis box on screen when a follow-up request fails (M3)", async () => {
