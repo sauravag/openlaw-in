@@ -2,9 +2,11 @@
 
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import AnswerView from "@/components/AnswerView";
+import HelplineList from "@/components/HelplineList";
 import LanguageSelector from "@/components/LanguageSelector";
 import RefusalNotice from "@/components/RefusalNotice";
-import { AskError, askQuestion } from "@/lib/api";
+import { askQuestion } from "@/lib/api";
+import { getFallbackHelplineSet } from "@/lib/fallbackHelplines";
 import { DEFAULT_LANGUAGE, LANGUAGES, type Language } from "@/lib/languages";
 import { getStrings } from "@/lib/strings";
 import type { AnswerData, RefusalData } from "@/lib/types";
@@ -134,9 +136,14 @@ export default function HomePage() {
           : { kind: "refused", data: outcome.data },
       );
       setStatus("idle");
-    } catch (error: unknown) {
+    } catch {
+      // `askQuestion` is total (final review, H3) and never throws for a
+      // server-side failure -- every one of those resolves to a
+      // `{kind: 'refused'}` outcome carrying helplines instead. This catch
+      // remains only as defence-in-depth against a genuinely unexpected
+      // runtime error in the call itself.
       setStatus("error");
-      setErrorMessage(error instanceof AskError ? error.message : strings.genericError);
+      setErrorMessage(strings.genericError);
       // `result` is deliberately left untouched here -- see the module docstring (M3).
     }
   }
@@ -147,6 +154,26 @@ export default function HomePage() {
         <h1 className="text-2xl font-bold text-slate-900">OpenLaw.in</h1>
         <p className="text-sm text-slate-600">{strings.intro}</p>
       </header>
+
+      {/*
+       * Final whole-plan review, H6: with JavaScript disabled (Opera Mini's
+       * extreme-saving mode, UC Browser's proxy mode, a stalled bundle on
+       * 2G, an ad-blocker breaking hydration) this page never reaches
+       * `askQuestion`, and every helpline elsewhere on the page lives behind
+       * `result` -- state that never gets set with no JS. This section
+       * renders the same static fallback set `askQuestion` itself falls
+       * back to on a server failure, unconditionally, so it is present in
+       * the server-rendered HTML before any script runs, not merely after a
+       * failed request. See `app/__tests__/page.test.tsx`'s coverage of the
+       * initial, pre-interaction render.
+       */}
+      <section
+        aria-label={strings.helplineHeading}
+        className="rounded-md border border-slate-200 bg-slate-50 p-3"
+      >
+        <p className="text-sm font-semibold text-slate-700">{strings.helplineHeading}</p>
+        <HelplineList helplines={getFallbackHelplineSet(language).helplines} />
+      </section>
 
       <noscript>
         <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">

@@ -44,13 +44,6 @@ export type AskOutcome =
   | { kind: "answer"; data: AnswerData }
   | { kind: "refused"; status: number; data: RefusalData };
 
-/** Raised only for a malformed 200 response -- the server claimed success
- * but the body does not match `AnswerData`'s shape. Every other failure mode
- * (network error, timeout, a non-2xx response with no usable body) now
- * resolves to a `{kind: 'refused'}` outcome carrying the static fallback
- * helplines instead of throwing -- see `fallbackRefusalData` below. */
-export class AskError extends Error {}
-
 function isSourceCard(value: unknown): value is SourceCard {
   return (
     typeof value === "object" &&
@@ -75,9 +68,10 @@ function isHelpline(value: unknown): value is Helpline {
  * `sources` (say) reached `AnswerView.tsx`'s `data.sources.length` as a
  * `TypeError` thrown *during render*, outside this module's `try`/`catch`
  * and with no `error.tsx` boundary in `web/app/` -- i.e. a blank page. A
- * failed check here becomes the ordinary, already-handled `AskError` path
- * instead, matching the project-wide "validate at system boundaries" rule
- * (`AskRequest`'s own field validators do the same on the Python side).
+ * failed check here becomes the ordinary, already-handled `{kind: 'refused'}`
+ * fallback path instead (final review, H3), matching the project-wide
+ * "validate at system boundaries" rule (`AskRequest`'s own field validators
+ * do the same on the Python side).
  */
 function isAnswerData(value: unknown): value is AnswerData {
   if (typeof value !== "object" || value === null) return false;
@@ -160,9 +154,10 @@ async function postQuestion(params: AskParams): Promise<Response | null> {
 
 /**
  * Ask one question and return either a verified answer or a structured
- * refusal. Only throws `AskError` for a malformed 200 body (see the class
- * docstring) -- every other failure resolves to a `{kind: 'refused'}`
- * outcome, never a dead end.
+ * refusal. **Total: never throws.** Every failure mode -- a network error, a
+ * timeout, a non-2xx response with no usable body, or (final review, H3) a
+ * 200 response whose body does not match `AnswerData`'s shape -- resolves to
+ * a `{kind: 'refused'}` outcome, never a dead end.
  *
  * **Task 6 review, C1.** A prior version only treated HTTP 429 this way and
  * discarded any other non-2xx body, including the 500 body's
@@ -178,13 +173,23 @@ async function postQuestion(params: AskParams): Promise<Response | null> {
  * network error, a timeout, or a non-2xx body that fails `isRefusalData`
  * (unparseable, empty, or missing `escalation_footer`) all resolve to
  * `fallbackRefusalData` -- the client's own static helpline set -- instead
- * of throwing. The principle is that the client must be able to deliver
- * help with zero server cooperation: an outage is exactly when the server
- * cannot be relied on, and it is also exactly when someone may be in
- * trouble.
+ * of throwing.
+ *
+ * **Final whole-plan review, H3.** A sixth no-server-cooperation state was
+ * missed by that round: HTTP 200 with a body that fails `isAnswerData` --
+ * reachable when `web` is rebuilt without `OPENLAW_API_URL` (or the
+ * `rewrites()` entry moves) and `/api/openlaw/ask` falls through to Next's
+ * own catch-all, which answers 200 with the SPA's own HTML/JSON shell. That
+ * used to `throw AskError`, which `page.tsx` rendered as a bare, helpline-
+ * free error message on a first question. It now falls back to
+ * `fallbackRefusalData` like every other server-told-us-nothing case -- see
+ * `lib/__tests__/api.test.ts`'s coverage of this exact case. The principle
+ * is that the client must be able to deliver help with zero server
+ * cooperation: an outage (or a misconfigured deployment) is exactly when
+ * the server cannot be relied on, and it is also exactly when someone may
+ * be in trouble.
  */
 export async function askQuestion(params: AskParams): Promise<AskOutcome> {
-  const strings = getStrings(params.language);
   const response = await postQuestion(params);
 
   if (response === null) {
@@ -197,11 +202,19 @@ export async function askQuestion(params: AskParams): Promise<AskOutcome> {
 
   const body: unknown = await response.json().catch(() => null);
 
-  if (response.ok) {
-    if (!isAnswerData(body)) {
-      throw new AskError(strings.malformedResponseError);
-    }
+  if (response.ok && isAnswerData(body)) {
     return { kind: "answer", data: body };
+  }
+
+  if (response.ok) {
+    // H3: a 200 whose body isn't a real AnswerData is still a case where
+    // the server told us nothing usable -- same fallback as any other
+    // no-cooperation state, not a thrown error with no helplines.
+    return {
+      kind: "refused",
+      status: response.status,
+      data: fallbackRefusalData(params.language),
+    };
   }
 
   if (isRefusalData(body)) {

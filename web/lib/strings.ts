@@ -22,7 +22,6 @@ export interface UIStrings {
   askingButton: string;
   genericError: string;
   timeoutError: string;
-  malformedResponseError: string;
   sourcesHeading: string;
   corpusNote: (corpusVersion: string) => string;
   unanswerableSuffix: string;
@@ -31,6 +30,7 @@ export interface UIStrings {
   signupCta: string;
   noScriptNotice: string;
   previousAnswerNotice: string;
+  helplineHeading: string;
 }
 
 const EN: UIStrings = {
@@ -42,7 +42,6 @@ const EN: UIStrings = {
   askingButton: "Asking…",
   genericError: "Something went wrong. Please try again.",
   timeoutError: "The request took too long. Please check your connection and try again.",
-  malformedResponseError: "Received an unexpected response from the server. Please try again.",
   sourcesHeading: "Where this comes from",
   corpusNote: (corpusVersion) =>
     `Based on the ${corpusVersion} snapshot of Indian law. Always check the official source before relying on this.`,
@@ -53,6 +52,7 @@ const EN: UIStrings = {
   noScriptNotice:
     "This works best with JavaScript enabled. Without it, your question is kept if the page reloads, but you will need to press Ask again.",
   previousAnswerNotice: "Could not get a new answer. Your previous answer is still shown below.",
+  helplineHeading: "Need help right now?",
 };
 
 const HI: UIStrings = {
@@ -64,7 +64,6 @@ const HI: UIStrings = {
   askingButton: "पूछा जा रहा है…",
   genericError: "कुछ गड़बड़ हो गई। कृपया दोबारा प्रयास करें।",
   timeoutError: "अनुरोध में बहुत समय लग गया। कृपया अपना कनेक्शन जाँचें और दोबारा प्रयास करें।",
-  malformedResponseError: "सर्वर से अप्रत्याशित उत्तर मिला। कृपया दोबारा प्रयास करें।",
   sourcesHeading: "यह जानकारी कहाँ से है",
   corpusNote: (corpusVersion) =>
     `यह भारतीय कानून के ${corpusVersion} स्नैपशॉट पर आधारित है। इस पर भरोसा करने से पहले हमेशा आधिकारिक स्रोत जाँचें।`,
@@ -75,6 +74,7 @@ const HI: UIStrings = {
   noScriptNotice:
     "यह JavaScript सक्षम होने पर सबसे अच्छा काम करता है। इसके बिना, पेज फिर से लोड होने पर भी आपका सवाल सुरक्षित रहेगा, लेकिन आपको फिर से 'पूछें' दबाना होगा।",
   previousAnswerNotice: "नया उत्तर नहीं मिल सका। आपका पिछला उत्तर अभी भी नीचे दिखाया गया है।",
+  helplineHeading: "अभी मदद चाहिए?",
 };
 
 export function getStrings(language: Language["code"] | string): UIStrings {

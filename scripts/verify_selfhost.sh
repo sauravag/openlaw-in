@@ -59,11 +59,30 @@ readyz_status=$(curl -sS -o "$readyz_body" -w '%{http_code}' \
 
 if [ "$readyz_status" = "200" ]; then
   echo "[Selfhost] ready -- asking a real question end to end"
-  curl -fsS -X POST http://localhost:8080/api/openlaw/ask \
+  # Final review, M2: `corpus_version` alone proves nothing -- it is present
+  # on EVERY AskResponse, including `is_answerable: false` with an empty
+  # `sources` list (an operator whose corpus build produced nothing usable
+  # would see this script print PASS regardless). A genuinely cited answer
+  # requires BOTH `is_answerable: true` and a non-empty `sources` array --
+  # `'"sources":[{'` matches only when at least one source card is present,
+  # never an empty `[]`.
+  ask_body="$(curl -fsS -X POST http://localhost:8080/api/openlaw/ask \
     -H 'Content-Type: application/json' \
-    -d '{"question": "My landlord will not return my security deposit."}' \
-    | grep -q '"corpus_version"'
-  echo "[Selfhost] PASS -- the stack is up and answering with citations"
+    -d '{"question": "My landlord will not return my security deposit."}')"
+
+  if echo "$ask_body" | grep -q '"is_answerable":true' \
+    && echo "$ask_body" | grep -q '"sources":\[{'; then
+    echo "[Selfhost] PASS -- the stack is up and answering with citations"
+  else
+    echo "[Selfhost] PASS -- the application stack is up and /readyz reports"
+    echo "[Selfhost]   ready, but that question came back with NO citation:"
+    echo "[Selfhost]   ${ask_body}"
+    echo "[Selfhost] This does not necessarily mean the corpus is broken --"
+    echo "[Selfhost] this one question may simply have no good match yet --"
+    echo "[Selfhost] but it means this run did NOT verify a cited answer.  Try"
+    echo "[Selfhost] a different question, or re-run scripts/validate_corpus.py"
+    echo "[Selfhost] (the actual citation-coverage gate) if this persists."
+  fi
 else
   echo "[Selfhost] PASS -- the application stack is up, but /readyz reports"
   echo "[Selfhost]   status ${readyz_status}: $(cat "$readyz_body")"

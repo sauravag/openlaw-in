@@ -153,6 +153,44 @@ services:
     cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
     security_opt: ["no-new-privileges:true"]
 
+  # One-shot: enforces the documented 90-day retention window on verbatim,
+  # potentially sensitive user text (final whole-plan review, H5). Runs
+  # `scripts/purge_retention.py`, then exits -- it does NOT start with
+  # `docker compose up -d` (the `tools` profile below excludes it from the
+  # default set of services that command starts). An operator schedules it
+  # externally, e.g. a host cron entry running
+  # `docker compose run --rm purge` on a daily or weekly cadence -- see
+  # README's "Retention" section for the exact command and why nothing in
+  # this Compose file runs it automatically (a purge is a data-deleting
+  # operation; making it opt-in-by-schedule rather than opt-out is the
+  # safer default).
+  #
+  # Shares `image:`/`build:` with `api`/`migrate` (same reasoning as
+  # `migrate`'s own comment) rather than a third build of the same image.
+  purge:
+    image: openlaw-in-api:local
+    build: .
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      OPENLAW_DATABASE_URL: postgresql+psycopg://openlaw:${POSTGRES_PASSWORD:-openlaw}@postgres:5432/openlaw
+      # Required by Settings; unused by this script itself (corpus-build
+      # scripts only -- see the `migrate` service's comment above).
+      OPENLAW_VAQUILL_ROOT: /corpus-build-only/vaquill
+      OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
+    volumes:
+      # The same bind mount `api` uses (Task 7 review, M2) -- this is what
+      # `Settings.hallucination_log_path`/`.classifier_failure_log_path`
+      # actually resolve to on disk, and what this command purges.
+      - ./data/app:/app/data
+    command: ["python", "scripts/purge_retention.py"]
+    restart: "no"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+
   api:
     image: openlaw-in-api:local
     build: .

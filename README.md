@@ -72,14 +72,72 @@ used:
 
 - **`hallucination_log`** holds verbatim, potentially sensitive rejected-claim
   text — the same class of data as `openlaw.answers.escalation`'s JSONL
-  hallucination log, which earns the right to keep that text verbatim by
-  pairing it with `0600` file permissions and a 90-day purge
-  (`purge_stale_events`). This table carries the same obligation:
-  `openlaw.db.retention.purge_stale_hallucination_log` enforces the matching
-  90-day window and must be run periodically once anything writes here.
+  hallucination log. Both earn the right to keep that text verbatim by
+  pairing it with two controls: `0600` file permissions (the JSONL logs) and
+  a 90-day retention window (`purge_stale_events` /
+  `openlaw.db.retention.purge_stale_hallucination_log`). **Neither control
+  runs itself** — see "Retention" immediately below for the executable
+  mechanism and exactly how to schedule it.
   **Nothing may write to this table in production until it is reachable only
   through a restricted database role** (not the general application
-  credential) — set that up first, not after.
+  credential) — set that up first, not after. (This table currently has no
+  writer anywhere in shipped code — see "Reserved, currently-unused tables"
+  further down.)
+
+### Retention
+
+Three stores hold verbatim, potentially sensitive user text, all subject to
+the same documented 90-day window:
+
+- `./data/app/hallucinations.jsonl` — the question and rejected-claim text
+  behind every citation the validator refused to render.
+- `./data/app/classifier_failures.jsonl` — the question behind every crisis-
+  classifier call that could not complete.
+- the `hallucination_log` database table (unused today, per above — but
+  purged regardless, so the mechanism is already correct on the day it
+  isn't).
+
+Task 7's fix mounted `./data/app` as a host volume specifically so these logs
+survive a container recreate. **That also means they are now permanent
+unless something purges them** — nothing in `docker compose up -d` does this
+automatically, by design: a retention purge deletes data, so this project's
+default is opt-in-by-schedule, not opt-out. Run it yourself:
+
+    docker compose run --rm purge
+
+(a `profiles: ["tools"]` service in `docker-compose.yml`, wired to
+`scripts/purge_retention.py`; deliberately excluded from the default
+`docker compose up -d` service set — see that file's comment on the `purge`
+service). Outside Compose:
+
+    python scripts/purge_retention.py
+
+**Schedule it — neither command above runs on its own.** A host cron entry
+(adjust the path):
+
+    # /etc/cron.d/openlaw-purge -- daily at 03:15
+    15 3 * * * root cd /path/to/openlaw-in && docker compose run --rm purge >> /var/log/openlaw-purge.log 2>&1
+
+or the systemd-timer equivalent. The command is idempotent and safe to run
+more often than the window requires — an empty or not-yet-stale log is a
+normal no-op (exit 0), not a failure; it only exits non-zero if a purge
+itself raises (e.g. the database is unreachable), which a cron log should
+surface, not hide.
+
+### Reserved, currently-unused tables
+
+`alembic upgrade head` creates five tables: `users`, `quota_usage`,
+`conversations`, `messages`, and `hallucination_log`. Only the first two are
+written by any shipped code path today (authentication and quota tracking).
+**`conversations`, `messages`, and `hallucination_log` are reserved for
+future use and are currently dead weight** — nothing in `src/` or `scripts/`
+writes to them; only `tests/db/` constructs them, to prove the schema itself
+is sound. An operator inspecting the schema might reasonably infer this
+product stores conversation history or a queryable hallucination audit
+trail; it does not, yet. They stay in the migration (rather than being
+dropped) because the schema is intentional forward design, not accidental
+debt, and `hallucination_log`'s access precondition above is written down
+precisely so a future writer sets up the restricted role first, not after.
 
 ## Setup
 
@@ -282,7 +340,12 @@ corpus. Be clear-eyed about what that means before you start:
    first (see that script's own comments for exactly what it does and does
    not check, and why). Re-run it after the corpus build finishes: with
    `/readyz` reporting ready, its final check asks a real question and
-   verifies a genuinely cited answer comes back.
+   checks BOTH `is_answerable: true` and a non-empty `sources` list before
+   claiming a cited answer came back -- `corpus_version` alone (present on
+   every response, cited or not) is not treated as proof of anything. If
+   that specific question has no good match yet, the script still prints
+   PASS for the stack itself but says plainly that it did not verify a
+   citation, rather than claiming one it never checked.
 
 6. Open **http://localhost:8080** and ask a question. (Not `:3000` or
    `:8000` -- those are loopback-only now; see "Datastore and application

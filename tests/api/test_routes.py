@@ -13,6 +13,7 @@ rendered in `AskResponse.answer`, since that is the only content
 `openlaw.api.schemas.to_response` is allowed to compose an answer from.
 """
 
+import re
 import time
 from datetime import date
 from pathlib import Path
@@ -91,12 +92,13 @@ def _localised(
     answer: ValidatedAnswer | None = None,
     events: tuple[HallucinationEvent, ...] = (),
     classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
+    language: str = "en",
 ) -> LocalisedAnswer:
     resolved_answer = answer or (_UNANSWERABLE if crisis else _validated_answer())
     return LocalisedAnswer(
         answer=resolved_answer,
         english_answer=resolved_answer,
-        language="en",
+        language=language,
         english_query="my landlord kept my deposit",
         crisis=crisis,
         footer="This is legal information, not legal advice. NALSA: 15100",
@@ -392,6 +394,36 @@ def test_rejects_an_overlong_question() -> None:
     assert _client().post("/ask", json={"question": "x" * 2001}).status_code == 422
 
 
+# --- Final whole-plan review, M1: a 422 is a terminal response too, and must
+# still carry help -- FastAPI's bare default validation-error body has none -
+
+
+def test_a_malformed_request_still_carries_the_escalation_footer_and_helplines() -> (
+    None
+):
+    """Reproduces M1: an over-long question used to get FastAPI's bare
+    `{"detail": [...]}` 422 -- no `escalation_footer`, no `helplines` --
+    contradicting `openlaw.api.refusal`'s opening claim that EVERY terminal
+    response carries help."""
+    response = _client().post("/ask", json={"question": "x" * 2001})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert "15100" in body["escalation_footer"]
+    assert len(body["helplines"]) > 0
+
+
+def test_a_malformed_request_body_also_carries_help() -> None:
+    """Not just an over-long question -- any body FastAPI's own parsing
+    rejects (here, a missing required field) must land on the same shape."""
+    response = _client().post("/ask", json={})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert "15100" in body["escalation_footer"]
+    assert len(body["helplines"]) > 0
+
+
 # --- anonymous quota -------------------------------------------------------
 
 
@@ -664,6 +696,48 @@ def test_crisis_turn_is_not_marked_unanswerable() -> None:
     assert body["is_answerable"] is True
     assert "could not find a verifiable answer" not in body["answer"].lower()
     assert "181" in body["answer"] or "1091" in body["answer"]
+
+
+# --- Final whole-plan review, H1/M4: the composed `answer` field must be in
+# `localised.language`, not hardcoded English, on every to_response branch --
+
+
+#: A run of 4+ consecutive ASCII Latin letters -- long enough to catch an
+#: English *word* (never a false positive on a real Hindi string, which uses
+#: Devanagari code points and ASCII digits only -- see
+#: `openlaw.answers.escalation`'s module docstring on why phone numbers stay
+#: ASCII). This is the enforcing check: it fails if ANY hardcoded English
+#: sentence is composed into a Hindi `answer`, not just the two strings this
+#: review found -- the whole point of the finding is that the class, not the
+#: instance, must be closed.
+_ASCII_WORD = re.compile(r"[A-Za-z]{4,}")
+
+
+def test_hindi_crisis_answer_contains_no_english_sentence() -> None:
+    """Final review, H1: reproduced live -- a Hindi domestic-violence crisis
+    turn used to open with the hardcoded English `_HELP_IS_AVAILABLE`
+    sentence, above otherwise-correct Hindi helpline text. The most
+    safety-critical response this system produces must be entirely in the
+    language the caller chose."""
+    client = _client(_localised(crisis=CrisisKind.DOMESTIC_VIOLENCE, language="hi"))
+    body = client.post(
+        "/ask", json={"question": "मेरा पति मुझे मारता है", "language": "hi"}
+    ).json()
+
+    assert body["language"] == "hi"
+    assert body["is_answerable"] is True
+    assert not _ASCII_WORD.search(body["answer"]), body["answer"]
+
+
+def test_hindi_unanswerable_answer_contains_no_english_sentence() -> None:
+    """Final review, M4: same class as H1, ordinary stakes -- the fixed
+    "no verifiable answer" string must also be localised, not just present."""
+    client = _client(_localised(answer=_UNANSWERABLE, language="hi"))
+    body = client.post("/ask", json={"question": "q", "language": "hi"}).json()
+
+    assert body["language"] == "hi"
+    assert body["is_answerable"] is False
+    assert not _ASCII_WORD.search(body["answer"]), body["answer"]
 
 
 # --- Review finding C1/C1b: rate limiting is IP-keyed, anonymous quota is

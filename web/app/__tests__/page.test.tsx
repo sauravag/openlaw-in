@@ -35,6 +35,20 @@ describe("HomePage", () => {
     document.documentElement.lang = "en";
   });
 
+  it("renders phone numbers on the very first render, before any question is asked (final review, H6)", () => {
+    // With JavaScript disabled, `askQuestion` is never reached and `result`
+    // never gets set -- every other helpline on this page lives behind that
+    // state. This section must be present unconditionally, in the initial
+    // render, or a no-JS visitor in danger sees a form and nothing else.
+    mockedAskQuestion.mockClear();
+
+    render(<HomePage />);
+
+    expect(mockedAskQuestion).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: /112/ })).toHaveAttribute("href", "tel:112");
+    expect(screen.getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
+  });
+
   it("defaults to English and sends the selected language explicitly on submit", async () => {
     mockedAskQuestion.mockResolvedValue({ kind: "answer", data: baseAnswer });
 

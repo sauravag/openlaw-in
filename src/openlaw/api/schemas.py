@@ -22,22 +22,72 @@ from openlaw.answers.escalation import Helpline
 from openlaw.answers.escalation import crisis_response as crisis_text
 from openlaw.answers.validate import ValidatedAnswer
 from openlaw.api.jurisdictions import INDIAN_STATES_AND_UTS
-from openlaw.language.detect import SUPPORTED_LANGUAGES
 from openlaw.language.pipeline import LocalisedAnswer
+
+#: Languages the API will actually accept and serve (final review, H4).
+#: Deliberately narrower than `openlaw.language.detect.SUPPORTED_LANGUAGES`
+#: (13 codes): Plan 4's review gated launch to English and Hindi because only
+#: Hindi has every glossary term verified by a native speaker
+#: (`scripts/review_translations.py`) -- Marathi/Bengali/Tamil pin two terms
+#: each, and Telugu/Gujarati/Kannada/Malayalam/Punjabi/Odia/Urdu/Assamese pin
+#: none. Before this fix the gate existed ONLY in `web/lib/languages.ts`
+#: (a UI affordance, easily bypassed): a plain `fetch` to `/ask` with
+#: `{"language": "ta"}` returned Tamil legal prose translated with zero
+#: pinned terminology, wearing a real government citation. This constant,
+#: enforced by `AskRequest._language_must_be_supported` below, is what
+#: actually stops that request -- `languages.ts`'s list stays as UX, not as
+#: the control. `tests/api/test_schemas.py::
+#: test_frontend_language_list_matches_the_launch_gate` keeps the two in
+#: sync. Widen only alongside a glossary review, never alone.
+LAUNCH_LANGUAGES: frozenset[str] = frozenset({"en", "hi"})
 
 #: Shown when validation left nothing safe to render -- never the model's raw
 #: summary. Matches the spirit (not the exact wording, this is API-facing
 #: rather than an internal review sheet) of
 #: `scripts/review_translations.py`'s fallback.
-_NO_VERIFIABLE_ANSWER = (
-    "We could not find a verifiable answer to this question in the corpus."
-)
+#:
+#: Static EN/HI pair, not a live translation -- same rule as
+#: `openlaw.api.refusal._REFUSAL_DETAIL` and
+#: `openlaw.answers.escalation._CRISIS_RESPONSES_HI`: this string can be the
+#: entire body of a Hindi user's unanswerable turn, and an error-path string
+#: must not depend on the very translation pipeline that may have just
+#: produced nothing (final review, M4). English is the fallback for any
+#: `language` other than `"hi"` -- see `_static_text`.
+_NO_VERIFIABLE_ANSWER: dict[str, str] = {
+    "en": "We could not find a verifiable answer to this question in the corpus.",
+    "hi": "हमें इस सवाल का कोई सत्यापित उत्तर इस कॉर्पस में नहीं मिला।",
+}
 
 #: Shown as `answer` on a crisis turn, ahead of the specific `crisis_response`
 #: helpline text -- see `to_response`'s H3 fix below. A client that renders
 #: only `answer` (the naive, most likely default) must still see something
 #: true and reassuring, not the unrelated "could not find an answer" string.
-_HELP_IS_AVAILABLE = "Help is available right now -- see below."
+#:
+#: Static EN/HI pair (final review, H1) -- the same rule as
+#: `_NO_VERIFIABLE_ANSWER` above. Before this fix, this one string was
+#: hardcoded English and prepended to `answer` on EVERY crisis turn,
+#: including Hindi: `localised.language` was already in hand one line above
+#: (for `crisis_text`) but never consulted for this sentence, so a Hindi
+#: domestic-violence crisis turn opened with an English sentence above
+#: correctly-Hindi helpline text -- the single highest-stakes response this
+#: system produces. See
+#: `tests/api/test_routes.py::test_hindi_crisis_answer_contains_no_english_sentence`.
+_HELP_IS_AVAILABLE: dict[str, str] = {
+    "en": "Help is available right now -- see below.",
+    "hi": "मदद अभी उपलब्ध है -- नीचे देखें।",
+}
+
+
+def _static_text(pairs: dict[str, str], language: str) -> str:
+    """Return the static EN/HI string for `language`, falling back to English.
+
+    Same rule as `openlaw.api.refusal.refusal_detail`: only English and Hindi
+    have a hand-authored pair (Plan 4's launch gate), and there is never a
+    live-translation fallback for these API-composed safety strings -- an
+    error/no-answer path must not depend on the system that may have just
+    failed to produce one.
+    """
+    return pairs.get(language, pairs["en"])
 
 
 class AskRequest(BaseModel):
@@ -95,16 +145,16 @@ class AskRequest(BaseModel):
     @field_validator("language")
     @classmethod
     def _language_must_be_supported(cls, value: str | None) -> str | None:
-        """Reject any code the pipeline does not actually support.
+        """Reject any code outside the launch-gated language set.
 
-        `SUPPORTED_LANGUAGES` (`openlaw.language.detect`) is the same
-        allowlist `answer_in_language`'s glossary/translation machinery is
-        built against -- reusing it here rather than a second, drifting copy.
+        `LAUNCH_LANGUAGES` (module-level, above) is deliberately narrower
+        than `openlaw.language.detect.SUPPORTED_LANGUAGES`: see that
+        constant's docstring for why (final review, H4) -- this is the
+        server-side enforcement of Plan 4's en/hi launch gate, not merely
+        `web/lib/languages.ts`'s UI list.
         """
-        if value is not None and value not in SUPPORTED_LANGUAGES:
-            raise ValueError(
-                f"language must be one of {sorted(SUPPORTED_LANGUAGES)}"
-            )
+        if value is not None and value not in LAUNCH_LANGUAGES:
+            raise ValueError(f"language must be one of {sorted(LAUNCH_LANGUAGES)}")
         return value
 
 
@@ -173,16 +223,17 @@ class QuotaExceeded(BaseModel):
     signup_url: str | None = None
 
 
-def _render_answer(answer: ValidatedAnswer) -> str:
+def _render_answer(answer: ValidatedAnswer, language: str) -> str:
     """Render the only content ever safe to show a user: claim text.
 
     Never reads `answer.unverified_summary` -- see the module docstring.
-    When nothing survived validation, a fixed, non-model string is returned
-    rather than an empty answer. NOT called for a crisis turn -- see
-    `to_response`, which branches before this function ever runs (H3).
+    When nothing survived validation, a fixed, non-model string in `language`
+    is returned rather than an empty (or wrong-language, final review M4)
+    answer. NOT called for a crisis turn -- see `to_response`, which branches
+    before this function ever runs (H3).
     """
     if not answer.is_answerable or not answer.claims:
-        return _NO_VERIFIABLE_ANSWER
+        return _static_text(_NO_VERIFIABLE_ANSWER, language)
     return "\n\n".join(claim.text for claim in answer.claims)
 
 
@@ -208,8 +259,9 @@ def to_response(
     """
     if localised.crisis is not None:
         help_text = crisis_text(localised.crisis, localised.language)
+        lead_in = _static_text(_HELP_IS_AVAILABLE, localised.language)
         return AskResponse(
-            answer=f"{_HELP_IS_AVAILABLE}\n\n{help_text}",
+            answer=f"{lead_in}\n\n{help_text}",
             sources=[],
             language=localised.language,
             corpus_version=corpus_version,
@@ -221,7 +273,7 @@ def to_response(
         )
 
     return AskResponse(
-        answer=_render_answer(localised.answer),
+        answer=_render_answer(localised.answer, localised.language),
         sources=[
             SourceCard(
                 chunk_id=source.chunk_id,

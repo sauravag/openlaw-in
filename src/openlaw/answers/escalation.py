@@ -167,12 +167,13 @@ _CRISIS_RESPONSES: dict[CrisisKind, str] = {
 # mistranslated number) is a worse outcome than staying in English. Every
 # phone number below is written in plain ASCII digits (0-9), not Devanagari
 # numerals (०-९) -- this matches how phone numbers are actually printed in
-# Hindi-language government and NALSA material, and it is also what keeps
-# `web/lib/helplineNumbers.ts`'s `\b(112|181|...)\b` pattern matching at all:
-# a Devanagari digit is a different Unicode code point and would not match
-# that pattern, silently turning a tap-to-call link into a dead sentence. See
-# `tests/answers/test_helpline_consistency.py`, which renders these strings
-# and fails if a number ever stops appearing in ASCII form.
+# Hindi-language government and NALSA material. (Final review, L2: an
+# earlier version of this comment pointed at `web/lib/helplineNumbers.ts`'s
+# digit-matching regex as the reason -- that file was DELETED in the Task 6
+# C2 fix, which replaced prose pattern-matching with the structured
+# `Helpline`/`helplines` field below. The ASCII-digit rule is enforced today
+# solely by `tests/answers/test_helpline_consistency.py`, which renders
+# these strings and fails if a number ever stops appearing in ASCII form.)
 #
 # Best-effort Hindi pending a native-speaker review pass, same caveat the
 # project already carries for `_REFUSAL_DETAIL` and for glossary

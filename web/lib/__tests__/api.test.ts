@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { askQuestion, AskError } from '../api'
+import { askQuestion } from '../api'
 import type { AnswerData, RefusalData } from '../types'
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -174,16 +174,24 @@ describe('askQuestion', () => {
     }
   })
 
-  it('throws AskError instead of returning a malformed 200 body (M2)', async () => {
-    // Missing `sources` -- would otherwise throw a TypeError deep inside
-    // AnswerView's render, with no error boundary to catch it.
+  it('falls back to the static helpline set for a malformed 200 body, instead of throwing (final review, H3)', async () => {
+    // Missing `sources` -- reachable when `web` is rebuilt without
+    // OPENLAW_API_URL (or the rewrite moves) and Next's own catch-all
+    // answers 200 with the SPA's HTML/JSON shell instead of a real
+    // AnswerData body. Before this fix, this threw AskError and page.tsx
+    // rendered a bare error with no footer and no tel: links -- the one
+    // no-server-cooperation state the earlier fallback sweep missed.
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue(jsonResponse(200, { answer: 'ok', language: 'en' })),
     )
 
-    await expect(askQuestion({ question: 'q', language: 'en' })).rejects.toBeInstanceOf(
-      AskError,
-    )
+    const outcome = await askQuestion({ question: 'q', language: 'en' })
+
+    expect(outcome.kind).toBe('refused')
+    if (outcome.kind === 'refused') {
+      expect(outcome.data.helplines.length).toBeGreaterThan(0)
+      expect(outcome.data.escalation_footer.length).toBeGreaterThan(0)
+    }
   })
 })

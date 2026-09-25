@@ -243,7 +243,17 @@ def translate_answer(
     summary, text_by_id = parsed
 
     return ValidatedAnswer(
-        unverified_summary=summary,
+        # Final review, H2: `unverified_summary` must stay `None` whenever
+        # `is_answerable` is False -- see `ValidatedAnswer`'s docstring for
+        # why a careless render depends on that invariant holding. A draft
+        # with surviving claims but `sufficient=false` (`validate_answer`)
+        # produces exactly that combination: `is_answerable=False` with a
+        # non-empty `claims`, which does NOT hit the `not answer.claims`
+        # short-circuit above, so `summary` would otherwise reach this
+        # constructor unconditionally and reintroduce unchecked model prose
+        # on a not-answerable answer -- but only on the Hindi path, since the
+        # English `answer` returned by `validate_answer` already enforces it.
+        unverified_summary=summary if answer.is_answerable else None,
         claims=tuple(
             Claim(text=text_by_id[index], chunk_ids=claim.chunk_ids)
             for index, claim in enumerate(answer.claims)

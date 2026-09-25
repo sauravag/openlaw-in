@@ -7,6 +7,16 @@ use it.
 
 Quota is tracked per user per calendar month, with `period_month` normalised to
 the first day of the month so a period is a single comparable value.
+
+**`Conversation`, `Message`, and `HallucinationLog` are reserved for future
+use and are NOT written by any shipped code path today** (final whole-plan
+review, M3 -- `grep -rn` across `src/` and `scripts/` turns up only this
+docstring; `tests/db/` is the only thing that constructs them, to prove the
+schema itself is sound). They stay in the migration deliberately rather than
+being dropped -- this is intentional forward schema design, not accidental
+debt -- but see README's "Reserved, currently-unused tables" section for why
+that distinction needs to be visible to an operator reading the schema, not
+only to someone reading this comment.
 """
 
 import uuid

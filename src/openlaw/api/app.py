@@ -15,9 +15,12 @@ What a caller sees when something goes wrong, deliberately: a structured
 quota/rate-limit body on 429 (`escalation_footer`, and `crisis_response` when
 warranted, on BOTH kinds of 429 -- see `openlaw.api.refusal`'s module
 docstring), an invalid or expired bearer token falling back to the anonymous
-allowance rather than a bare 401 (see `routes._authenticated_decision`), and
--- for anything unforeseen (a database outage, a retrieval or model-provider
-failure) -- a fixed generic 500 body that STILL carries the same
+allowance rather than a bare 401 (see `routes._authenticated_decision`), a
+malformed request body (an over-long question, an unrecognised `state`) on
+422 carrying the same `escalation_footer`/`helplines` rather than FastAPI's
+bare default validation-error shape (final review, M1), and -- for anything
+unforeseen (a database outage, a retrieval or model-provider failure) -- a
+fixed generic 500 body that STILL carries the same
 `escalation_footer`/`crisis_response` (Task 4 review, M4: a retrieval or
 model outage is the failure most likely to be sustained, so "try again" is
 not enough on its own). The real exception is always logged server-side
@@ -29,11 +32,23 @@ a caller's first visit, mints and sets) a long-lived, `HttpOnly` cookie
 before the request reaches any route, and stores it on `request.state
 .anon_token` for `routes._anonymous_decision` to key the allowance by. Using
 middleware rather than setting the cookie inside the `/ask` handler is what
-makes the token survive a refusal: a route that raises `HTTPException` never
+makes the token survive a REFUSAL: a route that raises `HTTPException` never
 gets to touch the response object FastAPI would otherwise let it decorate,
-but middleware wraps the ENTIRE call, success or exception, and always sees
-the final response -- so a first-time caller gets their token even on the
-very request that refuses them. `Secure` is set from `Settings.cookie_secure`
+but Starlette's `ExceptionMiddleware` (which converts an `HTTPException` into
+a response) sits INSIDE this user middleware, so `call_next` still returns
+normally and the cookie gets set -- a first-time caller gets their token even
+on the very request that refuses them (a 429, an auth failure, a 422).
+
+**Final review, M6 correction: this does NOT extend to an unhandled 500.**
+Registering an `@app.exception_handler(Exception)` (below) puts Starlette's
+`ServerErrorMiddleware` OUTSIDE this user middleware, not inside it -- so for
+an exception `_unhandled_error` catches, `await call_next(request)` itself
+raises, `set_cookie` at the bottom of `_ensure_anonymous_token` never runs,
+and a first-time caller who hits a 500 on their very first request leaves
+with no cookie. Harmless in practice (their next request mints one the same
+way), but a docstring claiming "success or exception, always" here would be
+wrong, not merely imprecise -- see `_ensure_anonymous_token`'s own docstring
+for the precise boundary. `Secure` is set from `Settings.cookie_secure`
 (Task 4 review low finding, closed in Task 5) rather than hard-coded True --
 see that setting's docstring for why it cannot be unconditional.
 """
@@ -43,6 +58,7 @@ import secrets
 from collections.abc import Callable
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -140,6 +156,31 @@ def _register_error_handlers(app: FastAPI) -> None:
         reaches the response body."""
         logger.exception("unhandled error while answering a request")
         return JSONResponse(status_code=500, content=_unhandled_error_content(request))
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """A malformed request body must not be FastAPI's bare default
+        `{"detail": [...]}` 422 (final review, M1) -- `refusal.py`'s opening
+        claim is that EVERY terminal response carries help, and this is a
+        terminal response like any other (an over-long question, an
+        unrecognised `state`, a malformed body all land here, before
+        `routes.ask` ever runs).
+
+        Reuses `_unhandled_error_content`'s shape rather than a third one.
+        `request.state.question`/`.state`/`.language` are never set for this
+        failure -- it happens during request parsing, before `routes.ask`'s
+        body (where those are stashed) ever executes -- so crisis detection
+        falls back to the generic footer/no-crisis case, the same as any
+        other route with nothing stashed. That is a narrower safety net than
+        a well-formed request gets, not a missing one: a citizen typing a
+        crisis question that also happens to run long still receives the
+        escalation footer and a full helpline list, just not a category-
+        specific crisis response derived from text the server rejected
+        before reading it.
+        """
+        return JSONResponse(status_code=422, content=_unhandled_error_content(request))
 
 
 def create_app(

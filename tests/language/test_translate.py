@@ -339,6 +339,32 @@ def test_answer_translation_never_touches_dropped_claims_or_the_answerable_flag(
     assert result.is_answerable == answer.is_answerable
 
 
+def test_translation_preserves_none_unverified_summary_when_not_answerable() -> None:
+    """Final review, H2: `unverified_summary` must be `None` whenever
+    `is_answerable` is False, on the TRANSLATED path too -- not just the
+    English one `validate_answer` already enforces.
+
+    Reachable case: a draft with surviving claims but `sufficient=false`
+    gives `is_answerable=False` with a non-empty `claims` tuple
+    (`openlaw.answers.validate.validate_answer`), so the `not answer.claims`
+    guard at the top of `translate_answer` does NOT short-circuit -- the
+    translator is called and returns a `summary`. Before the fix, that
+    `summary` was written onto the result unconditionally, reintroducing
+    unchecked model prose on a not-answerable answer for exactly the
+    languages this pipeline translates into.
+    """
+    answer = ValidatedAnswer(
+        unverified_summary=None,
+        claims=(Claim(text="A refund is required.", chunk_ids=("a",)),),
+        sources=(Source(chunk_id="a", source_url="https://example.gov.in/a"),),
+        is_answerable=False,
+    )
+    result = translate_answer(
+        answer, "hi", StubAdapter([TRANSLATED]), ModelRegistry(), _glossary()
+    )
+    assert result.unverified_summary is None
+
+
 # --- integration: the real model actually honours the no-op instruction ----
 
 
