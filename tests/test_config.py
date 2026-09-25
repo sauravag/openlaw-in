@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from openlaw.config import Settings
@@ -182,6 +183,44 @@ def test_env_example_constructs_settings_without_error() -> None:
 
     assert settings.trusted_proxy_ips == ()
     assert settings.nano_model_dir is None
+
+
+# --- Task 7 review, C2: .env.example must agree with docker-compose.yml's
+# own self-host defaults, not silently override them ------------------------
+
+
+def test_env_example_agrees_with_compose_self_host_defaults() -> None:
+    """`docker compose` auto-loads `.env` for `${VAR:-default}`
+    interpolation, so a `.env.example` value that disagrees with
+    `docker-compose.yml`'s own fallback silently wins the moment someone
+    runs the documented `cp .env.example .env` -- exactly what shipped
+    `OPENLAW_QUOTA_ENABLED=true` and `OPENLAW_COOKIE_SECURE=true` into a
+    compose file whose own defaults were `false` (Task 7 review, C2): every
+    self-hoster who followed the README got the hosted tier's rate limit
+    turned on, and a `Secure` cookie that silently never round-trips over
+    the stack's own plain-HTTP default, disabling anonymous-quota tracking
+    entirely with no error. This locks the two files together so a future
+    edit to either one, without the other, fails here instead of shipping
+    invisible.
+    """
+    root = Path(__file__).resolve().parent.parent
+    compose_text = (root / "docker-compose.yml").read_text()
+    example_settings = Settings(_env_file=root / ".env.example")  # type: ignore[call-arg]
+
+    for var, attr in [
+        ("OPENLAW_QUOTA_ENABLED", "quota_enabled"),
+        ("OPENLAW_COOKIE_SECURE", "cookie_secure"),
+    ]:
+        match = re.search(r"\$\{" + var + r":-(\w+)\}", compose_text)
+        assert match, f"{var} has no ${{...:-default}} fallback in docker-compose.yml"
+        compose_default = match.group(1) == "true"
+        example_value = getattr(example_settings, attr)
+        assert example_value == compose_default, (
+            f"{var}: .env.example resolves to {example_value!r} but "
+            f"docker-compose.yml's own fallback default is {compose_default!r} "
+            "-- `cp .env.example .env` would silently override the compose "
+            "default the moment someone follows the README"
+        )
 
 
 def test_trusted_proxy_ips_blank_value_means_no_trusted_proxies(monkeypatch) -> None:

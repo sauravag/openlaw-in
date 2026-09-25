@@ -220,15 +220,20 @@ def test_readyz_reports_degraded_and_503_when_postgres_is_unreachable(
     }
 
 
-def _fake_qdrant_client(points_by_collection: dict[str, int]):
+def _fake_qdrant_client(
+    points_by_collection: dict[str, int], error_status: dict[str, int] | None = None
+):
     """Build a fake `httpx.Client`-shaped factory for `_check_qdrant`.
 
     Answers `/healthz` unconditionally, and `/collections/<name>` with a
     `points_count` looked up in `points_by_collection` -- a collection not
     present in that dict responds 404, matching real Qdrant's behaviour for
-    a collection that was never created.
+    a collection that was never created. `error_status` overrides the
+    status code for a named collection (e.g. 500) -- Task 7 review, L2.
     """
     import httpx
+
+    error_status = error_status or {}
 
     class _FakeResponse:
         def __init__(self, status_code: int, payload: dict | None = None) -> None:
@@ -261,6 +266,8 @@ def _fake_qdrant_client(points_by_collection: dict[str, int]):
             if url.endswith("/healthz"):
                 return _FakeResponse(200)
             collection = url.rsplit("/", 1)[-1]
+            if collection in error_status:
+                return _FakeResponse(error_status[collection])
             if collection not in points_by_collection:
                 return _FakeResponse(404)
             payload = {"result": {"points_count": points_by_collection[collection]}}
@@ -303,6 +310,19 @@ def test_check_qdrant_reports_empty_when_a_corpus_collection_does_not_exist() ->
     client_factory = _fake_qdrant_client({"acts_india_v1": 961_136})
 
     assert _check_qdrant("http://q:6333", client_factory=client_factory) == "empty"
+
+
+def test_check_qdrant_reports_unreachable_on_a_non_404_collection_error() -> None:
+    """Task 7 review, L2: a genuine server-side fault (500) on a collection
+    lookup must read as "unreachable", not the calm "empty" -- only a 404
+    (the collection was never created) means "corpus not built yet"."""
+    from openlaw.api.routes import _check_qdrant
+
+    client_factory = _fake_qdrant_client(
+        {"sc_judgments_v1": 371_247}, error_status={"acts_india_v1": 500}
+    )
+
+    assert _check_qdrant("http://q:6333", client_factory=client_factory) == "unreachable"
 
 
 def test_check_qdrant_reports_unreachable_on_any_failure() -> None:

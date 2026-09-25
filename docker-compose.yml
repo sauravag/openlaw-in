@@ -1,63 +1,83 @@
 # One-command self-hosting (Task 7, spec success criterion 12.7).
 #
 # `docker compose up -d` brings up every datastore, runs migrations, and
-# starts the API and web frontend. It does NOT bring up a working corpus --
-# Qdrant starts empty. `/readyz` (openlaw.api.routes) reports that honestly
-# (status "degraded" until the corpus collections are populated), and `api`'s
-# healthcheck below surfaces the same thing to `docker compose ps`/`docker
-# inspect` rather than reporting a broken stack as healthy. See README's
-# "Self-hosting" section for how the corpus is actually built -- it is not,
-# and cannot be, part of this command: it is ~1.5M vectors built over many
-# hours from two large datasets, not something `docker compose up` can ship.
+# starts the API, web frontend, and a single reverse-proxy ingress. It does
+# NOT bring up a working corpus -- Qdrant starts empty. `/readyz`
+# (openlaw.api.routes) reports that honestly (status "degraded" until the
+# corpus collections are populated), and `api`'s healthcheck below surfaces
+# the same thing to `docker compose ps`/`docker inspect` rather than
+# reporting a broken stack as healthy. See README's "Self-hosting" section
+# for how the corpus is actually built -- it is not, and cannot be, part of
+# this command: it is ~1.5M vectors built over many hours from two large
+# datasets, not something `docker compose up` can ship.
 #
-# Local development only in the sense that every DATASTORE port (Qdrant,
-# Postgres, Neo4j) is bound to 127.0.0.1 so they are not reachable from the
-# local network -- the credentials below are development defaults and Qdrant
-# runs without authentication. `api` and `web` are the intended reachable
-# surface (their ports are NOT loopback-restricted, unlike the datastores)
-# and MUST sit behind your own TLS-terminating reverse proxy for any
-# deployment reachable over the public internet; the Postgres/Neo4j
-# passwords below should also be overridden (`POSTGRES_PASSWORD`,
-# `NEO4J_PASSWORD` in your `.env`) before that.
+# Every DATASTORE port (Qdrant, Postgres, Neo4j) AND both application
+# services (`api`, `web`) are bound to 127.0.0.1 -- none of them are reachable
+# from the local network or the internet (Task 7 review, H3: a fresh review
+# found `api`/`web` published on 0.0.0.0, exposing an unauthenticated,
+# Anthropic-money-spending `/ask` to the whole LAN with no TLS). The ONLY
+# service meant to be reached from outside this host is `proxy` (below),
+# which is also the only address `OPENLAW_TRUSTED_PROXY_IPS` needs to change
+# for if you replace it with your own ingress -- see that block's comment.
 #
 # Datastore ports MUST stay bound to 127.0.0.1 -- this is a hard project
 # constraint, not a default to reconsider.
 #
-# --- Reverse-proxy trust (binding requirement 1) ---------------------------
+# --- Reverse-proxy trust (binding requirement 1; Task 7 review, H1) --------
 # `web` (Next.js) proxies `/ask` to `api` server-side (see
-# `web/next.config.ts`'s `rewrites()`) so that the anonymous-quota cookie
-# round-trips with zero CORS configuration -- which means `api` NEVER sees a
-# browser connect to it directly in this topology. Every request `api`
-# receives arrives from `web`'s own container, so `web` -- not some generic
-# "reverse proxy" -- is the address `OPENLAW_TRUSTED_PROXY_IPS` must trust,
-# or every caller behind it (i.e. everyone) collapses into one shared rate-
-# limit/anonymous-quota bucket (see `openlaw.api.routes._client_key` and
-# `Settings.trusted_proxy_ips`'s docstring). `web` is given a fixed address
-# on the `default` network below (`172.28.5.10`, via the custom `ipam`
-# block) specifically so this value is a stable constant here rather than
-# something to discover after `docker compose up` -- `docker compose config`
-# validates this file's syntax without starting anything.
+# `web/next.config.ts`'s `rewrites()`) purely so the anonymous-quota cookie
+# round-trips with zero CORS configuration -- but a Next.js `rewrites()`
+# entry is NOT a reverse proxy and must never be trusted as one: it does not
+# set `X-Forwarded-For` on its own (Next only fills that header in when
+# ABSENT, `x-forwarded-for ??= ...`, `node_modules/next/dist/server/
+# base-server.js`), and because it copies incoming headers through
+# unchanged, a client hitting `web` directly could forge whatever
+# `X-Forwarded-For` it liked. Trusting `web` as if it corrected that header
+# would be WORSE than trusting nothing: every real caller collapses into one
+# shared rate-limit bucket (no real per-client value ever arrives), and a
+# spoofed header lets an attacker bypass the limiter outright.
 #
-# If you put your OWN reverse proxy (nginx/Caddy/Traefik) in front of this
-# stack for TLS -- required for any deployment reachable over the public
-# internet -- point it at `web`, not `api`, and set that proxy to forward
-# `X-Forwarded-For` the normal way (every mainstream reverse proxy does this
-# by default). Next.js only ever SETS `x-forwarded-for` when the header is
-# absent (`req.headers['x-forwarded-for'] ??= ...`, see
-# `node_modules/next/dist/server/base-server.js`); a value your proxy
-# already set is passed through unchanged. `api` still only ever sees `web`
-# as its peer either way, so `OPENLAW_TRUSTED_PROXY_IPS` below needs NO
-# change for that common case. The one case that DOES need a change: a proxy
-# that talks to `api` directly, bypassing `web`'s rewrite (or a future
-# multi-replica `api` behind a load balancer) -- then set
-# `OPENLAW_TRUSTED_PROXY_IPS` to THAT proxy's/load balancer's actual address
-# on the network `api` receives connections from instead of `172.28.5.10`.
+# The fix is `proxy`: a real reverse proxy (nginx, `nginx/nginx.conf`) that
+# is the ONLY externally-reachable entry point (`api`/`web` are loopback-only
+# above) and that OVERWRITES `X-Forwarded-For` with the connection it
+# actually observed (`proxy_set_header X-Forwarded-For $remote_addr;` --
+# never `$proxy_add_x_forwarded_for`, which appends to a client-supplied
+# value instead of replacing it). `web`'s rewrite then forwards that
+# genuine value through to `api` unchanged (Next's `??=` never overwrites an
+# already-present header), so `api` sees `web`'s address as its peer (the
+# one address actually connecting to it) and a REAL, un-forgeable client
+# address in `X-Forwarded-For`. `OPENLAW_TRUSTED_PROXY_IPS` below is
+# therefore `web`'s fixed compose-network address, not `proxy`'s -- adding
+# `proxy` did not change who `api`'s direct peer is, only guaranteed that
+# what it forwards is honest.
+#
+# If you replace `proxy` with your own ingress (a managed load balancer, a
+# different reverse proxy, TLS termination for a public deployment) and it
+# still forwards to `web` on this network, `OPENLAW_TRUSTED_PROXY_IPS` needs
+# NO change, PROVIDED your ingress also overwrites `X-Forwarded-For` the way
+# `nginx/nginx.conf` does above -- verify that explicitly; do not assume it.
+# The one case that DOES need a change: an ingress that talks to `api`
+# directly, bypassing `web`'s rewrite (or a future multi-replica `api`
+# behind a load balancer) -- then set `OPENLAW_TRUSTED_PROXY_IPS` to THAT
+# proxy's/load balancer's actual address instead of `web`'s.
 
 networks:
   default:
     ipam:
       config:
-        - subnet: 172.28.5.0/24
+        # A narrower `ip_range` than the full `subnet` (Task 7 review, M1):
+        # without it, Docker's dynamic allocator could hand `web`'s intended
+        # static address to some other container first, and `--scale`
+        # anything would fight over the same pool. Dynamic addresses come
+        # from the upper half (.128-.254); `web`'s static address below
+        # (.10) is deliberately outside that range. This subnet still can
+        # collide with an existing network on your host (a VPN, another
+        # Compose project) -- if `docker compose up` fails with a pool-
+        # overlap error, change the subnet/ip_range here AND the two
+        # `172.31.238.10` references below (`web`'s `ipv4_address` and
+        # `api`'s `OPENLAW_TRUSTED_PROXY_IPS`) together.
+        - subnet: 172.31.238.0/24
+          ip_range: 172.31.238.128/25
 
 services:
   qdrant:
@@ -100,8 +120,16 @@ services:
   # up`: `alembic upgrade head` against an already-current database is a
   # no-op (see README's "Database migrations" section for the one case it
   # is NOT safe to assume -- a database with these tables created some
-  # other way -- and the `alembic stamp head` fix for that case).
+  # other way -- and the containerised `alembic stamp head` escape hatch
+  # for that case, Task 7 review M4: `docker compose run --rm migrate
+  # alembic stamp head`).
+  #
+  # Shares `image:` with `api` below (Task 7 review, M6) so
+  # `docker compose build`/`up` builds this ~4 GB image ONCE, not twice --
+  # both services use the same `build:` context and Dockerfile, so this is
+  # one image serving two roles, not two separately-tagged copies of it.
   migrate:
+    image: openlaw-in-api:local
     build: .
     depends_on:
       postgres:
@@ -116,8 +144,17 @@ services:
       OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
     command: ["alembic", "upgrade", "head"]
     restart: "no"
+    cap_drop: [ALL]
+    # CHOWN/SETUID/SETGID/DAC_OVERRIDE: what docker-entrypoint.sh's
+    # root-then-drop-to-`openlaw` sequence actually needs (Task 7 review,
+    # M3) -- verified by running this exact image with exactly this
+    # capability set; `cap_drop: [ALL]` alone breaks the entrypoint's
+    # `chown`.
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
 
   api:
+    image: openlaw-in-api:local
     build: .
     restart: unless-stopped
     depends_on:
@@ -137,9 +174,15 @@ services:
       # scripts only -- see the `migrate` service's comment above).
       OPENLAW_VAQUILL_ROOT: /corpus-build-only/vaquill
       OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
-      # Query embedding defaults to the local, open-weight voyage-4-nano
-      # baked into this image (see Dockerfile) -- no Voyage key needed for
-      # self-hosters who never rebuild the corpus themselves.
+      # Query embedding defaults to the local, open-weight voyage-4-nano --
+      # its CODE is baked into this image (see Dockerfile), but its WEIGHTS
+      # download from the Hugging Face Hub on first use, before uvicorn
+      # binds a port (Task 7 review, H4 -- an earlier version of this
+      # comment claimed the weights themselves were baked in, which is
+      # false and made the documented verification's timeout too short).
+      # `hf_cache` below persists that download across container recreates
+      # so it only ever happens once per host, not once per `docker compose
+      # up`.
       OPENLAW_QUERY_EMBEDDER_BACKEND: ${OPENLAW_QUERY_EMBEDDER_BACKEND:-local_nano}
       OPENLAW_VOYAGE_API_KEY: ${OPENLAW_VOYAGE_API_KEY:-}
       # Required -- production_app() refuses to start without it (binding
@@ -147,7 +190,11 @@ services:
       # service). Set it in your .env (copied from .env.example).
       OPENLAW_ANTHROPIC_API_KEY: ${OPENLAW_ANTHROPIC_API_KEY:?set OPENLAW_ANTHROPIC_API_KEY in .env -- see .env.example}
       # A legal-aid body running its own instance should not inherit the
-      # hosted tier's rate limit -- see .env.example and the README.
+      # hosted tier's rate limit -- see .env.example and the README. Kept
+      # in lockstep with .env.example's own default by
+      # tests/test_config.py::test_env_example_agrees_with_compose_self_host_defaults
+      # (Task 7 review, C2) -- `cp .env.example .env` must never silently
+      # override this fallback.
       OPENLAW_QUOTA_ENABLED: ${OPENLAW_QUOTA_ENABLED:-false}
       OPENLAW_MONTHLY_QUOTA: ${OPENLAW_MONTHLY_QUOTA:-30}
       OPENLAW_ANONYMOUS_QUOTA: ${OPENLAW_ANONYMOUS_QUOTA:-3}
@@ -157,18 +204,39 @@ services:
       OPENLAW_SUPABASE_URL: ${OPENLAW_SUPABASE_URL:-}
       OPENLAW_SUPABASE_JWT_SECRET: ${OPENLAW_SUPABASE_JWT_SECRET:-}
       # See the "Reverse-proxy trust" note above this file's `services:`
-      # block -- `web`'s fixed address on this compose network, not a
+      # block -- `web`'s fixed address on this compose network, kept
+      # honest by `proxy` actually setting `X-Forwarded-For`, not a
       # generic reverse-proxy placeholder.
-      OPENLAW_TRUSTED_PROXY_IPS: '["172.28.5.10"]'
+      OPENLAW_TRUSTED_PROXY_IPS: '["172.31.238.10"]'
       # This stack ships with no TLS termination out of the box (plain HTTP
       # on localhost) -- a `Secure` cookie would never round-trip, silently
       # breaking anonymous-quota tracking the moment OPENLAW_QUOTA_ENABLED
-      # is turned on. Put a TLS-terminating reverse proxy in front of `web`
+      # is turned on. Kept in lockstep with .env.example the same way
+      # OPENLAW_QUOTA_ENABLED is, above. Put TLS on `proxy` (or replace it)
       # for any deployment reachable over the public internet and set this
       # back to `true` (the safe default `Settings.cookie_secure` itself
       # uses) once you do.
       OPENLAW_COOKIE_SECURE: ${OPENLAW_COOKIE_SECURE:-false}
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
+    volumes:
+      # Task 7 review, M2: `hallucination_log_path`/`classifier_failure_log_path`
+      # (openlaw.config.Settings) default under `data/` -- without a volume
+      # here they write to the container's writable layer and are lost on
+      # every recreate, which is not acceptable for the product's safety
+      # audit trail (verbatim rejected-claim/classifier-outage records).
+      # docker-entrypoint.sh chowns this to the `openlaw` user at container
+      # start, since Docker creates a not-yet-existing bind-mount source
+      # owned by root regardless of what the image's own build-time layer
+      # was chowned to.
+      - ./data/app:/app/data
+      # Persists the voyage-4-nano weights (see the comment above) across
+      # container recreates -- home directory of the `openlaw` user (Task 7
+      # Dockerfile: `useradd --home-dir /app`), which is where
+      # huggingface_hub's default cache resolves to.
+      - hf_cache:/app/.cache/huggingface
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
     healthcheck:
       # Binding requirement 2: wired to /readyz, not /health -- an empty or
       # unbuilt corpus must show this container as unhealthy, not merely
@@ -179,13 +247,20 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 40s
+      # Generous: the FIRST start on a fresh host downloads the nano model
+      # weights (Task 7 review, H4) before uvicorn even binds a port, which
+      # can take several minutes on a slow connection -- see README.
+      start_period: 300s
 
   web:
     build:
       context: ./web
       args:
         OPENLAW_API_URL: http://api:8000
+      # NOT also set under `environment:` below (Task 7 review, M5): Next.js
+      # resolves this only at `next build` time (see web/Dockerfile's
+      # header comment, verified) -- a runtime environment variable here
+      # would be silently inert and is actively misleading to leave in.
     restart: unless-stopped
     # `service_started`, deliberately not `service_healthy`: `api`'s
     # healthcheck above is tied to a POPULATED corpus, which will not exist
@@ -195,9 +270,31 @@ services:
     depends_on:
       api:
         condition: service_started
-    environment:
-      OPENLAW_API_URL: http://api:8000
     networks:
       default:
-        ipv4_address: 172.28.5.10
-    ports: ["3000:3000"]
+        ipv4_address: 172.31.238.10
+    ports: ["127.0.0.1:3000:3000"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # The one externally-reachable service (Task 7 review, H1/H3) -- see the
+  # "Reverse-proxy trust" note above this file's `services:` block for why
+  # it exists and exactly what it must do (overwrite `X-Forwarded-For`, see
+  # nginx/nginx.conf). `nginxinc/nginx-unprivileged` runs nginx as a
+  # non-root user with no capabilities needed to bind its port (8080, not
+  # the usual 80 -- ports below 1024 need CAP_NET_BIND_SERVICE, which this
+  # image is built to avoid needing at all).
+  proxy:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports: ["8080:8080"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  hf_cache:

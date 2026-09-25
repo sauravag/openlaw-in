@@ -11,9 +11,19 @@ WORKDIR /app
 
 # curl: used only by this image's own Compose healthcheck
 # (`curl -f http://localhost:8000/readyz`) -- see docker-compose.yml.
+# gosu: lets docker-entrypoint.sh fix a bind-mounted volume's ownership as
+# root, then drop to the unprivileged `openlaw` user below before running
+# anything from this project (Task 7 review, M2/M3) -- confirmed available
+# in this base image's own apt repo.
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y curl \
+    && apt-get install --no-install-recommends -y curl gosu \
     && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged user this image actually runs as (see docker-entrypoint.sh).
+# Fixed uid/gid so a bind-mounted host directory's ownership is predictable
+# across rebuilds, not merely "whatever the base image's next free id is".
+RUN groupadd --system --gid 1000 openlaw \
+    && useradd --system --uid 1000 --gid openlaw --home-dir /app openlaw
 
 COPY pyproject.toml ./
 COPY src ./src
@@ -26,9 +36,17 @@ COPY src ./src
 # accounts" self-host makes: a larger image (~2GB heavier) and a slower
 # first build, in exchange for the API needing no Voyage key at all -- a
 # legal-aid tool for people who often have neither a credit card nor an API
-# account to set one up with. `HF_HUB_DISABLE_XET=1` below matches the
-# README's existing guidance: the weights download on first use, and
-# Hugging Face's Xet backend can otherwise stall indefinitely.
+# account to set one up with.
+#
+# IMPORTANT (Task 7 review, H4): this installs the CODE that runs
+# voyage-4-nano, not the model WEIGHTS. `build_query_embedder`
+# (openlaw.retrieval.factory) downloads those from the Hugging Face Hub the
+# first time `production_app()` builds the embedder -- i.e. before uvicorn
+# ever binds a port, on the FIRST container start after a fresh build (and
+# after every recreate, since nothing here caches the download -- see
+# docker-compose.yml's `hf_cache` volume for that). `HF_HUB_DISABLE_XET=1`
+# matches the README's existing guidance: Hugging Face's Xet download
+# backend can otherwise stall indefinitely on a normal connection.
 ENV HF_HUB_DISABLE_XET=1
 RUN pip install --no-cache-dir -e ".[local-nano]"
 
@@ -39,6 +57,16 @@ RUN pip install --no-cache-dir -e ".[local-nano]"
 COPY data/glossary ./data/glossary
 COPY migrations ./migrations
 COPY alembic.ini ./
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && mkdir -p /app/data \
+    && chown -R openlaw:openlaw /app
+
+# docker-entrypoint.sh runs as root just long enough to `chown` the
+# bind-mounted `/app/data` volume (see its own docstring for why that
+# cannot be done here, at build time), then execs the real command as
+# `openlaw` -- this image never serves a request as root.
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 EXPOSE 8000
 CMD ["uvicorn", "openlaw.api.deps:production_app", "--factory", \

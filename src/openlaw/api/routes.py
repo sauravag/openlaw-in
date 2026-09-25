@@ -406,6 +406,9 @@ def _check_postgres(session_factory: Callable) -> str:
         return "unreachable"
 
 
+_NOT_FOUND = 404
+
+
 def _collection_points_count(
     client: httpx.Client, qdrant_url: str, collection: str
 ) -> int:
@@ -413,16 +416,20 @@ def _collection_points_count(
     exist yet -- both read as "not ready to answer" to `_check_qdrant`, and
     a self-host between `docker compose up` and its first corpus build is
     exactly the "does not exist yet" case (see the README's corpus-build
-    section). Any OTHER failure (timeout, connection refused) is left to
-    propagate -- that is a genuine reachability problem, not an empty
-    corpus, and `_check_qdrant` reports it as `"unreachable"`, not
-    `"empty"`.
+    section).
+
+    Only a 404 is treated as "not built yet" (Task 7 review, L2: an earlier
+    version caught every `HTTPStatusError`, so a genuine server-side fault
+    on Qdrant -- a 500, or a 403 from a misconfigured auth setup -- was
+    reported as the calm, expected "empty" rather than the alarming
+    "unreachable" it actually is). Any other failure (a non-404 status, a
+    timeout, connection refused) is left to propagate to `_check_qdrant`'s
+    own `except`, which reports `"unreachable"`.
     """
-    try:
-        response = client.get(f"{qdrant_url}/collections/{collection}")
-        response.raise_for_status()
-    except httpx.HTTPStatusError:
+    response = client.get(f"{qdrant_url}/collections/{collection}")
+    if response.status_code == _NOT_FOUND:
         return 0
+    response.raise_for_status()
     return int(response.json()["result"]["points_count"])
 
 

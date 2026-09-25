@@ -147,17 +147,40 @@ why leaving both unset is refused rather than defaulted.
 ## Corpus build
 
     python scripts/make_fixtures.py            # test fixtures (once)
-    python scripts/restore_acts_india.py       # 1,098,269 provisions (~11.2 GB)
-    python scripts/build_sc_index.py           # 371,247 Supreme Court chunks
+    python scripts/restore_acts_india.py       # 1,098,269 provisions (~11.2 GB) -> acts_india
+    python scripts/build_sc_index.py           # 371,247 Supreme Court chunks -> sc_judgments_v1
     python scripts/build_hc_index.py           # ~1.85M Punjab & Haryana HC chunks (default --court)
     python scripts/build_hc_index.py --court delhi  # ~1.06M Delhi HC chunks, same shared collection
+    python scripts/build_sparse_vectors.py     # REQUIRED -- see below
     python scripts/validate_corpus.py          # the gate: all citations resolve
+
+**`build_sparse_vectors.py` is not optional (Task 7 review, C3).** Retrieval
+and `/readyz` both require `acts_india_v1`, not `acts_india` -- see
+`openlaw.retrieval.search.SEARCH_COLLECTIONS`. `restore_acts_india.py` only
+ever populates `acts_india` (the untouched publisher snapshot); it is
+`build_sparse_vectors.py` that copies `acts_india`'s citable points into the
+new `acts_india_v1` collection (dropping the ones with no resolvable
+government URL) and writes consistent BM25 sparse vectors into both
+`acts_india_v1` and `sc_judgments_v1`. Skip it and every one of the steps
+above can succeed while `/readyz` stays `degraded` forever and statute
+retrieval returns nothing -- run it after `build_sc_index.py`/`build_hc_index.py`
+and before `validate_corpus.py`, as ordered above.
 
 `build_hc_index.py` streams and checkpoints per court (`data/hc_index_checkpoint_<court>.json`,
 git-ignored) so an interrupted multi-hour run resumes with `python scripts/build_hc_index.py`
 (no flag needed) rather than re-embedding from the start; `--restart` discards the
 checkpoint, and `--limit N` stops after N chunks to prove the pipeline on a
 bounded slice.
+
+**Optional -- the knowledge graph.** Graph expansion is OFF by default
+(`OPENLAW_GRAPH_EXPANSION_ENABLED=false`, see `.env.example`) because live
+measurement showed it mostly adds filler at today's scale (see
+`openlaw.retrieval.rerank`'s module docstring), and neither `/readyz` nor
+ordinary Q&A requires it. Build it only if you intend to turn that setting
+on, or want the PageRank/Louvain authority signals in Neo4j:
+
+    python scripts/build_graph.py              # ~1.3M nodes, ~1.9M edges, resumable
+    python scripts/run_gds.py                  # PageRank + Louvain, run once per corpus release
 
 ## Self-hosting
 
@@ -201,15 +224,19 @@ corpus. Be clear-eyed about what that means before you start:
    crisis classification -- goes through it) and, if you plan to rebuild or
    extend the corpus yourself, `OPENLAW_VOYAGE_API_KEY` (only the Supreme
    Court/High Court build scripts need it; the running service's default
-   query embedder is the local, open-weight `voyage-4-nano` baked into the
-   `api` image, so ordinary self-hosting needs no Voyage key at all).
-   `docker-compose.yml` fails immediately with a named, readable error if
+   query embedder is the local, open-weight `voyage-4-nano`, whose CODE is
+   baked into the `api` image but whose WEIGHTS download from Hugging Face
+   the first time the container starts -- see step 4). `docker-compose.yml`
+   fails immediately with a named, readable error if
    `OPENLAW_ANTHROPIC_API_KEY` is missing -- never a stack trace, never a
    service that starts and only fails on a real user's question.
 
 3. **Build the corpus** (separately from `docker compose up` -- see above;
    this needs the Python environment on your host, not a container, since
-   these scripts read the raw HuggingFace dataset snapshots directly):
+   these scripts read the raw HuggingFace dataset snapshots directly). The
+   two raw datasets (`OPENLAW_VAQUILL_ROOT`, `OPENLAW_KANOONGPT_ROOT`) are
+   NOT bundled anywhere -- see `.env.example` for exactly how to download
+   them, their licences, and their real disk cost before you start:
 
        pip install -e ".[dev,local-nano]"
        python scripts/make_fixtures.py
@@ -217,6 +244,7 @@ corpus. Be clear-eyed about what that means before you start:
        python scripts/build_sc_index.py           # needs OPENLAW_VOYAGE_API_KEY
        python scripts/build_hc_index.py            # needs OPENLAW_VOYAGE_API_KEY, hours
        python scripts/build_hc_index.py --court delhi
+       python scripts/build_sparse_vectors.py      # REQUIRED -- builds acts_india_v1; see "Corpus build" above
        python scripts/validate_corpus.py           # the gate: all citations resolve
 
    You can skip straight to step 4 and come back to this once the
@@ -228,11 +256,21 @@ corpus. Be clear-eyed about what that means before you start:
 
    This starts Postgres, Qdrant, and Neo4j; runs `alembic upgrade head`
    against Postgres via the one-shot `migrate` service (the `api` container
-   will not start until migrations succeed -- see `docker-compose.yml`); and
-   starts `api` (port 8000) and `web` (port 3000, proxying `/ask` to `api`
-   server-side). Migrations do not assume an empty database -- see
-   "Database migrations" above for the `alembic stamp head` escape hatch if
-   these tables already exist some other way.
+   will not start until migrations succeed -- see "Database migrations"
+   above for the `alembic stamp head` escape hatch if these tables already
+   exist some other way, and `docker compose run --rm migrate alembic
+   stamp head` to run that same escape hatch inside a container rather than
+   needing `alembic` installed on your host); and starts `api`, `web`, and
+   `proxy` -- the single reverse-proxy ingress this stack listens on (see
+   "Reverse-proxy trust" below for why it exists).
+
+   **First start downloads the nano model weights.** `api` builds its query
+   embedder before it starts serving anything, which means the FIRST
+   container start (and any subsequent start where the `hf_cache` volume
+   was removed) blocks for as long as that download takes -- a few minutes
+   on an ordinary connection, longer on a slow one. This is why step 5's
+   verification allows a generous wait; if `docker compose logs api` shows
+   it still downloading, that is expected, not a hang.
 
 5. **Verify it.**
 
@@ -246,15 +284,23 @@ corpus. Be clear-eyed about what that means before you start:
    `/readyz` reporting ready, its final check asks a real question and
    verifies a genuinely cited answer comes back.
 
-6. Open **http://localhost:3000** and ask a question.
+6. Open **http://localhost:8080** and ask a question. (Not `:3000` or
+   `:8000` -- those are loopback-only now; see "Datastore and application
+   ports" below.)
 
 ### Quota is disabled by default for self-hosters
 
-`OPENLAW_QUOTA_ENABLED` defaults to `false` in `docker-compose.yml` -- a
-legal-aid body running its own instance should not inherit the hosted
-tier's anonymous-3/signed-in-30-per-month limit. Set it to `true` (and, if
-you are not behind HTTPS, leave `OPENLAW_COOKIE_SECURE=false` -- see the
-next section) if you specifically want that limit on your own deployment.
+`OPENLAW_QUOTA_ENABLED` defaults to `false` in both `docker-compose.yml`
+and the shipped `.env.example` (kept in lockstep by
+`tests/test_config.py::test_env_example_agrees_with_compose_self_host_defaults`
+-- Task 7 review, C2: an earlier version of `.env.example` shipped `true`
+here, which `cp .env.example .env` then silently used to override
+`docker-compose.yml`'s own `false` default, turning the hosted tier's rate
+limit ON for every self-hoster who followed this exact README). A legal-aid
+body running its own instance should not inherit the hosted tier's
+anonymous-3/signed-in-30-per-month limit. Set it to `true` (and, once you
+are behind HTTPS, set `OPENLAW_COOKIE_SECURE=true` too -- see the next
+section) if you specifically want that limit on your own deployment.
 
 **This is legal information, not legal advice.** Every answer carries this
 notice and routes to DLSA/NALSA for anything beyond what a citation can
@@ -263,29 +309,50 @@ responsibly settle -- self-hosting this does not change that; see
 
 ### Reverse-proxy trust, and what changes if you add your own
 
-`docker-compose.yml` sets `OPENLAW_TRUSTED_PROXY_IPS` to `web`'s own fixed
-address on the Compose network (`172.28.5.10`), because `web` (Next.js)
-proxies every `/ask` request to `api` server-side -- `api` never sees a
-browser connect to it directly in this topology, so `web` is the one
-address that needs trusting for per-caller rate limiting and the anonymous
-quota to work correctly (see `docker-compose.yml`'s own comments, and
-`openlaw.api.routes._client_key`, for the mechanics and what goes wrong if
-this is left unset behind a real proxy). If you put your own TLS-
-terminating reverse proxy in front of this stack -- required for any
-deployment reachable over the public internet -- point it at `web`, not
-`api`, and let it forward `X-Forwarded-For` the way every mainstream
-reverse proxy does by default; no change to `OPENLAW_TRUSTED_PROXY_IPS` is
-needed for that case. The one case that DOES need a change is a proxy that
-talks to `api` directly (bypassing `web`'s rewrite), or a future multi-
-replica `api` behind a load balancer -- set `OPENLAW_TRUSTED_PROXY_IPS` to
-that proxy's/load balancer's actual address instead.
+**A Next.js `rewrites()` entry is not a reverse proxy, and this stack does
+not trust it as one (Task 7 review, H1).** `web` proxies `/ask` to `api`
+server-side purely so the anonymous-quota cookie round-trips with zero CORS
+configuration -- but Next.js's rewrite never sets `X-Forwarded-For` on its
+own, and copies whatever a caller sent through unchanged. Trusting `web`'s
+address without something upstream of it actually setting that header
+honestly would be *worse* than trusting nothing: every real visitor
+collapses into one shared 30-requests-per-minute bucket, and a client can
+forge its own `X-Forwarded-For` on a same-origin `fetch()` to bypass the
+limiter outright, on a service that spends real money per question.
 
-### Datastore ports never leave the host
+That is why `docker-compose.yml` ships a real reverse proxy, `proxy`
+(nginx, `nginx/nginx.conf`), as the ONLY externally-reachable service --
+`api` and `web` are bound to `127.0.0.1` only (see below). `proxy`
+overwrites `X-Forwarded-For` with the connection it actually observed
+(`proxy_set_header X-Forwarded-For $remote_addr;` -- never
+`$proxy_add_x_forwarded_for`, which would append to a forged value instead
+of replacing it); `web`'s rewrite then forwards that genuine value through
+to `api` unchanged. `OPENLAW_TRUSTED_PROXY_IPS` is set to `web`'s own fixed
+address on the Compose network (`172.31.238.10`, via the custom `ipam`
+block) -- not `proxy`'s -- because `web` is still the one address that
+directly connects to `api`; adding `proxy` did not change that, it only
+made what arrives in `X-Forwarded-For` honest.
 
-Qdrant, Neo4j and Postgres are bound to `127.0.0.1` in `docker-compose.yml`
-and must stay that way -- this is a hard project constraint, not a default
-to reconsider. `api` and `web` are the only intended reachable surface.
-Their default development credentials (`openlaw`/`openlaw`,
-`neo4j`/`openlawdev`) are fine behind that loopback binding; override them
-via `POSTGRES_PASSWORD`/`NEO4J_PASSWORD` in your `.env` before putting a
-reverse proxy in front of this stack for anything beyond your own machine.
+If you replace `proxy` with your own ingress (a managed load balancer, a
+different reverse proxy, TLS termination for a public deployment) and it
+still forwards to `web`, `OPENLAW_TRUSTED_PROXY_IPS` needs **no change** --
+**provided your replacement also overwrites `X-Forwarded-For` the way
+`nginx/nginx.conf` does.** Verify that explicitly; do not assume it. The
+one case that DOES need a change is an ingress that talks to `api` directly
+(bypassing `web`'s rewrite), or a future multi-replica `api` behind a load
+balancer -- set `OPENLAW_TRUSTED_PROXY_IPS` to that proxy's/load balancer's
+actual address instead.
+
+### Datastore and application ports never leave the host
+
+Qdrant, Neo4j, Postgres, `api`, and `web` are ALL bound to `127.0.0.1` in
+`docker-compose.yml` (Task 7 review, H3: an earlier version published
+`api`/`web` on every interface, exposing an unauthenticated,
+Anthropic-money-spending `/ask` to the entire local network with no TLS).
+Datastore loopback binding is a hard project constraint, not a default to
+reconsider. `proxy` (port 8080) is the only service meant to be reached
+from outside this host -- see "Reverse-proxy trust" above. Postgres/Neo4j's
+default development credentials (`openlaw`/`openlaw`, `neo4j`/`openlawdev`)
+are fine behind loopback binding; override them via
+`POSTGRES_PASSWORD`/`NEO4J_PASSWORD` in your `.env`, and put TLS on `proxy`
+(or replace it), before exposing this stack beyond your own machine.
