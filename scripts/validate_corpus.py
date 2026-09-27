@@ -41,6 +41,11 @@ from openlaw.index.validation import ValidationReport, validate_payloads
 PAGE_SIZE = 1_000
 ACTS_INDIA_COLLECTION = "acts_india"
 
+#: The filtered, citable copy of `acts_india` that retrieval actually queries
+#: (built by `scripts/build_sparse_vectors.py`, which excludes the 137,441
+#: provisions carrying no government source URL).
+ACTS_INDIA_V1_COLLECTION = "acts_india_v1"
+
 
 @dataclass(frozen=True)
 class CollectionPolicy:
@@ -52,6 +57,14 @@ class CollectionPolicy:
 
 POLICIES: tuple[CollectionPolicy, ...] = (
     CollectionPolicy(name=ACTS_INDIA_COLLECTION, strict=False),
+    # Strict, unlike its source snapshot above. The gate previously named only
+    # `acts_india` -- the raw publisher snapshot, where un-citable points are
+    # expected and tolerated -- while `acts_india_v1`, the collection retrieval
+    # ACTUALLY queries, was never checked at all. It passed on inspection
+    # (0 of 961,136 missing either field), but by construction rather than by
+    # enforcement: a future rebuild that dropped `has_source_url` would have
+    # reported GATE PASS while shipping un-citable provisions to users.
+    CollectionPolicy(name=ACTS_INDIA_V1_COLLECTION, strict=True),
     CollectionPolicy(name=SC_COLLECTION, strict=True),
     CollectionPolicy(name=HC_COLLECTION, strict=True),
 )
