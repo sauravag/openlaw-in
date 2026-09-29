@@ -59,11 +59,11 @@ COPY migrations ./migrations
 COPY alembic.ini ./
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && mkdir -p /app/data \
+    && mkdir -p /app/var /app/.cache/huggingface \
     && chown -R openlaw:openlaw /app
 
 # docker-entrypoint.sh runs as root just long enough to `chown` the
-# bind-mounted `/app/data` volume (see its own docstring for why that
+# bind-mounted `/app/var` volume (see its own docstring for why that
 # cannot be done here, at build time), then execs the real command as
 # `openlaw` -- this image never serves a request as root.
 ENTRYPOINT ["docker-entrypoint.sh"]

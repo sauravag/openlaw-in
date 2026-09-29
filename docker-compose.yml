@@ -180,11 +180,17 @@ services:
       # scripts only -- see the `migrate` service's comment above).
       OPENLAW_VAQUILL_ROOT: /corpus-build-only/vaquill
       OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
+      # These two MUST resolve inside the bind mount above, and the mount
+      # MUST NOT be /app/data: that directory holds data/glossary/
+      # legal_terms.json, baked into the image, and mounting over it made
+      # load_glossary() raise FileNotFoundError so the API crash-looped.
+      OPENLAW_HALLUCINATION_LOG_PATH: /app/var/hallucinations.jsonl
+      OPENLAW_CLASSIFIER_FAILURE_LOG_PATH: /app/var/classifier_failures.jsonl
     volumes:
       # The same bind mount `api` uses (Task 7 review, M2) -- this is what
       # `Settings.hallucination_log_path`/`.classifier_failure_log_path`
       # actually resolve to on disk, and what this command purges.
-      - ./data/app:/app/data
+      - ./data/app:/app/var
     command: ["python", "scripts/purge_retention.py"]
     restart: "no"
     cap_drop: [ALL]
@@ -255,6 +261,12 @@ services:
       # back to `true` (the safe default `Settings.cookie_secure` itself
       # uses) once you do.
       OPENLAW_COOKIE_SECURE: ${OPENLAW_COOKIE_SECURE:-false}
+      # These two MUST resolve inside the bind mount above, and the mount
+      # MUST NOT be /app/data: that directory holds data/glossary/
+      # legal_terms.json, baked into the image, and mounting over it made
+      # load_glossary() raise FileNotFoundError so the API crash-looped.
+      OPENLAW_HALLUCINATION_LOG_PATH: /app/var/hallucinations.jsonl
+      OPENLAW_CLASSIFIER_FAILURE_LOG_PATH: /app/var/classifier_failures.jsonl
     ports: ["127.0.0.1:8000:8000"]
     volumes:
       # Task 7 review, M2: `hallucination_log_path`/`classifier_failure_log_path`
@@ -266,7 +278,7 @@ services:
       # start, since Docker creates a not-yet-existing bind-mount source
       # owned by root regardless of what the image's own build-time layer
       # was chowned to.
-      - ./data/app:/app/data
+      - ./data/app:/app/var
       # Persists the voyage-4-nano weights (see the comment above) across
       # container recreates -- home directory of the `openlaw` user (Task 7
       # Dockerfile: `useradd --home-dir /app`), which is where
