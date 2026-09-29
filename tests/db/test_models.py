@@ -107,42 +107,68 @@ def test_deleting_a_conversation_deletes_its_messages() -> None:
     assert session.query(Message).count() == 0
 
 
-# --- Final whole-plan review, M3: three tables are created and, today,
-# deliberately never written to by any shipped code path -----------------
+# --- Final whole-plan review, M3 (Plan 5), revisited in Plan 6 Task 2:
+# six tables are created and, today, still not written by any shipped code
+# path -- see openlaw.db.models's module docstring for the split this test
+# now tracks: `Conversation`/`Message`/`Document`/`DocumentExcerptRow`/
+# `DocumentAccessLog` have a *known* future writer (Task 14 onward of the
+# conversations-and-artifacts plan) but no writer yet, while
+# `HallucinationLog` stays reserved indefinitely pending its restricted-role
+# precondition. Both halves are still "no production writer today", so both
+# stay covered by the same grep-based guard: if a future change starts
+# constructing any of them from `src/` or `scripts/` without updating the
+# docstring (and, for the first five, without this table actually landing in
+# a persistence layer), this test is what catches it. -----------------------
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PRODUCTION_DIRS = (_REPO_ROOT / "src", _REPO_ROOT / "scripts")
-_RESERVED_TABLE_CLASSES = ("Conversation", "Message", "HallucinationLog")
+_NOT_YET_WRITTEN_TABLE_CLASSES = (
+    "Conversation",
+    "Message",
+    "Document",
+    "DocumentExcerptRow",
+    "DocumentAccessLog",
+    "HallucinationLog",
+)
 
 
-def _reserved_class_constructed_in(path: Path) -> str | None:
-    """Return the first reserved table class this file constructs (`Name(`),
-    or None. A crude, deliberately simple grep -- exactly as trustworthy as
-    the review's own `grep -rn` that found the gap in the first place."""
+def _unwritten_class_constructed_in(path: Path) -> str | None:
+    """Return the first not-yet-written table class this file constructs
+    (`Name(`), or None. A crude, deliberately simple grep -- exactly as
+    trustworthy as the review's own `grep -rn` that found the gap in the
+    first place."""
     text = path.read_text(encoding="utf-8")
-    for name in _RESERVED_TABLE_CLASSES:
+    for name in _NOT_YET_WRITTEN_TABLE_CLASSES:
         if re.search(rf"\b{name}\(", text):
             return name
     return None
 
 
 def test_reserved_unused_tables_have_no_production_writer() -> None:
-    """`Conversation`, `Message`, and `HallucinationLog` are documented as
-    reserved for future use, with no writer anywhere in shipped code
-    (`openlaw.db.models`'s module docstring; README's "Reserved,
-    currently-unused tables"). This is the boundary test for that claim: if
-    a future change starts constructing any of them from `src/` or
-    `scripts/`, this test fails -- forcing that change to also update the
-    documentation that currently asserts otherwise, rather than the two
-    silently drifting apart the way `verify_selfhost.sh` and
-    `escalation.py`'s stale comment already did elsewhere in this plan.
+    """None of `Conversation`, `Message`, `Document`, `DocumentExcerptRow`,
+    `DocumentAccessLog`, or `HallucinationLog` is written by any shipped code
+    path today (`openlaw.db.models`'s module docstring). This is the
+    boundary test for that claim: if a future change starts constructing any
+    of them from `src/` or `scripts/`, this test fails -- forcing that
+    change to also update the documentation that currently asserts
+    otherwise, rather than the two silently drifting apart the way
+    `verify_selfhost.sh` and `escalation.py`'s stale comment already did
+    elsewhere in this plan.
+
+    As of Plan 6 Task 2, `Conversation`/`Message`/`Document`/
+    `DocumentExcerptRow`/`DocumentAccessLog` are no longer *speculative*
+    placeholders -- their schema is final and a writer is planned for Task
+    14 onward -- but no shipped code writes to them yet, so this test still
+    holds for all six until that writer lands. `HallucinationLog` alone
+    remains reserved indefinitely, pending the restricted database role its
+    own class docstring requires.
     """
     offenders: list[str] = []
     for directory in _PRODUCTION_DIRS:
         for path in directory.rglob("*.py"):
             if path.name == "models.py":
                 continue  # the table definitions themselves, not a writer
-            offender = _reserved_class_constructed_in(path)
+            offender = _unwritten_class_constructed_in(path)
             if offender is not None:
                 offenders.append(f"{path.relative_to(_REPO_ROOT)}: constructs {offender}(...)")
 
