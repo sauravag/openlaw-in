@@ -1,4 +1,5 @@
 import { LANGUAGES, type Language } from '@/lib/languages'
+import { getStrings } from '@/lib/strings'
 
 interface LanguageSelectorProps {
   value: Language['code']
@@ -20,14 +21,25 @@ interface LanguageSelectorProps {
  * interface is where a user actually chooses their language, and this value
  * is always sent to `/ask` explicitly (`lib/api.ts`), never left for the
  * server to guess.
+ *
+ * The visible label stays bilingual in both directions ("Language / भाषा",
+ * "भाषा / Language" -- `strings.languageLabel`, so it lives with every
+ * other string rather than hardcoded here) rather than following the
+ * selected language alone. A Hindi reader landing on the English default
+ * has to be able to FIND this control, and a control labelled only in the
+ * language you cannot read is the one control that must never be.
+ *
+ * Must stay inside the `<form>`: `name` only reaches the server on the
+ * no-JS GET fallback if the field is part of that form.
  */
 export default function LanguageSelector({ value, onChange, name }: LanguageSelectorProps) {
+  const strings = getStrings(value)
   return (
-    <label className="flex flex-col gap-1 text-sm font-medium text-slate-700">
-      Language / भाषा
+    <label className="flex flex-col gap-1.5 text-sm font-semibold text-muted">
+      {strings.languageLabel}
       <select
         name={name}
-        className="rounded-md border border-slate-300 px-3 py-2 text-base text-slate-900"
+        className="min-h-12 rounded-lg border border-line bg-white px-3 py-2 text-base font-normal text-ink"
         value={value}
         onChange={(event) => onChange(event.target.value as Language['code'])}
       >

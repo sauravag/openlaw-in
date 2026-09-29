@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "../page";
 import { askQuestion } from "@/lib/api";
 import { getFallbackHelplineSet } from "@/lib/fallbackHelplines";
+import { getStrings } from "@/lib/strings";
 import type { AnswerData, RefusalData } from "@/lib/types";
 
 vi.mock("@/lib/api", async () => {
@@ -47,6 +48,42 @@ describe("HomePage", () => {
     expect(mockedAskQuestion).not.toHaveBeenCalled();
     expect(screen.getByRole("link", { name: /112/ })).toHaveAttribute("href", "tel:112");
     expect(screen.getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
+  });
+
+  it("welcomes a first-time visitor with example questions, and drops them once there is an answer", async () => {
+    mockedAskQuestion.mockResolvedValue({ kind: "answer", data: baseAnswer });
+
+    render(<HomePage />);
+    const [firstExample] = getStrings("en").exampleQuestions;
+    expect(screen.getByRole("heading", { name: /what this is/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: firstExample })).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/your question/i), "q");
+    await userEvent.click(screen.getByRole("button", { name: /^ask$/i }));
+
+    await screen.findByText(/Notice must be one month/);
+    // The empty state is an empty state -- it must not sit there competing
+    // with the answer once one exists.
+    expect(
+      screen.queryByRole("heading", { name: /what this is/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("puts a tapped example question in the box without spending a free question", async () => {
+    render(<HomePage />);
+    const [firstExample] = getStrings("en").exampleQuestions;
+
+    await userEvent.click(screen.getByRole("button", { name: firstExample }));
+
+    expect(screen.getByLabelText(/your question/i)).toHaveValue(firstExample);
+    expect(mockedAskQuestion).not.toHaveBeenCalled();
+  });
+
+  it("keeps the legal-information-not-advice line on the page at all times", () => {
+    render(<HomePage />);
+    expect(
+      screen.getByText("This is legal information, not legal advice."),
+    ).toBeInTheDocument();
   });
 
   it("defaults to English and sends the selected language explicitly on submit", async () => {

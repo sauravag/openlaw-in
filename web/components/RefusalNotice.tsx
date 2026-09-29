@@ -1,6 +1,7 @@
 import { formatResetDate } from '@/lib/formatDate'
 import { getStrings } from '@/lib/strings'
 import type { RefusalData } from '@/lib/types'
+import CrisisAlert from './CrisisAlert'
 import HelplineList from './HelplineList'
 
 interface RefusalNoticeProps {
@@ -18,58 +19,63 @@ interface RefusalNoticeProps {
  * requirement 7):
  *
  * - a crisis response, when present, renders above the refusal detail in the
- *   same visually distinct alert box `AnswerView` uses (requirement 4) --
- *   someone in danger who happens to hit a rate limit or an outage must
- *   still see help first, not last;
+ *   same `CrisisAlert` box `AnswerView` uses (requirement 4) -- someone in
+ *   danger who happens to hit a rate limit or an outage must still see help
+ *   first, not last;
  * - `quota_remaining`, `quota_reset_at` and `signup_url` render only when
  *   present -- a 429 sends all of them (per which limit fired), a 500 sends
  *   none, since an unhandled error has no quota decision to report;
  * - `escalation_footer` is always rendered, unconditionally;
  * - every helpline number renders from `data.helplines` -- structured data,
  *   never scanned out of prose (Task 6 fix round, C2). See `HelplineList`.
+ *
+ * This is the surface for all six no-server-cooperation states: quota
+ * refusal, rate limit, auth failure, 500, timeout, and a 200 with a
+ * malformed body (`lib/api.ts` funnels every one of them here, the last
+ * three via `fallbackRefusalData`). The styling is deliberately not
+ * alarming -- a quiet grey card, with red left entirely to `CrisisAlert` --
+ * because "we could not answer" is not itself an emergency, while what the
+ * person asked about might be.
  */
 export default function RefusalNotice({ data, language }: RefusalNoticeProps) {
   const strings = getStrings(language)
   return (
-    <article data-testid="refusal" className="flex flex-col gap-4">
+    <article data-testid="refusal" className="flex flex-col gap-5">
       {data.crisis_response && (
-        <section
-          role="alert"
-          data-testid="crisis"
-          className="rounded-lg border-2 border-red-700 bg-red-50 p-4 text-red-900"
-        >
-          <p className="whitespace-pre-line text-lg font-semibold">{data.crisis_response}</p>
-          <div className="mt-3">
-            <HelplineList helplines={data.helplines} />
-          </div>
-        </section>
+        <CrisisAlert
+          crisisResponse={data.crisis_response}
+          helplines={data.helplines}
+          language={language}
+        />
       )}
 
-      <p className="text-base leading-relaxed text-slate-900">{data.detail}</p>
+      <div className="flex flex-col gap-4 rounded-xl border border-line bg-tint p-4 sm:p-5">
+        <p className="text-base leading-relaxed text-ink">{data.detail}</p>
 
-      {data.quota_remaining !== undefined && (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm text-slate-700">
-          <dt className="font-medium">{strings.quotaRemainingLabel}</dt>
-          <dd>{data.quota_remaining}</dd>
-          {data.quota_reset_at && (
-            <>
-              <dt className="font-medium">{strings.resetsOnLabel}</dt>
-              <dd>{formatResetDate(data.quota_reset_at, language)}</dd>
-            </>
-          )}
-        </dl>
-      )}
+        {data.quota_remaining !== undefined && (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm text-muted">
+            <dt className="font-semibold">{strings.quotaRemainingLabel}</dt>
+            <dd className="tabular-nums">{data.quota_remaining}</dd>
+            {data.quota_reset_at && (
+              <>
+                <dt className="font-semibold">{strings.resetsOnLabel}</dt>
+                <dd>{formatResetDate(data.quota_reset_at, language)}</dd>
+              </>
+            )}
+          </dl>
+        )}
 
-      {data.signup_required && data.signup_url && (
-        <a
-          href={data.signup_url}
-          className="text-blue-700 underline underline-offset-2 hover:text-blue-900"
-        >
-          {strings.signupCta}
-        </a>
-      )}
+        {data.signup_required && data.signup_url && (
+          <a
+            href={data.signup_url}
+            className="inline-flex min-h-12 items-center justify-center self-start rounded-lg border-2 border-brand px-4 py-2 font-semibold text-brand no-underline hover:bg-brand-soft"
+          >
+            {strings.signupCta}
+          </a>
+        )}
+      </div>
 
-      <footer className="flex flex-col gap-2 border-t border-slate-200 pt-4 text-sm text-slate-600">
+      <footer className="flex flex-col gap-3 border-t border-line pt-4 text-sm text-muted">
         <p className="whitespace-pre-line">{data.escalation_footer}</p>
         {!data.crisis_response && <HelplineList helplines={data.helplines} />}
       </footer>

@@ -130,6 +130,24 @@ describe('AnswerView', () => {
     expect(screen.getByRole('region', { name: 'यह जानकारी कहाँ से है' })).toBeInTheDocument()
   })
 
+  it('marks the cited law with its own heading so it is distinct from the system framing', () => {
+    render(<AnswerView data={baseAnswer} />)
+    expect(screen.getByRole('heading', { name: /what the law says/i })).toBeInTheDocument()
+    expect(
+      screen.getByText(/assembled only from the sources listed below/i),
+    ).toBeInTheDocument()
+  })
+
+  it('does not claim "what the law says" when nothing could be grounded in a source', () => {
+    // An unanswerable turn carries no sources, so there is no law to be
+    // quoting -- heading it "What the law says" would dress up a
+    // "we found nothing" response as a legal statement.
+    render(<AnswerView data={{ ...baseAnswer, is_answerable: false, sources: [] }} />)
+    expect(
+      screen.queryByRole('heading', { name: /what the law says/i }),
+    ).not.toBeInTheDocument()
+  })
+
   it('shows the unanswerable framing sentence outside the answer paragraph, in the answer language', () => {
     render(
       <AnswerView

@@ -1,24 +1,89 @@
 @import "tailwindcss";
 
+/*
+ * A white page, on purpose.
+ *
+ * The reader is often on a cheap Android phone, on a slow connection,
+ * sometimes frightened, sometimes reading Hindi. The look to aim for is a
+ * legal aid desk or a public library: calm, uncluttered, obviously
+ * trustworthy. So: one colour for meaning (never decoration), generous
+ * whitespace, a narrow reading measure, and type large enough to read on a
+ * small screen in bad light.
+ *
+ * The previous `prefers-color-scheme: dark` block flipped `--background` to
+ * near-black while every component still asked for `text-slate-900`, which
+ * rendered near-black text on a near-black page -- an unreadable page for
+ * anyone whose phone is in dark mode. Rather than maintain a second palette
+ * nobody has reviewed for a safety-critical UI, this pins the page to its
+ * light palette with `color-scheme: light`. Revisit only with a real dark
+ * palette and a contrast pass, not by re-adding the inversion.
+ */
+
+@theme {
+  /* Text. `muted` is 6.4:1 on white -- AA for body text, not just large. */
+  --color-ink: #16181d;
+  --color-muted: #54606f;
+
+  /* Structure. */
+  --color-line: #e2e6ec;
+  --color-tint: #f7f8fa;
+
+  /* The one accent, ~9.9:1 on white. Links, the primary button, focus. */
+  --color-brand: #0f3d6e;
+  --color-brand-ink: #0b2c50;
+  --color-brand-soft: #eef3f9;
+
+  /* Danger. Reserved entirely for the crisis block -- nothing else. */
+  --color-crisis: #8a1020;
+  --color-crisis-edge: #b91c1c;
+  --color-crisis-soft: #fff5f5;
+
+  /* Citation kinds. Each also carries a word and an icon: colour is never
+   * the only thing telling a reader statute from judgment. */
+  --color-statute: #0f3d6e;
+  --color-statute-soft: #eaf1f8;
+  --color-judgment: #6b4a12;
+  --color-judgment-soft: #fdf6e8;
+  --color-docmark: #3f4a5a;
+  --color-docmark-soft: #eef0f4;
+
+  /* System stack only -- no web font, nothing to download, nothing to block
+   * the first paint. The Devanagari faces listed are the ones Android and
+   * Windows actually ship, so Hindi renders in a real UI face rather than a
+   * fallback serif. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans",
+    "Noto Sans Devanagari", "Nirmala UI", Arial, sans-serif;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  /* 17px base: the smallest size that stays comfortable on a 5" screen held
+   * at arm's length in poor light. */
+  font-size: 17px;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: #ffffff;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+}
+
+/* A focus ring that is visible against white and never removed. Keyboard
+ * and switch-control users are the whole reason this exists. */
+:focus-visible {
+  outline: 3px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
 }
