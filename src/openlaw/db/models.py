@@ -203,7 +203,12 @@ class Document(Base):
     `ciphertext`/`nonce` are AES-256-GCM output (`openlaw.documents.crypto`,
     Task 3) bound by AAD to this row's id -- `test_documents_never_store
     _plaintext` is the standing guarantee that no `Text`/`String` column
-    here ever holds extracted document content instead.
+    here ever holds extracted document content instead. `key_id` (Task 3b)
+    is `openlaw.documents.crypto.key_fingerprint`'s output for whichever key
+    encrypted this row -- a short, non-secret label, never key material --
+    so a later key rotation can tell which of the configured keys to
+    decrypt a given row with instead of every row being locked to whatever
+    single key happens to be configured at read time.
 
     `expires_at` mirrors `Conversation.expires_at`: NULL for an
     authenticated upload (persists until the user deletes it), set to a
@@ -242,6 +247,7 @@ class Document(Base):
     page_count: Mapped[int] = mapped_column(Integer, nullable=False)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_id: Mapped[str] = mapped_column(String(16), nullable=False)
     crisis_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     expires_at: Mapped[datetime | None] = mapped_column(
@@ -262,7 +268,11 @@ class DocumentExcerptRow(Base):
     constraint on `(document_id, excerpt_id)` is what makes that id
     unambiguous within its own document. `ciphertext`/`nonce` are, like
     `Document`'s, AES-256-GCM output bound by AAD to this row's `excerpt_id`
-    -- never the extracted text itself.
+    -- never the extracted text itself. `key_id` (Task 3b) names which key
+    produced this row's ciphertext, exactly as `Document.key_id` does --
+    kept per-excerpt rather than inherited from the parent `Document`
+    because an excerpt can in principle be (re-)encrypted independently of
+    the document it was extracted from.
     """
 
     __tablename__ = "document_excerpts"
@@ -283,6 +293,7 @@ class DocumentExcerptRow(Base):
     page_number: Mapped[int] = mapped_column(Integer, nullable=False)
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    key_id: Mapped[str] = mapped_column(String(16), nullable=False)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
 
     document: Mapped[Document] = relationship(back_populates="excerpts")

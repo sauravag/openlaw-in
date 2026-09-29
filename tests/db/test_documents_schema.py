@@ -38,6 +38,7 @@ def _document(**overrides: object) -> Document:
         "page_count": 2,
         "ciphertext": b"cipher",
         "nonce": b"nonce-bytes-",
+        "key_id": "0" * 16,
     }
     defaults.update(overrides)
     return Document(**defaults)
@@ -82,6 +83,7 @@ def test_document_has_expected_columns() -> None:
         "page_count",
         "ciphertext",
         "nonce",
+        "key_id",
         "crisis_kind",
         "created_at",
         "expires_at",
@@ -97,6 +99,7 @@ def test_document_excerpt_row_has_expected_columns() -> None:
         "page_number",
         "ciphertext",
         "nonce",
+        "key_id",
         "ordinal",
     }
 
@@ -196,6 +199,7 @@ def test_deleting_a_document_deletes_its_excerpts() -> None:
             page_number=0,
             ciphertext=b"c",
             nonce=b"n",
+            key_id="0" * 16,
             ordinal=0,
         )
     )
@@ -278,6 +282,7 @@ def test_document_excerpt_ids_are_unique_within_a_document() -> None:
             page_number=0,
             ciphertext=b"c1",
             nonce=b"n1",
+            key_id="0" * 16,
             ordinal=0,
         )
     )
@@ -290,6 +295,7 @@ def test_document_excerpt_ids_are_unique_within_a_document() -> None:
             page_number=0,
             ciphertext=b"c2",
             nonce=b"n2",
+            key_id="0" * 16,
             ordinal=1,
         )
     )
@@ -353,6 +359,7 @@ def test_documents_never_store_plaintext() -> None:
         "user_id",
         "anon_token",
         "conversation_id",
+        "key_id",
     }
     for table_class in (Document, DocumentExcerptRow):
         for column in table_class.__table__.columns:

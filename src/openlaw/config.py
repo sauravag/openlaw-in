@@ -193,10 +193,24 @@ class Settings(BaseSettings):
     # Base64-encoded 32 random bytes, used to encrypt uploaded document
     # content at rest. Generate with:
     #   python -c "import base64,os;print(base64.b64encode(os.urandom(32)).decode())"
-    # Rotating this key makes every existing upload unreadable -- there is no
-    # re-encryption path, so treat it like any other long-lived secret.
-    # NEVER log or include this value in an error message.
+    # `openlaw.documents.crypto` tags every row it encrypts with this key's
+    # fingerprint (`key_id`), so rotating this value is now safe going
+    # forward: new uploads use the new key, and existing rows stay readable
+    # as long as their key is still available -- see
+    # `document_encryption_key_previous` below. Treat it like any other
+    # long-lived secret regardless. NEVER log or include this value in an
+    # error message.
     document_encryption_key: str | None = None
+    # Base64-encoded 32 random bytes: the PREVIOUS `document_encryption_key`,
+    # kept only so documents encrypted under it stay decryptable after a
+    # rotation. Read-only -- `openlaw.documents.crypto.encrypt` never uses
+    # this key, only `decrypt` (via `load_keyring`) consults it, selecting it
+    # by its fingerprint when a row's stored `key_id` names it instead of the
+    # current key. Leave unset for a normal single-key deployment; set it to
+    # the OLD value of `document_encryption_key` for exactly as long as
+    # documents still exist that were encrypted under it. NEVER log or
+    # include this value in an error message.
+    document_encryption_key_previous: str | None = None
     # Per-upload size cap in bytes (10 MiB). Named here, not re-derived or
     # hard-coded at any call site -- see openlaw.documents' module docstring
     # for the full set of limits this settings block owns.

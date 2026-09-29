@@ -404,6 +404,23 @@ def test_document_encryption_key_reads_from_environment(monkeypatch) -> None:
     assert Settings().document_encryption_key == "dGVzdC1rZXktdmFsdWU="
 
 
+def test_document_encryption_key_previous_defaults_to_none(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+
+    assert Settings().document_encryption_key_previous is None
+
+
+def test_document_encryption_key_previous_reads_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv(
+        "OPENLAW_DOCUMENT_ENCRYPTION_KEY_PREVIOUS", "b2xkLWtleS12YWx1ZQ=="
+    )
+
+    assert Settings().document_encryption_key_previous == "b2xkLWtleS12YWx1ZQ=="
+
+
 def test_document_limit_defaults_match_the_pinned_values(monkeypatch) -> None:
     """Task 1 done-when: every limit is a named constant/default read from
     one place -- these are the exact values from the task brief."""
@@ -449,6 +466,7 @@ def test_env_example_uploads_settings_parse_and_default_to_enabled() -> None:
 
     assert example.uploads_enabled is True
     assert not example.document_encryption_key
+    assert not example.document_encryption_key_previous
     assert example.max_upload_bytes == 10_485_760
     assert example.max_document_pages == 20
     assert example.max_documents_per_conversation == 3
