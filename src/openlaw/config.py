@@ -5,15 +5,23 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Configuration read from the environment or a local .env file."""
 
+    # `populate_by_name` so a field carrying a `validation_alias` (see
+    # `openrouter_api_key` below) can still be constructed by its own Python
+    # name -- `Settings(openrouter_api_key=...)` -- which is how tests and
+    # every other in-process caller build one. Without it, an aliased field
+    # becomes settable ONLY from the environment.
     model_config = SettingsConfigDict(
-        env_prefix="OPENLAW_", env_file=".env", extra="ignore"
+        env_prefix="OPENLAW_",
+        env_file=".env",
+        extra="ignore",
+        populate_by_name=True,
     )
 
     vaquill_root: Path
@@ -49,6 +57,17 @@ class Settings(BaseSettings):
     # legal reasoning and warrants a frontier model; translation and
     # classification do not, and paying frontier prices for them is waste at
     # the ~10K-user scale this product targets. See openlaw.answers.models.
+    #
+    # Each value may also name its PROVIDER, as `<provider>:<model>` --
+    # e.g. `openrouter:z-ai/glm-5.3-flash`. An unprefixed value means
+    # Anthropic, so every value below (and every existing deployment's)
+    # keeps meaning exactly what it always did. Provider selection is
+    # per-role on purpose: a deployment can run the generator on OpenRouter
+    # while leaving translation and classification on Anthropic Haiku, which
+    # no single global provider switch could express. The prefix is parsed
+    # and validated at startup by openlaw.answers.routing -- see that
+    # module's docstring for why the provider lives inside the model string
+    # rather than in three parallel settings of its own.
     model_generator: str = "claude-opus-5"
     model_translator: str = "claude-haiku-4-5"
     model_classifier: str = "claude-haiku-4-5"
@@ -58,8 +77,26 @@ class Settings(BaseSettings):
     # specialists often beat general models on Indian languages), but nothing
     # wired it from the environment, so the capability was unreachable without
     # editing code. Empty by default: every language uses model_translator.
+    # A per-language override carries its provider too, for free: the value
+    # is a model string like any other, so
+    # OPENLAW_MODEL_TRANSLATOR_OVERRIDES='{"mr": "openrouter:some-model"}'
+    # routes Marathi translation to OpenRouter and nothing else changes.
     model_translator_overrides: dict[str, str] = {}
+    # Provider API keys. Only the ones actually referenced by some role (or
+    # per-language override) are required at startup -- see
+    # `openlaw.api.deps._require_provider_keys`. A deployment running every
+    # role on OpenRouter needs no Anthropic key at all, and never builds an
+    # Anthropic client.
     anthropic_api_key: str | None = None
+    # Deliberately NOT `OPENLAW_`-prefixed. `OPENROUTER_API_KEY` is the name
+    # OpenRouter's own documentation, SDKs and CLI use, so it is the name
+    # already sitting in operators' `.env` files and secret stores;
+    # `validation_alias` bypasses this model's `env_prefix` to read it
+    # verbatim rather than making everyone rename their key to suit us.
+    openrouter_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("OPENROUTER_API_KEY", "openrouter_api_key"),
+    )
     # Hallucination log (Plan 3 T7, fix round 1): the log can carry verbatim,
     # sensitive user text (abuse, immigration status, debt disclosures), so
     # its location must be a deployment decision -- e.g. a restricted-access

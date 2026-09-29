@@ -268,3 +268,104 @@ def test_no_reverse_proxy_can_be_set_true(monkeypatch) -> None:
     monkeypatch.setenv("OPENLAW_NO_REVERSE_PROXY", "true")
 
     assert Settings().no_reverse_proxy is True
+
+
+# --- provider API keys and per-role provider routing -----------------------
+
+
+def test_openrouter_key_is_read_from_the_unprefixed_variable(monkeypatch) -> None:
+    """`OPENROUTER_API_KEY` is OpenRouter's own documented variable name, so
+    it is read verbatim rather than requiring an `OPENLAW_` rename of a key
+    the operator already has (see `Settings.openrouter_api_key`)."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-example")
+
+    assert Settings().openrouter_api_key == "sk-or-example"
+
+
+def test_the_documented_unprefixed_name_wins_over_the_prefixed_one(monkeypatch) -> None:
+    """`populate_by_name` leaves `OPENLAW_OPENROUTER_API_KEY` working too,
+    which is harmless -- but the name OpenRouter documents, and the one
+    already in the operator's `.env`, must be the one that takes effect.
+    If `validation_alias` were dropped this would silently invert, and a
+    correctly-configured deployment would read as a missing key."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "documented-name")
+    monkeypatch.setenv("OPENLAW_OPENROUTER_API_KEY", "prefixed-name")
+
+    assert Settings(_env_file=None).openrouter_api_key == "documented-name"  # type: ignore[call-arg]
+
+
+def test_openrouter_key_can_still_be_passed_by_field_name() -> None:
+    """`populate_by_name` -- an aliased field must stay constructible in
+    process, which is how every test and caller builds `Settings`."""
+    settings = Settings(
+        vaquill_root="/tmp/v", kanoongpt_root="/tmp/k", openrouter_api_key="k"
+    )
+
+    assert settings.openrouter_api_key == "k"
+
+
+def test_a_role_can_be_pointed_at_openrouter_without_touching_the_others(
+    monkeypatch,
+) -> None:
+    """The mixed configuration this feature exists for."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_MODEL_GENERATOR", "openrouter:z-ai/glm-5.3-flash")
+
+    settings = Settings()
+
+    assert settings.model_generator == "openrouter:z-ai/glm-5.3-flash"
+    assert settings.model_translator == "claude-haiku-4-5"
+    assert settings.model_classifier == "claude-haiku-4-5"
+
+
+def test_env_example_ships_no_provider_keys() -> None:
+    """`cp .env.example .env` must never hand anyone a credential, and must
+    not look like one is configured when none is."""
+    root = Path(__file__).resolve().parent.parent
+    example = Settings(_env_file=root / ".env.example")  # type: ignore[call-arg]
+
+    assert not example.anthropic_api_key
+    assert not example.openrouter_api_key
+
+
+def test_env_example_model_roles_stay_unprefixed_and_therefore_anthropic() -> None:
+    """The backwards-compatibility guarantee, asserted on the shipped file:
+    the documented example must keep resolving to the Anthropic models it
+    always did, so `cp .env.example .env` changes no existing behaviour."""
+    root = Path(__file__).resolve().parent.parent
+    example = Settings(_env_file=root / ".env.example")  # type: ignore[call-arg]
+
+    for model in (
+        example.model_generator,
+        example.model_translator,
+        example.model_classifier,
+    ):
+        assert ":" not in model
+
+
+def test_compose_passes_every_role_model_and_both_provider_keys() -> None:
+    """A setting the `api` container never receives is unreachable in a
+    Compose deployment however well it works locally -- the per-role model
+    variables were exactly that before this change. Also pins the removal of
+    compose's `${...:?}` hard-fail on the Anthropic key, which would
+    otherwise block an all-OpenRouter deployment that has no Anthropic key
+    (the key check now lives in `openlaw.api.deps._require_provider_keys`,
+    which can see which providers are actually referenced)."""
+    root = Path(__file__).resolve().parent.parent
+    compose_text = (root / "docker-compose.yml").read_text()
+
+    for var in (
+        "OPENLAW_MODEL_GENERATOR",
+        "OPENLAW_MODEL_TRANSLATOR",
+        "OPENLAW_MODEL_CLASSIFIER",
+        "OPENLAW_ANTHROPIC_API_KEY",
+        "OPENROUTER_API_KEY",
+    ):
+        assert f"{var}: ${{{var}" in compose_text, f"{var} is not passed to `api`"
+
+    assert "OPENLAW_ANTHROPIC_API_KEY:?" not in compose_text

@@ -229,10 +229,33 @@ services:
       # up`.
       OPENLAW_QUERY_EMBEDDER_BACKEND: ${OPENLAW_QUERY_EMBEDDER_BACKEND:-local_nano}
       OPENLAW_VOYAGE_API_KEY: ${OPENLAW_VOYAGE_API_KEY:-}
-      # Required -- production_app() refuses to start without it (binding
-      # requirement 4: fail loudly at startup, never a half-working
-      # service). Set it in your .env (copied from .env.example).
-      OPENLAW_ANTHROPIC_API_KEY: ${OPENLAW_ANTHROPIC_API_KEY:?set OPENLAW_ANTHROPIC_API_KEY in .env -- see .env.example}
+      # --- LLM providers ------------------------------------------------
+      # Which provider serves a role is encoded in that role's model string
+      # (`openrouter:z-ai/glm-5.3-flash`; unprefixed means Anthropic), so a
+      # deployment can run the generator on OpenRouter while leaving
+      # translation and crisis classification on Anthropic Haiku. Blank
+      # here means "use the shipped default for that role" -- see
+      # openlaw.config.Settings and openlaw.answers.routing.
+      OPENLAW_MODEL_GENERATOR: ${OPENLAW_MODEL_GENERATOR:-}
+      OPENLAW_MODEL_TRANSLATOR: ${OPENLAW_MODEL_TRANSLATOR:-}
+      OPENLAW_MODEL_CLASSIFIER: ${OPENLAW_MODEL_CLASSIFIER:-}
+      # Neither key uses compose's `${...:?}` hard-fail any more, and that
+      # is the point: this file cannot know which providers a deployment's
+      # model strings route to, so hard-failing on the Anthropic key here
+      # would block a perfectly valid all-OpenRouter deployment that has no
+      # Anthropic key at all. The check moved somewhere that CAN know --
+      # openlaw.api.deps._require_provider_keys walks the configured models
+      # at startup and demands a key for exactly the providers they
+      # reference, naming the missing variable, before anything expensive
+      # is built. Binding requirement 4 (fail loudly at startup, never a
+      # half-working service) is still met; it is just enforced where the
+      # answer is knowable. Set whichever you need in your .env.
+      OPENLAW_ANTHROPIC_API_KEY: ${OPENLAW_ANTHROPIC_API_KEY:-}
+      # Deliberately NOT OPENLAW_-prefixed: this is OpenRouter's own
+      # documented variable name, read verbatim via a pydantic
+      # validation_alias (openlaw.config.Settings.openrouter_api_key) so
+      # nobody has to rename a key they already have.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       # A legal-aid body running its own instance should not inherit the
       # hosted tier's rate limit -- see .env.example and the README. Kept
       # in lockstep with .env.example's own default by

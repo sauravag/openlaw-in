@@ -8,9 +8,10 @@ environment, and says so plainly wherever they cannot -- see
 
 Retrieval is always measurable: the default query embedder
 (`openlaw.retrieval.factory.build_query_embedder`) needs no API key, and both
-Qdrant collections are read-only inputs. Generation needs
-`OPENLAW_ANTHROPIC_API_KEY`; when it is absent, the unverifiable-citations half
-of the gate is reported NOT RUN rather than assumed zero.
+Qdrant collections are read-only inputs. Generation needs an API key for
+whichever provider(s) the configured models route to (`openlaw.answers
+.routing`); when one is missing, the unverifiable-citations half of the gate
+is reported NOT RUN rather than assumed zero.
 
 Beyond the recall/citation gate, this also answers the two other open
 questions from task-9-report.md: whether the sparse signal helps or hurts
@@ -29,13 +30,13 @@ from typing import Any
 import httpx
 import neo4j
 
-from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.generate import (
     build_retrieval_context,
     generate_answer,
     persist_answer_events,
 )
 from openlaw.answers.models import ModelRegistry
+from openlaw.api.deps import build_llm_adapter
 from openlaw.config import Settings, get_settings
 from openlaw.evaluation.dataset import MINIMUM_QUESTIONS, EvalQuestion, load_eval_set
 from openlaw.evaluation.metrics import QuestionResult, evaluate, recall_at_k
@@ -123,14 +124,23 @@ def _run_generation_gate(
     settings: Settings,
     embedder: QueryEmbedder,
 ) -> tuple[QuestionResult, ...] | None:
-    """Run full generation (recall@10 + unverifiable citations) when an
-    Anthropic key is configured; otherwise report NOT RUN and return None."""
-    if not settings.anthropic_api_key:
-        print("\n[Eval] unverifiable citations: NOT RUN (no OPENLAW_ANTHROPIC_API_KEY)")
-        return None
+    """Run full generation (recall@10 + unverifiable citations) when the
+    configured models' providers have keys; otherwise report NOT RUN.
 
-    adapter = AnthropicAdapter(settings.anthropic_api_key)
+    Goes through `build_llm_adapter` rather than constructing an
+    `AnthropicAdapter` directly, so the eval measures whatever this
+    deployment is actually configured to serve -- provider prefixes
+    included (`openrouter:z-ai/glm-5.3-flash`). Building the Anthropic
+    client unconditionally would have handed that whole string to the
+    Anthropic SDK as a model name: exactly the confusing runtime failure
+    the routing layer exists to make impossible.
+    """
     registry = ModelRegistry.from_settings(settings)
+    try:
+        adapter = build_llm_adapter(settings, registry)
+    except RuntimeError as error:
+        print(f"\n[Eval] unverifiable citations: NOT RUN ({error})")
+        return None
 
     results = []
     for question in questions:
@@ -168,8 +178,8 @@ def gate_verdict(
         )
     if generation_results is None:
         reasons.append(
-            "generation did not run (no Anthropic API key) -- unverifiable "
-            "citations were not counted"
+            "generation did not run (no API key for a configured model's "
+            "provider) -- unverifiable citations were not counted"
         )
     if reasons:
         return "CANNOT BE CERTIFIED: " + "; ".join(reasons)

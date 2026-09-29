@@ -27,11 +27,16 @@ check, a warm-up call, a CLI wrapper) would either double-write the
 hallucination/classifier-failure logs or, if that second call's events are
 silently discarded, lose them outright.
 
-**Required secrets are validated before anything expensive is built.**
-`production_app()` fails fast with a single, human-readable message naming
-every missing setting -- never a raw stack trace and never a service that
-starts and only fails once a real user asks a question. See
-`_require_settings` and `_require_anthropic_key`.
+**Required secrets are validated before anything expensive is built, and
+which secrets are required follows the configuration.** `production_app()`
+fails fast with a single, human-readable message naming every missing
+setting -- never a raw stack trace and never a service that starts and only
+fails once a real user asks a question. Provider selection is per-role (the
+provider is encoded in each model string -- see `openlaw.answers.routing`),
+so `_require_provider_keys` demands a key for exactly the providers this
+deployment's roles actually route to: an all-OpenRouter deployment is never
+asked for an Anthropic key, and never constructs an Anthropic client. See
+`_require_settings`, `_require_provider_keys` and `build_llm_adapter`.
 """
 
 from collections.abc import Callable
@@ -45,7 +50,14 @@ from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
-from openlaw.answers.models import ModelRegistry
+from openlaw.answers.models import LLMAdapter, ModelRegistry
+from openlaw.answers.openrouter_client import OpenRouterAdapter
+from openlaw.answers.routing import (
+    LLMProvider,
+    ModelRouteError,
+    RoutingAdapter,
+    referenced_providers,
+)
 from openlaw.api.app import create_app
 from openlaw.config import Settings, get_settings
 from openlaw.db.session import engine_from_settings, session_scope
@@ -186,24 +198,79 @@ def build_expand_fn(settings: Settings) -> ExpandFn:
     return expand
 
 
-def _require_anthropic_key(settings: Settings) -> None:
-    """Fail fast, with a clear message, when the Anthropic key is missing.
+#: Where each provider's API key lives on `Settings`, and the environment
+#: variable name to quote back at an operator who is missing it. OpenRouter's
+#: is deliberately unprefixed -- see `Settings.openrouter_api_key`.
+PROVIDER_KEYS: dict[LLMProvider, tuple[str, str]] = {
+    LLMProvider.ANTHROPIC: ("anthropic_api_key", "OPENLAW_ANTHROPIC_API_KEY"),
+    LLMProvider.OPENROUTER: ("openrouter_api_key", "OPENROUTER_API_KEY"),
+}
 
-    Every pipeline role (generator, translator, classifier -- see
-    `openlaw.answers.models.ModelRegistry`) goes through `AnthropicAdapter`,
-    so this key is required unconditionally, unlike the Voyage key: the
-    default query embedder is local `voyage-4-nano`
-    (`openlaw.retrieval.factory.build_query_embedder`), and that path needs
-    no Voyage key at all. Checked before `AnthropicAdapter` or the embedder
-    is constructed, so a missing key never pays for either.
+
+def _provider_key(settings: Settings, provider: LLMProvider) -> str:
+    """Return the configured API key for `provider`, or the empty string."""
+    attribute, _ = PROVIDER_KEYS[provider]
+    return getattr(settings, attribute) or ""
+
+
+def _require_provider_keys(settings: Settings, registry: ModelRegistry) -> None:
+    """Fail fast when a provider some role routes to has no API key.
+
+    Required keys follow the *configuration*, not a fixed list. Provider
+    selection is per-role (`openlaw.answers.routing`), so a deployment that
+    puts every role on OpenRouter genuinely does not need an Anthropic key,
+    and one that leaves the translator on Haiku genuinely needs both.
+    Demanding a key for a provider an operator is not using would make a
+    correct self-host look broken, which is the failure this walks the
+    registry to avoid -- per-language translator overrides included, since
+    an override is the one way a provider can be referenced by exactly one
+    language and nothing else.
+
+    An unroutable model string (a typo in the provider prefix) surfaces here
+    too, as the same readable startup error rather than a 500 on some
+    citizen's question hours later. Runs before `build_query_embedder`, so a
+    configuration mistake never pays for a ~2.5s local model load.
     """
-    if not settings.anthropic_api_key:
+    try:
+        providers = referenced_providers(registry)
+    except ModelRouteError as error:
+        raise RuntimeError(f"invalid model configuration: {error}") from error
+
+    missing = sorted(
+        PROVIDER_KEYS[provider][1]
+        for provider in providers
+        if not _provider_key(settings, provider)
+    )
+    if missing:
         raise RuntimeError(
-            "OPENLAW_ANTHROPIC_API_KEY is required to answer questions -- "
-            "generation, translation, and crisis classification all go "
-            "through it. Set it in your environment or .env file before "
-            "starting the service."
+            f"{', '.join(missing)} is required to answer questions: this "
+            "deployment's configured models route at least one pipeline role "
+            "(generation, translation, or crisis classification) to that "
+            "provider. Set it in your environment or .env file before "
+            "starting the service, or point every role at a provider you do "
+            "have a key for -- see .env.example."
         )
+
+
+def build_llm_adapter(settings: Settings, registry: ModelRegistry) -> LLMAdapter:
+    """Return the adapter that serves every role, routing per model string.
+
+    Both factories are registered but neither is *called* until some model
+    actually routes to it, so an Anthropic-only deployment never constructs
+    an OpenRouter client and vice versa. `_require_provider_keys` has
+    already guaranteed that whichever factory does run has a key.
+    """
+    _require_provider_keys(settings, registry)
+    return RoutingAdapter(
+        {
+            LLMProvider.ANTHROPIC: lambda: AnthropicAdapter(
+                _provider_key(settings, LLMProvider.ANTHROPIC)
+            ),
+            LLMProvider.OPENROUTER: lambda: OpenRouterAdapter(
+                _provider_key(settings, LLMProvider.OPENROUTER)
+            ),
+        }
+    )
 
 
 #: The exact shape the task brief specifies and `routes.ask` calls against
@@ -217,7 +284,7 @@ AnswerFn = Callable[[str, str | None, str | None], LocalisedAnswer]
 def build_answer_fn(settings: Settings) -> AnswerFn:
     """Return the production answer function used by the `/ask` endpoint.
 
-    Everything expensive -- the Anthropic client, the model registry, the
+    Everything expensive -- the provider client(s), the model registry, the
     glossary, the query embedder, the shared HTTP client -- is built exactly
     once, here, before this function returns. The closure it returns is
     called once per request and builds nothing heavier than a
@@ -231,10 +298,8 @@ def build_answer_fn(settings: Settings) -> AnswerFn:
     that captures it, which is the lifetime of the process, so there is no
     earlier point at which closing it would be correct.
     """
-    _require_anthropic_key(settings)
-
-    adapter = AnthropicAdapter(settings.anthropic_api_key)
     registry = ModelRegistry.from_settings(settings)
+    adapter = build_llm_adapter(settings, registry)
     glossary = load_glossary()
     embedder = build_query_embedder(settings)
     expand_fn = build_expand_fn(settings)

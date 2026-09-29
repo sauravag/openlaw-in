@@ -96,10 +96,10 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.generate import build_retrieval_context, persist_answer_events
 from openlaw.answers.models import LLMAdapter, ModelRegistry
 from openlaw.answers.validate import ValidatedAnswer
+from openlaw.api.deps import build_llm_adapter
 from openlaw.config import Settings, get_settings
 from openlaw.evaluation.dataset import MINIMUM_QUESTIONS, EvalQuestion, load_eval_set
 from openlaw.language.detect import SUPPORTED_LANGUAGES
@@ -472,11 +472,22 @@ def main() -> int:
     generation: Generation | None = None
     client: httpx.Client | None = None
 
-    if settings.anthropic_api_key:
+    # Routed through `build_llm_adapter`, not a hard-wired AnthropicAdapter:
+    # the configured model for a role may name its provider
+    # (`openrouter:z-ai/glm-5.3-flash`), and handing that whole string to the
+    # Anthropic SDK would fail confusingly. Skips generation entirely when a
+    # referenced provider has no key, exactly as the old Anthropic-key check
+    # did -- this review sheet is still useful without it.
+    registry = ModelRegistry.from_settings(settings)
+    try:
+        adapter = build_llm_adapter(settings, registry)
+    except RuntimeError as error:
+        print(f"[Review] generation skipped: {error}")
+    else:
         client = httpx.Client(timeout=60)
         generation = Generation(
-            adapter=AnthropicAdapter(settings.anthropic_api_key),
-            registry=ModelRegistry.from_settings(settings),
+            adapter=adapter,
+            registry=registry,
             retriever=_QdrantRetriever(settings, client),
             settings=settings,
         )

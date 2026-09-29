@@ -14,8 +14,10 @@ from fastapi.testclient import TestClient
 
 from sqlalchemy import create_engine
 
+from openlaw.answers.models import Completion, ModelRegistry
 from openlaw.api.deps import (
     QdrantGraphRetriever,
+    build_llm_adapter,
     _describe_one_error,
     _require_database_reachable,
     _require_proxy_acknowledgement,
@@ -412,3 +414,133 @@ def test_describe_one_error_handles_a_model_level_error_with_no_loc() -> None:
     described = _describe_one_error({"loc": (), "msg": "something went wrong", "type": "value_error"})
 
     assert described == "(configuration: something went wrong)"
+
+
+# --- provider keys are required by actual use, not by a fixed list --------
+
+
+def test_an_all_openrouter_deployment_does_not_need_an_anthropic_key() -> None:
+    """The failure this guards against is a correct self-host that looks
+    broken: an operator who has deliberately moved every role to OpenRouter
+    must not be told to set an Anthropic key they will never use."""
+    openrouter_roles = {
+        "model_generator": "openrouter:z-ai/glm-5.3-flash",
+        "model_translator": "openrouter:z-ai/glm-5.3-flash",
+        "model_classifier": "openrouter:z-ai/glm-5.3-flash",
+    }
+    settings = _settings(
+        anthropic_api_key=None, openrouter_api_key="sk-or", **openrouter_roles
+    )
+
+    build_llm_adapter(settings, ModelRegistry.from_settings(settings))  # must not raise
+
+
+def test_an_all_openrouter_deployment_still_demands_the_openrouter_key() -> None:
+    settings = _settings(
+        anthropic_api_key=None,
+        openrouter_api_key=None,
+        model_generator="openrouter:z-ai/glm-5.3-flash",
+        model_translator="openrouter:z-ai/glm-5.3-flash",
+        model_classifier="openrouter:z-ai/glm-5.3-flash",
+    )
+
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        build_llm_adapter(settings, ModelRegistry.from_settings(settings))
+
+
+def test_an_anthropic_only_deployment_does_not_need_an_openrouter_key() -> None:
+    settings = _settings(anthropic_api_key="sk-ant", openrouter_api_key=None)
+
+    build_llm_adapter(settings, ModelRegistry.from_settings(settings))  # must not raise
+
+
+def test_a_mixed_deployment_demands_both_keys_and_names_the_missing_one() -> None:
+    settings = _settings(
+        anthropic_api_key="sk-ant",
+        openrouter_api_key=None,
+        model_generator="openrouter:z-ai/glm-5.3-flash",
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        build_llm_adapter(settings, ModelRegistry.from_settings(settings))
+
+    assert "OPENROUTER_API_KEY" in str(excinfo.value)
+    assert "OPENLAW_ANTHROPIC_API_KEY" not in str(excinfo.value)
+
+
+def test_a_provider_referenced_only_by_a_language_override_still_needs_its_key() -> None:
+    """A per-language translator override is the one way a provider can be
+    referenced by exactly one language and nothing else -- missing it would
+    leave, say, every Marathi question failing while everything else works."""
+    settings = _settings(
+        anthropic_api_key="sk-ant",
+        openrouter_api_key=None,
+        model_translator_overrides={"mr": "openrouter:z-ai/glm-5.3-flash"},
+    )
+
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        build_llm_adapter(settings, ModelRegistry.from_settings(settings))
+
+
+def test_an_unknown_provider_prefix_fails_at_startup_naming_role_and_value() -> None:
+    """A typo must be a readable startup refusal, not a 500 on a question."""
+    settings = _settings(anthropic_api_key="sk-ant", model_generator="gpt5:some-model")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        build_llm_adapter(settings, ModelRegistry.from_settings(settings))
+
+    message = str(excinfo.value)
+    assert "OPENLAW_MODEL_GENERATOR" in message
+    assert "gpt5:some-model" in message
+
+
+def test_build_answer_fn_requires_the_openrouter_key_before_the_embedder(
+    monkeypatch,
+) -> None:
+    """Same fail-before-anything-expensive guarantee the Anthropic path has:
+    a missing key must not cost a ~2.5s local model load first."""
+
+    def _boom(settings: Settings) -> None:
+        raise AssertionError("embedder must not be built before the key check")
+
+    monkeypatch.setattr("openlaw.api.deps.build_query_embedder", _boom)
+
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        build_answer_fn(
+            _settings(
+                anthropic_api_key=None,
+                openrouter_api_key=None,
+                model_generator="openrouter:z-ai/glm-5.3-flash",
+                model_translator="openrouter:z-ai/glm-5.3-flash",
+                model_classifier="openrouter:z-ai/glm-5.3-flash",
+            )
+        )
+
+
+def test_no_provider_client_is_constructed_for_an_unused_provider(monkeypatch) -> None:
+    """Laziness is the mechanism behind "must not construct that client":
+    proven by making the OpenRouter constructor explode if it is ever
+    reached, then routing a real call through the Anthropic side."""
+    built: list[str] = []
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise AssertionError("an unused provider client must never be built")
+
+    class _FakeAnthropic:
+        def __init__(self, api_key: str) -> None:
+            built.append("anthropic")
+
+        def complete(self, model, system, messages, output_schema, max_tokens):
+            return Completion(text=model)
+
+    monkeypatch.setattr("openlaw.api.deps.OpenRouterAdapter", _boom)
+    monkeypatch.setattr("openlaw.api.deps.AnthropicAdapter", _FakeAnthropic)
+    settings = _settings(anthropic_api_key="sk-ant")
+
+    adapter = build_llm_adapter(settings, ModelRegistry.from_settings(settings))
+
+    assert built == []  # nothing is built until a call actually routes
+    assert adapter.complete("claude-haiku-4-5", "sys", [], None, 8).text == (
+        "claude-haiku-4-5"
+    )
+    assert built == ["anthropic"]
