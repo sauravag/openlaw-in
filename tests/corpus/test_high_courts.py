@@ -47,8 +47,23 @@ def test_get_high_court_returns_the_registered_entry() -> None:
 
 
 def test_get_high_court_raises_a_helpful_error_for_an_unknown_slug() -> None:
+    # Was "bombay", which is now a registered court. The assertion is about
+    # the error naming what IS available, so the example only has to be a
+    # slug no court will ever have -- not merely one not yet onboarded.
     with pytest.raises(KeyError, match="punjab-and-haryana"):
-        get_high_court("bombay")
+        get_high_court("not-a-real-court")
+
+
+def test_every_registered_court_has_unique_codes_and_a_matching_spelling() -> None:
+    """The two datasets spell the same court differently; a wrong code does
+    not fail loudly, it silently drops every row as unresolved."""
+    slugs = [c.slug for c in HIGH_COURTS.values()]
+    vaquill = [c.vaquill_court_code for c in HIGH_COURTS.values()]
+    assert len(set(slugs)) == len(slugs)
+    assert len(set(vaquill)) == len(vaquill)
+    for court in HIGH_COURTS.values():
+        assert court.kanoongpt_court_code == court.vaquill_court_code.replace("_", "~")
+        assert court.source_file.endswith(".parquet")
 
 
 def test_high_court_is_frozen() -> None:
