@@ -202,8 +202,14 @@ def chunk_from_point(point: dict[str, Any]) -> RetrievedChunk | None:
             score=float(point.get("score") or 0.0),
             kind=kind,
             title=payload.get("title"),
+            case_id=payload.get("case_id"),
             court_code=payload.get("court_code"),
             decision_date=payload.get("decision_date"),
+            # `or ()` rather than a bare `.get`: a provision payload has no
+            # `judges` key and a judgment payload can carry an explicit
+            # null, and neither must turn into a validation error that
+            # silently drops the chunk out of retrieval entirely.
+            judges=tuple(payload.get("judges") or ()),
             headnote=payload.get("headnote"),
         )
     except ValidationError:

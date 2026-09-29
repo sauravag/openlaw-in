@@ -23,6 +23,7 @@ from openlaw.answers.escalation import crisis_response as crisis_text
 from openlaw.answers.validate import ValidatedAnswer
 from openlaw.api.jurisdictions import INDIAN_STATES_AND_UTS
 from openlaw.language.pipeline import LocalisedAnswer
+from openlaw.retrieval.context import ChunkKind
 
 #: Languages the API will actually accept and serve (final review, H4).
 #: Deliberately narrower than `openlaw.language.detect.SUPPORTED_LANGUAGES`
@@ -159,13 +160,38 @@ class AskRequest(BaseModel):
 
 
 class SourceCard(BaseModel):
-    """One verified citation rendered to the reader."""
+    """One verified citation of the LAW, rendered to the reader.
+
+    Mirrors `openlaw.answers.validate.Source` field for field. It used to
+    mirror only three of them -- `chunk_id`, `source_url`, `title` -- which
+    meant `/ask` published no `kind`, no `case_id`, no `decision_date`, no
+    `judges` and no `headnote`, so every judgment reached the browser as a
+    null title above a raw tarball URL and `web/lib/sourceKind.ts` had to
+    infer the citation's kind from its hostname. The server has always known
+    all of it; this shape was simply throwing it away.
+
+    Nothing is composed or inferred here: an absent field means the corpus
+    does not record it (no judgment payload carries `title`, no provision
+    payload carries `case_id`), and a renderer must fall back honestly
+    rather than print a placeholder.
+
+    There is deliberately no shape on this API for a citation of the user's
+    own uploaded document. `openlaw.answers.validate.DocumentCitation` has
+    no `source_url` and no counterpart here: the source list a reader treats
+    as legal provenance can only ever be filled from the corpus.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     chunk_id: str
     source_url: str
+    kind: ChunkKind
     title: str | None = None
+    case_id: str | None = None
+    court_code: str | None = None
+    decision_date: str | None = None
+    judges: tuple[str, ...] = ()
+    headnote: str | None = None
 
 
 class AskResponse(BaseModel):
@@ -278,7 +304,13 @@ def to_response(
             SourceCard(
                 chunk_id=source.chunk_id,
                 source_url=source.source_url,
+                kind=source.kind,
                 title=source.title,
+                case_id=source.case_id,
+                court_code=source.court_code,
+                decision_date=source.decision_date,
+                judges=source.judges,
+                headnote=source.headnote,
             )
             for source in localised.answer.sources
         ],

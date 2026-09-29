@@ -46,16 +46,36 @@ function kindLabel(kind: SourceKind, strings: UIStrings): string {
 }
 
 /**
+ * How a citation names itself, in descending order of what the response
+ * actually supports.
+ *
+ * `title` when the corpus recorded one (every provision). Otherwise the case
+ * id, which every judgment payload carries and which -- since Plan 6 Task 7 --
+ * actually reaches the browser: printing it is quoting the corpus, not
+ * composing a citation. Otherwise the kind ("Court judgment"), never `null`
+ * and never the raw tarball URL the first UI printed.
+ *
+ * Nothing here is assembled from parts: no court is named from `court_code`
+ * (`"3_22"` is not a court's name) and no case name is built from judges or
+ * dates. A citation the reader cannot check against its own source is worse
+ * than a vague one.
+ */
+function sourceLabel(source: SourceCard, kind: SourceKind, strings: UIStrings): string {
+  // Truthiness, not `!== null`: the field is also absent (rather than null)
+  // if a server ever omits it, and an empty string is not a name either.
+  // Either would otherwise render as a blank link with no accessible name.
+  if (source.title) return source.title
+  if (source.case_id) return strings.sourceCaseLabel(source.case_id)
+  return kindLabel(kind, strings)
+}
+
+/**
  * One citation card.
  *
- * **The display label never invents anything.** `title` is used when the API
- * sends one; when it does not -- which is every judgment today, because
- * `openlaw.api.schemas.SourceCard` carries no `case_id`, `decision_date`,
- * `judges` or `headnote` to build a citation from -- the label falls back to
- * the kind ("Court judgment"), not to `null`, and not to the raw tarball URL
- * the previous UI printed. Composing "Case 1963_INSC_244" here would be
- * fabricating a citation the response does not support, and naming a court
- * from a hostname would be fabricating provenance. See `lib/sourceKind.ts`.
+ * **The display label never invents anything** -- see `sourceLabel`. The kind
+ * is printed in words above the link whenever the label is something other
+ * than the kind itself, so the reader is never shown a bare id with no idea
+ * what sort of authority it is.
  *
  * The URL still has to be reachable -- that is the product's whole trust
  * premise -- so the host is printed underneath in plain words, outside the
@@ -64,7 +84,7 @@ function kindLabel(kind: SourceKind, strings: UIStrings): string {
  */
 function SourceItem({ source, strings }: { source: SourceCard; strings: UIStrings }) {
   const kind = classifySource(source)
-  const label = source.title ?? kindLabel(kind, strings)
+  const label = sourceLabel(source, kind, strings)
   const host = sourceHost(source.source_url)
   const isLinkable = isSafeSourceUrl(source.source_url)
 
@@ -76,7 +96,7 @@ function SourceItem({ source, strings }: { source: SourceCard; strings: UIString
         </svg>
       </span>
       <div className="min-w-0 flex-1">
-        {source.title !== null && (
+        {label !== kindLabel(kind, strings) && (
           <p className={`text-xs font-bold ${KIND_TEXT_CLASSES[kind]}`}>
             {kindLabel(kind, strings)}
           </p>
@@ -93,6 +113,11 @@ function SourceItem({ source, strings }: { source: SourceCard; strings: UIString
         ) : (
           <span className="font-semibold text-ink">{label}</span>
         )}
+        {source.decision_date ? (
+          <p className="mt-1 text-sm text-muted">
+            {strings.sourceDecidedOn(source.decision_date)}
+          </p>
+        ) : null}
         {host !== null && (
           <p className="mt-1 text-sm break-words text-muted">{strings.sourceOpensAt(host)}</p>
         )}

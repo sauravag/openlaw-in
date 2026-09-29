@@ -8,12 +8,40 @@
  * `AnswerView.test.tsx` and `RefusalNotice.test.tsx` are the tripwire.
  */
 
-/** One verified citation, safe to render because every retrievable chunk
- * carries a `source_url` by construction (Task 4/5). */
+/**
+ * What kind of legal material a citation points at. Mirrors
+ * `openlaw.retrieval.context.ChunkKind`, serialised by value.
+ */
+export type ChunkKind = 'provision' | 'judgment'
+
+/**
+ * One verified citation of the LAW, safe to render because every retrievable
+ * chunk carries a `source_url` by construction (Task 4/5). Mirrors
+ * `openlaw.api.schemas.SourceCard`.
+ *
+ * `kind` is sent by the server, which has always known it. Until Plan 6 Task
+ * 7 it was not on the wire, and `lib/sourceKind.ts` inferred it from the
+ * URL's hostname -- a heuristic that could mislabel the kind of authority a
+ * citation carries. The judgment fields below arrived in the same change;
+ * each is `null`/empty when the corpus does not record it (no judgment
+ * payload has a `title`, no provision payload has a `case_id`), so a
+ * renderer must fall back honestly rather than print a placeholder.
+ *
+ * There is deliberately no shape here for a citation of the user's own
+ * uploaded document. `openlaw.answers.validate.DocumentCitation` has no
+ * `source_url` and no counterpart on this API: the list a reader treats as
+ * legal provenance can only be filled from the corpus.
+ */
 export interface SourceCard {
   chunk_id: string
   source_url: string
+  kind: ChunkKind
   title: string | null
+  case_id: string | null
+  court_code: string | null
+  decision_date: string | null
+  judges: string[]
+  headnote: string | null
 }
 
 /**

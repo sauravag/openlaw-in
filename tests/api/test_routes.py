@@ -34,6 +34,7 @@ from openlaw.api.app import create_app
 from openlaw.config import Settings
 from openlaw.db.models import Base
 from openlaw.language.pipeline import LocalisedAnswer
+from openlaw.retrieval.context import ChunkKind
 
 JWT_SECRET = "test-secret-at-least-32-bytes-long!!"
 
@@ -79,7 +80,16 @@ def _validated_answer(
     return ValidatedAnswer(
         unverified_summary=unverified_summary,
         claims=(Claim(text=claim_text, chunk_ids=(chunk_id,)),),
-        sources=(Source(chunk_id=chunk_id, source_url=source_url, title=title),),
+        # `kind` is required on `Source` (Plan 6 Task 7): the server always
+        # knows it, so the browser never has to guess it from a hostname.
+        sources=(
+            Source(
+                chunk_id=chunk_id,
+                source_url=source_url,
+                title=title,
+                kind=ChunkKind.PROVISION,
+            ),
+        ),
         is_answerable=True,
     )
 

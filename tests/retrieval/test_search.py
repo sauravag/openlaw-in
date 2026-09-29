@@ -553,3 +553,71 @@ def test_search_raises_on_a_transport_error() -> None:
     with httpx.Client(timeout=1) as client:
         with pytest.raises(httpx.HTTPError):
             search(client, "http://127.0.0.1:1", "theft", [0.1] * 1024, limit=1)
+
+
+# --- the payload fields a citation needs, no longer discarded --------------
+#
+# Plan 6 Task 7. `case_id` and `judges` were read off the payload only to
+# decide `ChunkKind` (case_id) or not at all (judges), so a judgment reached
+# the browser as a null title above a raw tarball URL. They are carried on
+# the chunk now, and through `openlaw.answers.validate.Source` from there.
+
+
+def test_chunk_from_point_carries_the_case_id_and_judges_of_a_judgment() -> None:
+    point = {
+        "score": 0.75,
+        "payload": {
+            "chunk_id": "2016_INSC_1151_001",
+            "case_id": "2016_INSC_1151",
+            "text": "the appeal is dismissed",
+            "source_url": "https://indian-supreme-court-judgments.s3.amazonaws.com/x.tar",
+            "judges": ["Dipak Misra", "A M Khanwilkar"],
+        },
+    }
+
+    chunk = chunk_from_point(point)
+
+    assert chunk is not None
+    assert chunk.case_id == "2016_INSC_1151"
+    assert chunk.judges == ("Dipak Misra", "A M Khanwilkar")
+
+
+def test_chunk_from_point_leaves_judgment_fields_empty_for_a_provision() -> None:
+    """A provision payload has no `case_id` and no `judges` key at all. The
+    absent value must be an honest empty, never a fabricated placeholder --
+    and must not make the chunk unusable."""
+    point = {
+        "score": 0.87,
+        "payload": {
+            "chunk_id": "IND_central_2385_388",
+            "text": "An order of a District Judge ...",
+            "source_url": "https://www.indiacode.nic.in/handle/123456789/2385",
+            "title": "The Indian Succession Act, 1925",
+        },
+    }
+
+    chunk = chunk_from_point(point)
+
+    assert chunk is not None
+    assert chunk.case_id is None
+    assert chunk.judges == ()
+
+
+def test_chunk_from_point_survives_an_explicit_null_judges_payload() -> None:
+    """A stored `"judges": null` must not drop the whole chunk out of
+    retrieval on a type error."""
+    point = {
+        "score": 0.5,
+        "payload": {
+            "chunk_id": "c1",
+            "case_id": "2016_INSC_1151",
+            "text": "t",
+            "source_url": "https://example.gov.in/c1",
+            "judges": None,
+        },
+    }
+
+    chunk = chunk_from_point(point)
+
+    assert chunk is not None
+    assert chunk.judges == ()

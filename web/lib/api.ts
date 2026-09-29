@@ -44,6 +44,15 @@ export type AskOutcome =
   | { kind: "answer"; data: AnswerData }
   | { kind: "refused"; status: number; data: RefusalData };
 
+/**
+ * Deliberately checks only the two fields a citation is useless without: the
+ * id it is keyed by and the URL the reader clicks. `kind` and the judgment
+ * fields (Plan 6 Task 7) are required on the wire but not asserted here --
+ * a deploy skew that omitted them would otherwise turn every answer into a
+ * refusal, and `SourceList`/`classifySource` already degrade an absent value
+ * to the neutral "Government document" label rather than a wrong one. A
+ * vaguer label beats a blank page.
+ */
 function isSourceCard(value: unknown): value is SourceCard {
   return (
     typeof value === "object" &&

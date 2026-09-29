@@ -28,11 +28,17 @@ import pytest
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.models import ModelRegistry, ModelRole, StubAdapter
-from openlaw.answers.schema import Claim
-from openlaw.answers.validate import DroppedClaim, Source, ValidatedAnswer
+from openlaw.answers.schema import Claim, DocumentClaim
+from openlaw.answers.validate import (
+    DocumentCitation,
+    DroppedClaim,
+    Source,
+    ValidatedAnswer,
+)
 from openlaw.config import get_settings
 from openlaw.language.glossary import Glossary, GlossaryTerm
 from openlaw.language.translate import translate_answer, translate_query
+from openlaw.retrieval.context import ChunkKind
 
 TRANSLATED = json.dumps(
     {
@@ -64,6 +70,7 @@ def _answer() -> ValidatedAnswer:
                 chunk_id="a",
                 source_url="https://www.indiacode.nic.in/handle/123456789/1",
                 title="Model Tenancy Act",
+                kind=ChunkKind.PROVISION,
             ),
         ),
         is_answerable=True,
@@ -80,8 +87,16 @@ def _two_claim_answer() -> ValidatedAnswer:
             Claim(text="Notice must be given first.", chunk_ids=("b",)),
         ),
         sources=(
-            Source(chunk_id="a", source_url="https://example.gov.in/a"),
-            Source(chunk_id="b", source_url="https://example.gov.in/b"),
+            Source(
+                chunk_id="a",
+                source_url="https://example.gov.in/a",
+                kind=ChunkKind.PROVISION,
+            ),
+            Source(
+                chunk_id="b",
+                source_url="https://example.gov.in/b",
+                kind=ChunkKind.PROVISION,
+            ),
         ),
         is_answerable=True,
     )
@@ -356,7 +371,7 @@ def test_translation_preserves_none_unverified_summary_when_not_answerable() -> 
     answer = ValidatedAnswer(
         unverified_summary=None,
         claims=(Claim(text="A refund is required.", chunk_ids=("a",)),),
-        sources=(Source(chunk_id="a", source_url="https://example.gov.in/a"),),
+        sources=(Source(chunk_id="a", source_url="https://example.gov.in/a", kind=ChunkKind.PROVISION),),
         is_answerable=False,
     )
     result = translate_answer(
@@ -467,3 +482,43 @@ def test_answer_prompt_keeps_quoted_statutory_text_in_English() -> None:
 
     assert "quote" in system
     assert "english" in system
+
+
+def test_translated_answer_drops_document_claims_rather_than_emitting_english() -> (
+    None
+):
+    """Plan 6 Task 7. `ANSWER_SYSTEM_PROMPT` asks the translator for `claims`
+    only, so a document claim reaching this function has no translated form.
+    Carrying it through would put an English sentence about the person's own
+    lease inside an otherwise-Hindi answer -- the same defect the final
+    review's H1 fixed on the crisis path. It is dropped explicitly here, and
+    with it its citations, so nothing untranslated reaches the reader. A
+    document claim cannot occur in production yet (generation is not wired
+    to a `DocumentContext`); this pins the safe behaviour until the
+    translator contract covers both lists.
+    """
+    answer = ValidatedAnswer(
+        unverified_summary=_answer().unverified_summary,
+        claims=_answer().claims,
+        sources=_answer().sources,
+        document_claims=(
+            DocumentClaim(text="Your lease says 11 months.", excerpt_ids=("doc:a:p1:0",)),
+        ),
+        document_citations=(
+            DocumentCitation(
+                excerpt_id="doc:a:p1:0",
+                document_id="a",
+                filename="lease.pdf",
+                page_number=1,
+            ),
+        ),
+        is_answerable=True,
+    )
+
+    result = translate_answer(
+        answer, "hi", StubAdapter([TRANSLATED]), ModelRegistry(), _glossary()
+    )
+
+    assert result.document_claims == ()
+    assert result.document_citations == ()
+    assert "Your lease says 11 months." not in result.model_dump_json()

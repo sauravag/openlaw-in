@@ -259,6 +259,19 @@ def translate_answer(
             for index, claim in enumerate(answer.claims)
         ),
         sources=answer.sources,
+        # Document claims are dropped, explicitly, not by default (Plan 6
+        # Task 7). `ANSWER_SYSTEM_PROMPT` asks the translator for `claims`
+        # only, so a document claim has no translated form to reassemble;
+        # carrying the English text through would put an English sentence
+        # about the person's own lease inside an otherwise-Hindi answer --
+        # the defect the final review's H1 fixed on the crisis path. Their
+        # citations go with them: a citation with no claim to support is a
+        # pointer to nothing. Unreachable today (generation is not yet
+        # wired to a `DocumentContext`); extending the translator contract
+        # to both lists is a prerequisite for documents on the non-English
+        # path, not something to paper over here.
+        document_claims=(),
+        document_citations=(),
         dropped=answer.dropped,
         is_answerable=answer.is_answerable,
     )

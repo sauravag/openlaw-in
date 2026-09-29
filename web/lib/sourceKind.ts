@@ -1,40 +1,32 @@
 import type { SourceCard } from './types'
 
 /**
- * What kind of legal material a citation points at, derived client-side.
+ * What kind of legal material a citation points at.
  *
- * **Why this is derived rather than read off the response.** The backend
- * knows the answer exactly -- `openlaw.retrieval.context.ChunkKind` is set
- * from the Qdrant payload (`chunk_from_point`: a `case_id` means a
- * judgment) -- but that field is dropped twice on the way out:
- * `openlaw.answers.validate.Source` keeps only `chunk_id`/`source_url`/
- * `title`, and `openlaw.api.schemas.SourceCard` mirrors exactly those three.
- * So `/ask` gives the browser no `kind`, no `case_id`, no `decision_date`,
- * no `judges` and no `headnote` -- see the redesign report. The right fix is
- * to widen `SourceCard`; until then this classifies from what is actually on
- * the wire.
+ * **Read off the response, not guessed.** The backend knows this exactly --
+ * `openlaw.retrieval.context.ChunkKind` is set from the Qdrant payload
+ * (`chunk_from_point`: a `case_id` means a judgment) -- and since Plan 6
+ * Task 7 it is on the wire as `SourceCard.kind`. This file used to infer it
+ * instead, from the URL's hostname plus whether `title` was null, because
+ * `openlaw.answers.validate.Source` dropped the real value on the way out.
+ * That heuristic was conservative but still capable of putting the wrong
+ * kind of authority on a legal citation; it is gone.
  *
- * It is deliberately conservative, because a wrong label on a legal citation
- * is worse than a vague one:
+ * `document` stays as the honest "we cannot tell" label for a value this
+ * build does not recognise -- a server that grows a third `ChunkKind` gets
+ * a neutral word here, never a wrong one.
  *
- * - `statute` is claimed only for an India Code host. That is where every
- *   `acts_india_v1` provision's `source_url` points
- *   (`openlaw.corpus.sources.resolve_provision_url`), and nothing else in
- *   the corpus is published there.
- * - `judgment` is claimed only for a citation with NO title. Judgment
- *   payloads carry no `title` key at all (`openlaw.index.upsert.build_point`
- *   / `hc_upsert.build_hc_point`), so `title === null` plus a non-statute
- *   host is exactly the judgment case today.
- * - `document` is the honest "we cannot tell from here" label -- it never
- *   asserts anything the payload does not support.
- *
- * No court is ever inferred from a hostname: a bucket name is not a
- * jurisdiction, and naming the wrong court would be fabricating provenance.
+ * No court is ever inferred from a hostname, and none is composed from
+ * `court_code` either: a bucket name is not a jurisdiction and `"3_22"` is
+ * not the name of a court, so printing one would be fabricating provenance.
  */
 export type SourceKind = 'statute' | 'judgment' | 'document'
 
-/** India Code -- the government's statute repository. */
-const STATUTE_HOST = 'indiacode.nic.in'
+/** `ChunkKind` (the wire value) to the word this interface shows. */
+const KIND_BY_CHUNK_KIND: Record<string, SourceKind> = {
+  provision: 'statute',
+  judgment: 'judgment',
+}
 
 /**
  * The bare hostname of `url`, or `null` when it is not a URL.
@@ -50,16 +42,9 @@ export function sourceHost(url: string): string | null {
   }
 }
 
-/** Classify one citation. See `SourceKind` for why this is so cautious. */
+/** Classify one citation from the kind the server sent. */
 export function classifySource(source: SourceCard): SourceKind {
-  const host = sourceHost(source.source_url)
-  if (host === null) {
-    return 'document'
-  }
-  if (host === STATUTE_HOST || host.endsWith(`.${STATUTE_HOST}`)) {
-    return 'statute'
-  }
-  return source.title === null ? 'judgment' : 'document'
+  return KIND_BY_CHUNK_KIND[source.kind] ?? 'document'
 }
 
 /**

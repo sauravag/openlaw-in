@@ -18,7 +18,14 @@ class ChunkKind(Enum):
 
 
 class RetrievedChunk(BaseModel):
-    """One retrieved chunk, with everything needed to render a citation."""
+    """One retrieved chunk, with everything needed to render a citation.
+
+    The optional fields are the ones only some payloads carry: `title` on a
+    provision, `case_id`/`court_code`/`decision_date`/`judges`/`headnote` on
+    a judgment. An absent value stays absent (`None`, or an empty tuple for
+    `judges`) and is never filled in with a placeholder — a renderer must be
+    able to tell "the corpus does not record this" from a real value.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -28,8 +35,10 @@ class RetrievedChunk(BaseModel):
     score: float
     kind: ChunkKind
     title: str | None = None
+    case_id: str | None = None
     court_code: str | None = None
     decision_date: str | None = None
+    judges: tuple[str, ...] = ()
     headnote: str | None = None
 
 

@@ -55,6 +55,15 @@ export interface UIStrings {
   sourceKindStatute: string;
   sourceKindJudgment: string;
   sourceKindDocument: string;
+  /**
+   * Names an untitled judgment by the case id the response carries. Judgment
+   * payloads have no `title`, so without this the card could only show the
+   * kind. It prints the corpus's own id verbatim -- it never composes a case
+   * name or a court, which the response does not support.
+   */
+  sourceCaseLabel: (caseId: string) => string;
+  /** Secondary line under a citation, naming the date it was decided. */
+  sourceDecidedOn: (date: string) => string;
   /** Secondary line under a citation, naming the host it opens. */
   sourceOpensAt: (host: string) => string;
   notLegalAdvice: string;
@@ -105,6 +114,8 @@ const EN: UIStrings = {
   sourceKindStatute: "Act or regulation",
   sourceKindJudgment: "Court judgment",
   sourceKindDocument: "Government document",
+  sourceCaseLabel: (caseId) => `Case ${caseId}`,
+  sourceDecidedOn: (date) => `Decided ${date}`,
   sourceOpensAt: (host) => `Opens ${host}`,
   notLegalAdvice: "This is legal information, not legal advice.",
 };
@@ -154,6 +165,8 @@ const HI: UIStrings = {
   sourceKindStatute: "अधिनियम या नियम",
   sourceKindJudgment: "अदालत का फैसला",
   sourceKindDocument: "सरकारी दस्तावेज़",
+  sourceCaseLabel: (caseId) => `मामला ${caseId}`,
+  sourceDecidedOn: (date) => `निर्णय की तारीख़ ${date}`,
   sourceOpensAt: (host) => `${host} खुलेगा`,
   notLegalAdvice: "यह कानूनी जानकारी है, कानूनी सलाह नहीं।",
 };

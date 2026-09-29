@@ -306,7 +306,13 @@ def test_render_claims_never_reads_unverified_summary() -> None:
     answer = ValidatedAnswer(
         unverified_summary="THIS MUST NEVER APPEAR",
         claims=(Claim(text="A refund is required.", chunk_ids=("a",)),),
-        sources=(Source(chunk_id="a", source_url="https://example.gov.in"),),
+        sources=(
+            Source(
+                chunk_id="a",
+                source_url="https://example.gov.in",
+                kind=ChunkKind.PROVISION,
+            ),
+        ),
         is_answerable=True,
     )
     rendered = review_translations._render_claims(answer)

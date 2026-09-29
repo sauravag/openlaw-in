@@ -1,17 +1,28 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import AnswerView from '../AnswerView'
-import type { AnswerData } from '@/lib/types'
+import type { AnswerData, SourceCard } from '@/lib/types'
+
+/** `SourceCard` gained `kind` and the judgment fields in Plan 6 Task 7; this
+ * keeps every fixture below to the one interesting field per test. */
+function card(overrides: Partial<SourceCard> = {}): SourceCard {
+  return {
+    chunk_id: 'a',
+    source_url: 'https://www.indiacode.nic.in/handle/123456789/1',
+    kind: 'provision',
+    title: 'Model Tenancy Act',
+    case_id: null,
+    court_code: null,
+    decision_date: null,
+    judges: [],
+    headnote: null,
+    ...overrides,
+  }
+}
 
 const baseAnswer: AnswerData = {
   answer: 'The deposit must be refunded within one month.',
-  sources: [
-    {
-      chunk_id: 'a',
-      source_url: 'https://www.indiacode.nic.in/handle/123456789/1',
-      title: 'Model Tenancy Act',
-    },
-  ],
+  sources: [card()],
   language: 'en',
   corpus_version: 'v2026.08',
   footer: 'This is legal information, not legal advice. NALSA: 15100',
@@ -111,7 +122,13 @@ describe('AnswerView', () => {
       <AnswerView
         data={{
           ...baseAnswer,
-          sources: [{ chunk_id: 'b', source_url: 'http://example.com/insecure', title: 'Bad Source' }],
+          sources: [
+            card({
+              chunk_id: 'b',
+              source_url: 'http://example.com/insecure',
+              title: 'Bad Source',
+            }),
+          ],
         }}
       />,
     )

@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import { classifySource, sourceHost } from '../sourceKind'
+import type { SourceCard } from '../types'
+
+function card(overrides: Partial<SourceCard> = {}): SourceCard {
+  return {
+    chunk_id: 'a',
+    source_url: 'https://www.indiacode.nic.in/handle/123456789/2385',
+    kind: 'provision',
+    title: 'Model Tenancy Act',
+    case_id: null,
+    court_code: null,
+    decision_date: null,
+    judges: [],
+    headnote: null,
+    ...overrides,
+  }
+}
 
 describe('sourceHost', () => {
   it('returns the bare hostname so the reader can see where a link goes', () => {
@@ -14,55 +30,31 @@ describe('sourceHost', () => {
 })
 
 describe('classifySource', () => {
-  it('classifies an India Code URL as a statute', () => {
-    expect(
-      classifySource({
-        chunk_id: 'a',
-        source_url: 'https://www.indiacode.nic.in/handle/123456789/2385',
-        title: 'Model Tenancy Act',
-      }),
-    ).toBe('statute')
+  it('reads the kind the server sent instead of guessing from the URL', () => {
+    expect(classifySource(card({ kind: 'provision' }))).toBe('statute')
+    expect(classifySource(card({ kind: 'judgment' }))).toBe('judgment')
   })
 
-  it('classifies an India Code URL with no title as a statute, on the host alone', () => {
+  it('does not reclassify a judgment by its hostname', () => {
+    // A judgment served from India Code, or a statute served from anywhere
+    // else, must keep the kind the corpus recorded. The old hostname
+    // heuristic got both of these wrong.
     expect(
-      classifySource({
-        chunk_id: 'a',
-        source_url: 'https://indiacode.nic.in/handle/1',
-        title: null,
-      }),
-    ).toBe('statute')
-  })
-
-  it('classifies an untitled judgment-archive URL as a judgment', () => {
-    // The real shape of a `sc_judgments_v1` citation: the API sends
-    // `title: null` (see `openlaw.api.schemas.SourceCard`) and a tarball URL.
-    expect(
-      classifySource({
-        chunk_id: 'b',
-        source_url:
-          'https://indian-supreme-court-judgments.s3.amazonaws.com/data/tar/1963_INSC_244.tar',
-        title: null,
-      }),
+      classifySource(
+        card({ kind: 'judgment', source_url: 'https://indiacode.nic.in/x', title: null }),
+      ),
     ).toBe('judgment')
+    expect(
+      classifySource(card({ kind: 'provision', source_url: 'https://egazette.gov.in/1' })),
+    ).toBe('statute')
   })
 
-  it('does not claim a titled non-statute source is a judgment', () => {
-    // Conservative on purpose: "judgment" is only claimed where the corpus
-    // makes it certain (an untitled, non-India-Code citation). Anything else
-    // gets the neutral label rather than a guess.
-    expect(
-      classifySource({
-        chunk_id: 'c',
-        source_url: 'https://egazette.gov.in/notification/1',
-        title: 'Some notification',
-      }),
-    ).toBe('document')
-  })
-
-  it('falls back to the neutral kind when the URL cannot be parsed', () => {
-    expect(
-      classifySource({ chunk_id: 'd', source_url: 'not a url', title: 'Titled' }),
-    ).toBe('document')
+  it('falls back to the neutral kind for a value it does not recognise', () => {
+    // Defence in depth at the boundary: an unknown kind is labelled with the
+    // honest "we cannot tell" word rather than guessed at, and never
+    // mislabelled as an Act or a judgment.
+    expect(classifySource(card({ kind: 'something-new' as SourceCard['kind'] }))).toBe(
+      'document',
+    )
   })
 })
