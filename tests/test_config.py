@@ -369,3 +369,88 @@ def test_compose_passes_every_role_model_and_both_provider_keys() -> None:
         assert f"{var}: ${{{var}" in compose_text, f"{var} is not passed to `api`"
 
     assert "OPENLAW_ANTHROPIC_API_KEY:?" not in compose_text
+
+
+# --- Plan 6, Task 1: conversations and document uploads ---------------------
+
+
+def test_uploads_enabled_defaults_to_true(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+
+    assert Settings().uploads_enabled is True
+
+
+def test_uploads_enabled_is_a_working_kill_switch(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_UPLOADS_ENABLED", "false")
+
+    assert Settings().uploads_enabled is False
+
+
+def test_document_encryption_key_defaults_to_none(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+
+    assert Settings().document_encryption_key is None
+
+
+def test_document_encryption_key_reads_from_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_DOCUMENT_ENCRYPTION_KEY", "dGVzdC1rZXktdmFsdWU=")
+
+    assert Settings().document_encryption_key == "dGVzdC1rZXktdmFsdWU="
+
+
+def test_document_limit_defaults_match_the_pinned_values(monkeypatch) -> None:
+    """Task 1 done-when: every limit is a named constant/default read from
+    one place -- these are the exact values from the task brief."""
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+
+    settings = Settings()
+
+    assert settings.max_upload_bytes == 10_485_760
+    assert settings.max_document_pages == 20
+    assert settings.max_documents_per_conversation == 3
+    assert settings.anonymous_upload_ttl_hours == 24
+    assert settings.anonymous_conversation_ttl_hours == 24
+    assert settings.document_audit_log_path == Path("data/document_access.jsonl")
+
+
+def test_document_limits_can_be_overridden_via_environment(monkeypatch) -> None:
+    monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", "/tmp/v")
+    monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", "/tmp/k")
+    monkeypatch.setenv("OPENLAW_MAX_UPLOAD_BYTES", "1024")
+    monkeypatch.setenv("OPENLAW_MAX_DOCUMENT_PAGES", "5")
+    monkeypatch.setenv("OPENLAW_MAX_DOCUMENTS_PER_CONVERSATION", "1")
+    monkeypatch.setenv("OPENLAW_ANONYMOUS_UPLOAD_TTL_HOURS", "1")
+    monkeypatch.setenv("OPENLAW_ANONYMOUS_CONVERSATION_TTL_HOURS", "1")
+    monkeypatch.setenv("OPENLAW_DOCUMENT_AUDIT_LOG_PATH", "/secure/document_access.jsonl")
+
+    settings = Settings()
+
+    assert settings.max_upload_bytes == 1024
+    assert settings.max_document_pages == 5
+    assert settings.max_documents_per_conversation == 1
+    assert settings.anonymous_upload_ttl_hours == 1
+    assert settings.anonymous_conversation_ttl_hours == 1
+    assert settings.document_audit_log_path == Path("/secure/document_access.jsonl")
+
+
+def test_env_example_uploads_settings_parse_and_default_to_enabled() -> None:
+    """The shipped .env.example must parse and leave uploads on by default,
+    with no key configured -- exercising the same `cp .env.example .env`
+    path as the existing coherence tests above."""
+    root = Path(__file__).resolve().parent.parent
+    example = Settings(_env_file=root / ".env.example")  # type: ignore[call-arg]
+
+    assert example.uploads_enabled is True
+    assert not example.document_encryption_key
+    assert example.max_upload_bytes == 10_485_760
+    assert example.max_document_pages == 20
+    assert example.max_documents_per_conversation == 3
+    assert example.anonymous_upload_ttl_hours == 24
+    assert example.anonymous_conversation_ttl_hours == 24

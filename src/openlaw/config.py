@@ -184,6 +184,40 @@ class Settings(BaseSettings):
     # plain HTTP locally must set this to false, or the cookie silently
     # never round-trips and every request looks like a first visit.
     cookie_secure: bool = True
+    # Conversations and document uploads (Plan 6 T1). `uploads_enabled=False`
+    # is a working kill switch: openlaw.documents' upload path must check it
+    # before doing anything else with a request, so a deployment can turn the
+    # whole feature off (e.g. while `document_encryption_key` is unset) without
+    # code changes.
+    uploads_enabled: bool = True
+    # Base64-encoded 32 random bytes, used to encrypt uploaded document
+    # content at rest. Generate with:
+    #   python -c "import base64,os;print(base64.b64encode(os.urandom(32)).decode())"
+    # Rotating this key makes every existing upload unreadable -- there is no
+    # re-encryption path, so treat it like any other long-lived secret.
+    # NEVER log or include this value in an error message.
+    document_encryption_key: str | None = None
+    # Per-upload size cap in bytes (10 MiB). Named here, not re-derived or
+    # hard-coded at any call site -- see openlaw.documents' module docstring
+    # for the full set of limits this settings block owns.
+    max_upload_bytes: int = 10_485_760
+    # Per-document page cap. Pairs with `PAGES_PER_QUOTA_UNIT` in
+    # openlaw.documents to bound the model-context and quota cost of any one
+    # upload.
+    max_document_pages: int = 20
+    # Per-conversation document cap.
+    max_documents_per_conversation: int = 3
+    # How long an anonymous caller's uploaded document stays retrievable
+    # before it is purged.
+    anonymous_upload_ttl_hours: int = 24
+    # How long an anonymous caller's conversation stays retrievable before it
+    # is purged.
+    anonymous_conversation_ttl_hours: int = 24
+    # Append-only audit log of document access (who read which uploaded
+    # document, when) -- same "restricted-access volume is a deployment
+    # decision" reasoning as `hallucination_log_path` above, since document
+    # content can be arbitrarily sensitive user-supplied material.
+    document_audit_log_path: Path = Path("data/document_access.jsonl")
 
     @field_validator("nano_model_dir", mode="before")
     @classmethod

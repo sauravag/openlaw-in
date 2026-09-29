@@ -1,0 +1,50 @@
+"""Constants for user-uploaded document artifacts (Plan 6).
+
+This module is the single place every fixed limit and content-shape constant
+for the conversations-and-artifacts feature is defined. No later task in
+Plan 6 may re-derive or hard-code one of these values at a call site -- they
+import it from here, so a limit can be audited and changed in one place.
+
+Scope, per the plan's spec amendment: uploaded documents may be read and
+quoted from (PDF, DOCX, plain text); there is no OCR (so an image-only PDF
+is refused, not silently returned empty -- see `ALLOWED_CONTENT_TYPES`
+below, which excludes image types entirely), no document drafting, and no
+case tracking.
+
+`Settings.uploads_enabled` (see `openlaw.config`) is the runtime kill
+switch; the constants below bound cost and context size once uploads are on.
+"""
+
+# Content types this plan can extract text from. Deliberately excludes
+# `image/jpeg` and `image/png` (and every other image type): there is no OCR
+# in this plan (see Task 4 of the conversations-and-artifacts plan) -- an
+# image-only upload must be refused with a clear "unsupported type" error,
+# never silently accepted and yield zero extracted text.
+ALLOWED_CONTENT_TYPES: frozenset[str] = frozenset(
+    {
+        "application/pdf",
+        "text/plain",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+)
+# Prefix marking an excerpt id as coming from a user-uploaded document
+# rather than the law corpus. A later task's citation validator drops any
+# `Claim` whose id starts with this prefix (contamination: a document quote
+# must never be presented as if it were a citable legal source) and,
+# symmetrically, drops any `DocumentClaim` whose id does NOT start with it.
+DOCUMENT_EXCERPT_PREFIX = "doc:"
+# Maximum characters in a single extracted excerpt.
+MAX_EXCERPT_CHARS = 1_200
+# Maximum number of excerpts carried into a single answer's context.
+MAX_DOCUMENT_EXCERPTS = 6
+# Maximum total characters of document context assembled into one prompt,
+# across all excerpts.
+MAX_DOCUMENT_CONTEXT_CHARS = 12_000
+# Maximum number of prior conversation turns replayed into a new answer.
+MAX_HISTORY_TURNS = 6
+# Maximum number of previously-cited corpus chunks carried forward across
+# turns in a conversation.
+MAX_CARRIED_CHUNKS = 8
+# Pages per quota unit when costing an upload: an upload costs
+# max(1, ceil(page_count / PAGES_PER_QUOTA_UNIT)) quota units.
+PAGES_PER_QUOTA_UNIT = 5
