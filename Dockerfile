@@ -48,7 +48,17 @@ COPY src ./src
 # matches the README's existing guidance: Hugging Face's Xet download
 # backend can otherwise stall indefinitely on a normal connection.
 ENV HF_HUB_DISABLE_XET=1
-RUN pip install --no-cache-dir -e ".[local-nano]"
+# `--timeout`/`--retries` are load-bearing, not defensive padding. This layer
+# pulls PyTorch for the local voyage-4-nano embedder -- multiple gigabytes --
+# and pip's default 15s read timeout aborts the whole build if a single socket
+# stalls that long. Observed: a build died after 3.6 hours with
+# ReadTimeoutError from files.pythonhosted.org, losing everything downloaded
+# to that point, because the machine was busy and the connection was slow.
+#
+# That is exactly the condition a self-hoster in India is most likely to be
+# in, which makes the default a documented one-command setup that fails for
+# the people this project is for.
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -e ".[local-nano]"
 
 # Only the curated, version-controlled glossary under `data/` -- see
 # .dockerignore's docstring for why the rest of `data/` (bind-mounted
