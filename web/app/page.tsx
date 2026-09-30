@@ -183,6 +183,14 @@ export default function HomePage() {
       </header>
 
       <main className={`${COLUMN} flex flex-1 flex-col gap-8 py-6 sm:py-8`}>
+        {/* What this is, first: a first-time visitor should understand the
+         * product before being shown a wall of emergency numbers. Rendered
+         * only until there is an answer, so it never sits above a result.
+         */}
+        {result ? null : (
+          <WelcomeGuide language={language} onPickExample={handlePickExample} />
+        )}
+
         {/*
          * Final whole-plan review, H6: with JavaScript disabled (Opera Mini's
          * extreme-saving mode, UC Browser's proxy mode, a stalled bundle on
@@ -192,7 +200,10 @@ export default function HomePage() {
          * renders the same static fallback set `askQuestion` itself falls
          * back to on a server failure, unconditionally and ABOVE the form, so
          * it is in the server-rendered HTML before any script runs and before
-         * anything a frightened person would have to scroll past. See
+         * any answer, refusal or legal analysis. The only thing above it is
+         * the short "what this is" card (moved there deliberately, so a
+         * first-time visitor is not met by a wall of emergency numbers);
+         * nothing that requires reading or scrolling past legal content. See
          * `app/__tests__/page.test.tsx`'s coverage of the initial,
          * pre-interaction render.
          */}
@@ -279,9 +290,7 @@ export default function HomePage() {
               <RefusalNotice data={result.data} language={language} />
             )}
           </div>
-        ) : (
-          <WelcomeGuide language={language} onPickExample={handlePickExample} />
-        )}
+        ) : null}
       </main>
 
       {/* Always on the page, never shouting: the "legal information, not
