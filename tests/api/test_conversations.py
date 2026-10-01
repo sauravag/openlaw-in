@@ -18,7 +18,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from openlaw.answers.escalation import CrisisKind
+from openlaw.answers.escalation import CrisisKind, crisis_helplines
+from openlaw.answers.validate import ValidatedAnswer
 
 from .conftest import (
     RecordingAnswerFn,
@@ -263,8 +264,8 @@ def test_an_attached_document_reaches_the_answer_function_as_context(
         document_ids=[document["id"]],
     )
 
-    context = answer_fn.calls[-1]["document_context"]
-    assert context is not None and context.excerpts, "no document excerpt reached the turn"
+    excerpts = answer_fn.calls[-1]["document_excerpts"]
+    assert excerpts, "no document excerpt reached the turn"
 
 
 def test_a_document_derived_crisis_answers_normally_and_attaches_helplines(
@@ -462,3 +463,155 @@ def test_a_reloaded_transcript_keeps_document_claims_apart_from_legal_ones(
     assert "thirty days" in turn["answer"]
     assert "1 March" not in turn["answer"]
     assert "1 March" in turn["document_answer"]
+
+
+# --- HIGH-3 / MEDIUM-1 / MEDIUM-2: one renderer, three findings ------------
+
+
+def _crisis_turn(language: str = "en") -> object:
+    """A question-derived crisis short-circuit, exactly as the pipeline builds
+    one: no claim ever generated, `crisis` set, helplines attached."""
+    unanswerable = ValidatedAnswer(
+        unverified_summary=None, claims=(), sources=()
+    )
+    return localised(
+        unanswerable,
+        language=language,
+        crisis=CrisisKind.SELF_HARM,
+        helplines=crisis_helplines(CrisisKind.SELF_HARM, language),
+    )
+
+
+def test_a_crisis_turn_keeps_its_helplines_after_a_reload(tmp_path: Path) -> None:
+    """HIGH-3. A crisis turn is persisted like any other, with `claims=[]`;
+    `ConversationTurnCard` carried no crisis field and `_turn_card` joined the
+    empty claim list into `answer`, so a woman who disclosed self-harm and
+    whose phone browser reclaimed the tab came back to her own words above an
+    empty paragraph.
+
+    Mutation evidence: remove the `detect_crisis` re-derivation in
+    `_turn_card` and `crisis_response` is `None`, `is_answerable` is False and
+    `answer` falls back to "no verifiable answer" -- four assertions fail.
+    """
+    client = build_client(tmp_path, answer_fn=RecordingAnswerFn(result=_crisis_turn()))
+    body = _ask(client, "i want to kill myself")
+    assert body["crisis_response"]
+
+    turn = client.get(f"/conversations/{body['conversation_id']}").json()["turns"][0]
+
+    assert turn["crisis_response"]
+    assert turn["crisis_response"] == body["crisis_response"]
+    assert any(line["number"] == "14416" for line in turn["helplines"])
+    assert turn["is_answerable"] is True
+    assert turn["answer"] == body["answer"]
+    assert turn["answer"].strip() != ""
+
+
+def test_a_hindi_crisis_turn_reloads_in_hindi(tmp_path: Path) -> None:
+    """The language of the most safety-critical response must survive the
+    reload too -- this project's most repeated defect is a property that holds
+    in English and fails in Hindi."""
+    client = build_client(
+        tmp_path, answer_fn=RecordingAnswerFn(result=_crisis_turn(language="hi"))
+    )
+    body = _ask(client, "मैं आत्महत्या करना चाहता हूँ", language="hi")
+
+    turn = client.get(
+        f"/conversations/{body['conversation_id']}?language=hi"
+    ).json()["turns"][0]
+
+    assert turn["language"] == "hi"
+    assert turn["crisis_response"] == body["crisis_response"]
+    assert turn["answer"] == body["answer"]
+
+
+def test_an_unanswerable_turn_reloads_with_the_localised_fallback(
+    tmp_path: Path,
+) -> None:
+    """MEDIUM-1. `_render_answer` returns the localised "no verifiable answer"
+    string rather than an empty one; `_turn_card` did not call it, so every
+    turn with no surviving claim reloaded as a blank paragraph.
+
+    Mutation evidence: join the claim texts in `_turn_card` instead of calling
+    `render_claim_answer` and `answer` is `""` -- both assertions fail.
+    """
+    nothing = ValidatedAnswer(unverified_summary=None, claims=(), sources=())
+    client = build_client(
+        tmp_path,
+        answer_fn=RecordingAnswerFn(result=localised(nothing, language="hi")),
+    )
+    body = _ask(client, "मेरा सवाल", language="hi")
+
+    turn = client.get(f"/conversations/{body['conversation_id']}").json()["turns"][0]
+
+    assert turn["answer"].strip() != ""
+    assert turn["answer"] == body["answer"]
+    assert turn["is_answerable"] is False
+
+
+def test_a_reloaded_document_claim_keeps_its_citation(tmp_path: Path) -> None:
+    """MEDIUM-2. `filename` and `page_number` are, in `DocumentCitation`'s own
+    words, "the only verification available for a statement about a document
+    only they hold" -- and `ReplayedTurn` hard-coded `citations={[]}` because
+    this card had no field for them. Rebuilt from the stored excerpt id plus
+    the still-attached document's filename, with no new column.
+
+    Mutation evidence: return `()` from `_replayed_citations` and both
+    assertions fail.
+    """
+    client = build_client(tmp_path)
+    document = upload(client, headers=bearer()).json()
+    answer = validated_answer(
+        document_claim_text="Your notice is dated 1 March.",
+        excerpt_id=f"doc:{document['id']}:p1:0",
+        filename=document["filename"],
+    )
+    client.app.state.answer_fn = RecordingAnswerFn(result=localised(answer))
+    _ask(
+        client,
+        "what does my notice say?",
+        headers=bearer(),
+        conversation_id=document["conversation_id"],
+        document_ids=[document["id"]],
+    )
+
+    turn = client.get(
+        f"/conversations/{document['conversation_id']}", headers=bearer()
+    ).json()["turns"][0]
+
+    assert turn["document_citations"], "a restored claim lost its only pointer"
+    citation = turn["document_citations"][0]
+    assert citation["filename"] == document["filename"]
+    assert citation["page_number"] == 1
+    assert "source_url" not in citation
+
+
+def test_a_citation_for_a_deleted_document_is_omitted_not_invented(
+    tmp_path: Path,
+) -> None:
+    """A pointer into paperwork this service no longer holds would be worse
+    than none."""
+    client = build_client(tmp_path)
+    document = upload(client, headers=bearer()).json()
+    answer = validated_answer(
+        document_claim_text="Your notice is dated 1 March.",
+        excerpt_id=f"doc:{document['id']}:p1:0",
+    )
+    client.app.state.answer_fn = RecordingAnswerFn(result=localised(answer))
+    _ask(
+        client,
+        "what does my notice say?",
+        headers=bearer(),
+        conversation_id=document["conversation_id"],
+        document_ids=[document["id"]],
+    )
+    assert client.delete(
+        f"/documents/{document['id']}", headers=bearer()
+    ).status_code == 204
+
+    turn = client.get(
+        f"/conversations/{document['conversation_id']}", headers=bearer()
+    ).json()["turns"][0]
+
+    assert turn["document_citations"] == []
+    assert turn["document_answer"] is not None

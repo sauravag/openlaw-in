@@ -150,7 +150,7 @@ class RecordingAnswerFn:
         state: str | None,
         *,
         history: tuple = (),
-        document_context: object = None,
+        document_excerpts: tuple = (),
         document_crisis_kinds: tuple[str | None, ...] = (),
     ) -> LocalisedAnswer:
         self.calls.append(
@@ -159,7 +159,7 @@ class RecordingAnswerFn:
                 "language": language,
                 "state": state,
                 "history": history,
-                "document_context": document_context,
+                "document_excerpts": document_excerpts,
                 "document_crisis_kinds": document_crisis_kinds,
             }
         )

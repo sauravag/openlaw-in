@@ -80,18 +80,24 @@ export interface TurnCrisis {
 /**
  * The crisis attached to `turn`, or `null`.
  *
- * One function for both outcome kinds, so the page can hoist a crisis block
- * above the thread without caring whether the turn was answered or refused --
- * someone in danger who happens to hit a rate limit must see help in exactly
- * the same place as someone who got an answer.
+ * One function for all three outcome kinds, so the page can hoist a crisis
+ * block above the thread without caring whether the turn was answered,
+ * refused, or restored from storage -- someone in danger who happens to hit a
+ * rate limit, or whose phone reclaimed the tab, must see help in exactly the
+ * same place as someone who got an answer.
+ *
+ * `replay` returned `null` here until the final whole-plan review (HIGH-3):
+ * a restored crisis turn could not hoist its own helpline card, and because
+ * `ConversationTurnCard` carried no crisis fields at all there was nothing to
+ * hoist anyway. The server now re-derives both; this reads them exactly as it
+ * reads a live turn's.
  */
 export function turnCrisis(turn: ThreadTurn): TurnCrisis | null {
-  if (turn.outcome.kind === 'replay') return null
   const { crisis_response: crisisResponse, helplines } = turn.outcome.data
   if (!crisisResponse) return null
   const language =
-    turn.outcome.kind === 'answer' ? turn.outcome.data.language : turn.language
-  return { crisisResponse, helplines, language }
+    turn.outcome.kind === 'refused' ? turn.language : turn.outcome.data.language
+  return { crisisResponse, helplines: helplines ?? [], language }
 }
 
 /** Build a thread turn from a stored one (`GET /conversations/{id}`). */

@@ -268,8 +268,8 @@ def test_a_legitimate_document_claim_still_survives(
 
     # First: the hostile text really did reach the model. A gate that ran with
     # an empty document context would prove nothing at all.
-    context = model.calls[-1]["document_context"]
-    assert context is not None and context.excerpts, f"{attack.name}: nothing in context"
+    excerpts = model.calls[-1]["document_excerpts"]
+    assert excerpts, f"{attack.name}: nothing in context"
     assert body["document_answer"] is not None
     assert "notice to quit" in body["document_answer"]
     assert "notice to quit" not in body["answer"]
@@ -345,15 +345,31 @@ def test_every_attack_has_a_distinct_name_and_a_non_empty_body() -> None:
 # --- a limit this gate found and could not close -----------------------------
 
 
-def test_a_devanagari_document_contributes_no_excerpt() -> None:
+def _devanagari_excerpt() -> DocumentExcerpt:
+    return DocumentExcerpt(
+        excerpt_id="doc:attack:p1:0",
+        document_id="attack",
+        filename="order.txt",
+        page_number=1,
+        text=hostile("devanagari_crisis_with_innocuous_question").body,
+    )
+
+
+def test_a_devanagari_document_contributes_no_excerpt_even_to_english() -> None:
     """**KNOWN LIMIT, pinned so a future fix cannot land undocumented.**
 
-    `openlaw.index.sparse.tokenise` matches `[a-z0-9]+`. A Devanagari document
-    therefore yields no tokens beyond its digits, shares none with a Devanagari
-    question, and `select_excerpts` returns nothing -- so a Hindi reader who
-    uploads a Hindi document and asks a Hindi question gets an answer their
-    document contributed nothing to. No refusal is shown: the turn simply
-    proceeds as if no file were attached.
+    `openlaw.index.sparse.tokenise` matches `[a-z0-9]+`. A Devanagari DOCUMENT
+    therefore yields no tokens beyond its digits and can share none with any
+    query, so `select_excerpts` returns nothing -- a Hindi reader who uploads
+    a Hindi document gets an answer their document contributed nothing to. No
+    refusal is shown: the turn simply proceeds as if no file were attached.
+
+    **The query here is deliberately ENGLISH.** The earlier version of this
+    test used a Devanagari document AND a Devanagari question, so it could not
+    distinguish the document-side limit from the questioner-side one -- and
+    the questioner-side one was a live HIGH finding nobody had seen (HIGH-1,
+    now fixed; see the companion test below). Asking in English isolates the
+    half that genuinely remains.
 
     This is a FUNCTIONAL gap, not a safety hole -- nothing unsafe reaches the
     reader, and upload-time crisis scanning is unaffected because it runs over
@@ -367,18 +383,40 @@ def test_a_devanagari_document_contributes_no_excerpt() -> None:
     effect of a documentation one. Documented in the README's "Uploaded
     documents" section. When it is fixed, this test fails, which is the point.
     """
-    attack = hostile("devanagari_crisis_with_innocuous_question")
-    excerpt = DocumentExcerpt(
-        excerpt_id="doc:attack:p1:0",
-        document_id="attack",
-        filename="order.txt",
-        page_number=1,
-        text=attack.body,
+    selected = select_excerpts(
+        "what does my protection order say about domestic violence",
+        (_devanagari_excerpt(),),
     )
 
-    selected = select_excerpts("घरेलू हिंसा के बारे में मेरा दस्तावेज़ क्या कहता है", (excerpt,))
-
     assert selected.excerpts == ()
+
+
+def test_the_questioner_side_half_of_that_limit_is_closed() -> None:
+    """HIGH-1, the other half of what the old combined test hid.
+
+    A Devanagari QUESTION against an ENGLISH document used to select nothing
+    either, because `openlaw.api.turns` ranked excerpts against the raw
+    question before translation had run. It is selection on the TRANSLATED
+    query that fixes it -- so this asserts the property at the only layer that
+    can hold it, and `tests/language/test_conversation.py::
+    test_a_hindi_question_selects_excerpts_from_an_english_document` drives
+    the same case through the whole pipeline.
+    """
+    english_document = DocumentExcerpt(
+        excerpt_id="doc:attack:p1:0",
+        document_id="attack",
+        filename="notice.txt",
+        page_number=1,
+        text="NOTICE TO QUIT: you must vacate the premises within seven days.",
+    )
+
+    # What `translate_query` hands the pipeline for a Hindi question about it.
+    selected = select_excerpts(
+        "how many days does my notice to quit give me to vacate",
+        (english_document,),
+    )
+
+    assert selected.excerpts != ()
 
 
 def test_the_selectable_subset_is_only_the_devanagari_cases_short() -> None:

@@ -21,8 +21,10 @@ from openlaw.answers.history import (
     HistoryTurn,
     build_history_messages,
     carried_chunk_ids,
+    history_crisis,
     recent_turns,
 )
+from openlaw.answers.escalation import CrisisKind
 from openlaw.answers.schema import Claim, DocumentClaim, DraftAnswer
 from openlaw.answers.validate import ValidatedAnswer, validate_answer
 from openlaw.documents import (
@@ -748,3 +750,73 @@ def test_an_ordinary_conversation_is_untouched_by_the_character_bound(
     messages = build_history_messages(turns, shown_chunk_ids=shown)
 
     assert len(messages) == MAX_HISTORY_TURNS * 2
+
+
+# --- CF-18, reversed: history is crisis-scanned, at document strength ------
+
+
+def _question_turn(question: str) -> HistoryTurn:
+    return HistoryTurn(
+        question=question,
+        claims=(Claim(text="A refund is required.", chunk_ids=("a",)),),
+        language="en",
+    )
+
+
+def test_no_crisis_in_history_is_no_verdict() -> None:
+    turns = (_question_turn("can my landlord keep my deposit"),)
+    assert history_crisis(turns) is None
+
+
+def test_empty_history_is_no_verdict() -> None:
+    assert history_crisis(()) is None
+
+
+def test_a_disclosure_in_an_earlier_question_is_found() -> None:
+    """Before this, history was never crisis-scanned anywhere in `src/`."""
+    turns = (
+        _question_turn("my husband beats me"),
+        _question_turn("can I get a divorce"),
+    )
+
+    assert history_crisis(turns) is CrisisKind.DOMESTIC_VIOLENCE
+
+
+def test_several_disclosures_resolve_by_severity_not_by_turn_order() -> None:
+    turns = (
+        _question_turn("my husband beats me"),
+        _question_turn("i want to kill myself"),
+    )
+
+    assert history_crisis(turns) is CrisisKind.SELF_HARM
+
+
+def test_a_disclosure_survives_past_the_history_rendering_window() -> None:
+    """`MAX_HISTORY_TURNS` is a prompt budget. A safety signal that expired
+    with it would be a disclosure this system heard and then forgot."""
+    turns = (_question_turn("my husband beats me"),) + tuple(
+        _question_turn(f"follow-up {index}")
+        for index in range(MAX_HISTORY_TURNS + 3)
+    )
+
+    assert len(turns) > MAX_HISTORY_TURNS
+    assert history_crisis(turns) is CrisisKind.DOMESTIC_VIOLENCE
+
+
+def test_assistant_claim_text_is_never_scanned() -> None:
+    """Only the person's own words. Scanning our own output would route on
+    the helpline wording this system had already emitted."""
+    turns = (
+        HistoryTurn(
+            question="can my landlord keep my deposit",
+            claims=(
+                Claim(
+                    text="If you are thinking about suicide, call 14416.",
+                    chunk_ids=("a",),
+                ),
+            ),
+            language="en",
+        ),
+    )
+
+    assert history_crisis(turns) is None

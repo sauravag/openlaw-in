@@ -23,26 +23,59 @@ Two things follow from "the fence is a mitigation, not a guarantee":
    implementation wraps text in a delimiter; the obvious attack is a
    document that contains that exact delimiter, closing the fence early and
    continuing as if the following text were the system's own voice.
-   `sanitise` defeats this structurally: any run of three or more `<` or
-   `>` characters -- the only way to spell either half of
-   `DOCUMENT_FENCE_OPEN`/`DOCUMENT_FENCE_CLOSE` -- has a zero-width space
-   (U+200B) inserted every two characters, so no run of three ever survives
-   intact. This is a generic defence: it does not need to know the
+   `sanitise` breaks every run of three or more ASCII `<` or `>`
+   characters -- the only way to spell either half of
+   `DOCUMENT_FENCE_OPEN`/`DOCUMENT_FENCE_CLOSE` -- by inserting a zero-width
+   space (U+200B) every two characters, and it strips zero-width characters
+   from the input FIRST, so an interleaved `<<\u200b<` cannot smuggle a run
+   past the breaker. This is a generic defence: it does not need to know the
    excerpt's own `id`/`page` values (an attacker forging a *different*
    excerpt's open tag is defeated the same way as one replaying the fixed
    close tag), and it is invisible to a reader -- the visible characters are
    unchanged, only an invisible break is inserted between them.
+
+   **Said exactly, because a claim stronger than the code is itself a
+   defect** (final whole-plan review, MEDIUM-3). Three statements, and no
+   more than these:
+
+   * No run of three or more ASCII `<`/`>` survives unbroken, and zero-width
+     obfuscation cannot buy one: `<​<​<` is reassembled by the strip and
+     then broken like any other run. Before MEDIUM-3 it was not -- three runs
+     of one match no pattern, so the obfuscated delimiter passed through
+     untouched.
+   * The break is a BYTE-level defence, not a perception-level one. Every
+     delimiter-shaped run leaves here in the one canonical broken form
+     (`<<​<`), and a tokeniser that ignores zero-width characters may still
+     read that as `<<<`. This is exactly the sense in which "the fence is a
+     mitigation, not a guarantee" is literally true, and the reason the real
+     backstop is structural and lives elsewhere.
+   * Confusable spellings in other scripts are NOT folded. `sanitise`
+     normalises to NFC, not NFKC, so
+     `＜＜＜END_UPLOADED_DOCUMENT_EXCERPT＞＞＞` passes through
+     unchanged. NFKC is deliberately not used: it rewrites far more than
+     brackets (ligatures, compatibility digits, spacing forms) inside a
+     document quoted back to its owner as their own paper, which point 2
+     forbids. A full-width run is not the delimiter and cannot close the
+     fence; it can only resemble one, which is the same residue as the bullet
+     above.
+
+   What contains that residue is structural and stated where it is enforced:
+   `DocumentDraftAnswer` has no `claims` field, the document pass is shown no
+   corpus chunk, and a document claim can never become a `Source` or make a
+   turn answerable. The worst reachable outcome remains a false
+   `document_claim` about the document's own contents.
 
 2. **Never mutate the document's meaning.** Stripping or rewriting words
    inside, say, an eviction notice risks silently changing what it legally
    says while it is quoted back to the person as if it were their own
    document. `sanitise` therefore never removes or replaces any character
    that could appear in a legitimate document: it strips only C0/C1 control
-   characters and bidi-override formatting characters (which render
-   nothing and exist only to manipulate how surrounding text displays),
-   collapses excess blank lines (whitespace, not content), and otherwise
-   only *adds* an invisible character to break a syntactic run. Nothing a
-   person wrote in their document is deleted or reworded.
+   characters, bidi-override formatting characters and zero-width characters
+   (all of which render no glyph and exist only to manipulate how surrounding
+   text displays or tokenises), collapses excess blank lines (whitespace, not
+   content), and otherwise only *adds* an invisible character to break a
+   syntactic run. Nothing a person wrote in their document is deleted or
+   reworded.
 
 Fence the whole boundary, not just documents: a filename is exactly as
 attacker-controlled as document body text and just as capable of carrying
@@ -101,6 +134,25 @@ _BIDI_OVERRIDE_CHARS = (
 )
 _BIDI_OVERRIDE_PATTERN = re.compile(f"[{_BIDI_OVERRIDE_CHARS}]")
 
+# Zero-width characters, including the very one this module inserts. Stripped
+# for the same reason the bidi set is -- they render no glyph, so removing
+# them cannot change what a document visibly says -- and specifically because
+# leaving U+200B in place let an attacker spell a fence delimiter the
+# sanitiser's own output is byte-identical to: `sanitise("<<​<END_UPLOADED
+# _DOCUMENT_EXCERPT>>​>")` equalled `sanitise(DOCUMENT_FENCE_CLOSE)`
+# exactly, because the interleaved runs were only two `<` long and so were
+# never broken (final whole-plan review, MEDIUM-3). Stripping runs BEFORE
+# `_neutralise_fence_delimiters`, so the original run is reassembled and then
+# broken like any other -- which is also what keeps `sanitise` idempotent.
+_ZERO_WIDTH_CHARS = (
+    "\u200b"  # Zero Width Space -- the character this module inserts
+    "\u200c"  # Zero Width Non-Joiner
+    "\u200d"  # Zero Width Joiner
+    "\u2060"  # Word Joiner
+    "\ufeff"  # Zero Width No-Break Space / BOM
+)
+_ZERO_WIDTH_PATTERN = re.compile(f"[{_ZERO_WIDTH_CHARS}]")
+
 # A fence delimiter can only be spelled with three or more consecutive `<`
 # or `>` characters. Matching the *run*, not either literal delimiter
 # string, is what makes this generic: it catches a forged open tag with
@@ -109,14 +161,17 @@ _ANGLE_RUN_PATTERN = re.compile(r"<{3,}|>{3,}")
 
 
 def _strip_unsafe_characters(text: str) -> str:
-    """Remove control characters and bidi-override characters.
+    """Remove control, bidi-override and zero-width characters.
 
-    Both classes render nothing on their own -- one is a terminal/parser
-    control code, the other a formatting instruction -- so removing them
-    cannot change what a document visibly says.
+    All three classes render nothing on their own -- a terminal/parser
+    control code, a formatting instruction, an invisible break -- so removing
+    them cannot change what a document visibly says. The zero-width class
+    includes U+200B, the character this module itself inserts: see
+    `_ZERO_WIDTH_CHARS` for the evasion that left open.
     """
     without_controls = _CONTROL_CHARS_PATTERN.sub("", text)
-    return _BIDI_OVERRIDE_PATTERN.sub("", without_controls)
+    without_bidi = _BIDI_OVERRIDE_PATTERN.sub("", without_controls)
+    return _ZERO_WIDTH_PATTERN.sub("", without_bidi)
 
 
 def _collapse_blank_line_runs(text: str) -> str:
@@ -155,11 +210,18 @@ def _break_angle_run(match: re.Match[str]) -> str:
 
 
 def _neutralise_fence_delimiters(text: str) -> str:
-    """Break every run of three or more `<` or `>` characters.
+    """Break every run of three or more ASCII `<` or `>` characters.
 
-    This is the only way either half of `DOCUMENT_FENCE_OPEN` or
+    That is the only way either half of `DOCUMENT_FENCE_OPEN` or
     `DOCUMENT_FENCE_CLOSE` can be spelled, so no literal occurrence of a
-    fence delimiter -- real or forged -- can survive inside sanitised text.
+    fence delimiter -- real or forged -- survives inside sanitised text.
+    Callers reach this only through `sanitise`, which strips zero-width
+    characters first; calling it directly on text that still contains them
+    would let `<<\u200b<` slip through as two runs of two.
+
+    Confusable spellings in other scripts (full-width `\uff1c`, for instance)
+    are NOT folded -- see the module docstring for why, and for what that
+    does and does not leave reachable.
     """
     return _ANGLE_RUN_PATTERN.sub(_break_angle_run, text)
 
@@ -167,21 +229,29 @@ def _neutralise_fence_delimiters(text: str) -> str:
 def sanitise(text: str) -> str:
     """Return `text` made safe to place inside a document fence.
 
-    Strips C0/C1 control characters (except `\\n` and `\\t`) and Unicode
-    bidi-override characters, normalises to NFC, collapses runs of more
-    than two blank lines, and neutralises any literal occurrence of the
-    fence delimiters by inserting a zero-width space into any run of three
-    or more `<`/`>` characters.
+    Strips C0/C1 control characters (except `\\n` and `\\t`), Unicode
+    bidi-override characters and zero-width characters, normalises to NFC,
+    collapses runs of more than two blank lines, and neutralises any literal
+    occurrence of the fence delimiters by inserting a zero-width space into
+    any run of three or more ASCII `<`/`>` characters.
 
-    Idempotent: every transformation here reaches a fixed point on its
-    first application (control/bidi characters are gone, NFC of NFC text is
-    unchanged, at most two blank lines already satisfies the collapse, and
-    no run of three or more `<`/`>` survives the delimiter break), so
+    **The guarantee, precisely.** No run of three or more ASCII `<`/`>`
+    survives unbroken, zero-width obfuscation included. The break is
+    byte-level: the canonical broken form may still read as a delimiter to a
+    tokeniser that ignores zero-width characters, and confusable spellings in
+    other scripts are not folded at all. See the module docstring's point 1
+    for all three statements and for what contains the residue.
+
+    Idempotent: every transformation reaches a fixed point on its first
+    application. The zero-width strip is what makes that true of the
+    delimiter break as well: a second pass removes the spaces this one
+    inserted, reassembles the original run, and breaks it identically, so
     `sanitise(sanitise(text)) == sanitise(text)` for any input.
 
     Never removes or rewords a character a person could have written in
-    their own document -- only control/formatting characters that render
-    nothing, and only insertions (the zero-width space), are applied.
+    their own document -- only characters that render no glyph at all
+    (control, bidi-override, zero-width), and only insertions (the
+    zero-width space), are applied.
     """
     without_unsafe_chars = _strip_unsafe_characters(text)
     normalised = unicodedata.normalize("NFC", without_unsafe_chars)

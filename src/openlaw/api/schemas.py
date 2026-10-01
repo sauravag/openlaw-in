@@ -20,8 +20,15 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from openlaw.answers.escalation import Helpline
-from openlaw.answers.schema import DocumentClaim
+from openlaw.answers.escalation import (
+    CrisisKind,
+    Helpline,
+    crisis_helplines,
+    dedupe_helplines,
+    most_urgent_crisis,
+    nalsa_helpline,
+)
+from openlaw.answers.schema import Claim, DocumentClaim
 from openlaw.answers.escalation import crisis_response as crisis_text
 from openlaw.answers.validate import ValidatedAnswer
 from openlaw.api.jurisdictions import INDIAN_STATES_AND_UTS
@@ -391,6 +398,26 @@ class ConversationTurnCard(BaseModel):
     `answer` and `document_answer` are split exactly as they are on
     `AskResponse`, for the identical reason -- a reloaded transcript must not
     be the one place where a statement about someone's lease reads as law.
+
+    **The crisis fields exist because this shape was where a helpline card
+    went to die** (final whole-plan review, HIGH-3/MEDIUM-1/MEDIUM-2). A
+    crisis turn is persisted like any other, with `claims=[]`; this card
+    carried no crisis, no helplines and no `is_answerable`, and
+    `openlaw.api.artifacts._turn_card` joined the (empty) claim list into
+    `answer`. So a woman who asked about self-harm in Hindi, was shown
+    Tele-MANAS, and whose phone browser then reclaimed the tab, came back to
+    her own disclosure above an empty paragraph -- the most safety-critical
+    response this system produces was the one that did not survive a reload.
+    The same hop also dropped the localised "no verifiable answer" fallback
+    for EVERY unanswerable turn (MEDIUM-1), and left a document claim on
+    screen with no `filename`/`page_number` to check it against (MEDIUM-2),
+    which `DocumentCitation`'s own docstring calls "the only verification
+    available for a statement about a document only they hold". One defect in
+    one renderer; these four fields plus `_render_answer` are the fix.
+
+    `crisis_response`/`helplines`/`is_answerable` mean exactly what they mean
+    on `AskResponse`, so a client has one shape to render live and restored
+    turns with.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -400,6 +427,24 @@ class ConversationTurnCard(BaseModel):
     answer: str
     document_answer: str | None = None
     language: str
+    #: Category-specific helpline prose when this turn was a crisis turn --
+    #: re-derived from the person's own stored question by the FREE regex
+    #: layer, never stored and never a model call. A crisis the paid
+    #: classifier alone caught is therefore not restored, which is a known
+    #: narrowing stated in the README rather than a silent one.
+    crisis_response: str | None = None
+    #: Structured tap-to-call numbers, same rule as `AskResponse.helplines`:
+    #: at minimum the NALSA number every footer cites.
+    helplines: tuple[Helpline, ...] = ()
+    #: True when this turn carried either a surviving legal claim or a crisis
+    #: response -- the identical rule `to_response` applies live, so a crisis
+    #: turn is never replayed as unanswerable.
+    is_answerable: bool = False
+    #: Where in the reader's OWN paperwork each document claim came from.
+    #: Rebuilt from the stored `excerpt_id`s (`openlaw.documents.extract
+    #: .parse_excerpt_id`) plus the filename of the still-attached document --
+    #: no new column, and no decryption.
+    document_citations: tuple[DocumentCitationCard, ...] = ()
 
 
 class ConversationDocumentCard(BaseModel):
@@ -476,18 +521,67 @@ class QuotaExceeded(BaseModel):
     signup_url: str | None = None
 
 
-def _render_answer(answer: ValidatedAnswer, language: str) -> str:
+def render_claim_answer(claims: tuple[Claim, ...], language: str) -> str:
     """Render the only content ever safe to show a user: claim text.
 
-    Never reads `answer.unverified_summary` -- see the module docstring.
-    When nothing survived validation, a fixed, non-model string in `language`
-    is returned rather than an empty (or wrong-language, final review M4)
-    answer. NOT called for a crisis turn -- see `to_response`, which branches
-    before this function ever runs (H3).
+    The ONE renderer for the legal half of an answer, live or restored, for
+    exactly the reason `render_document_claims` gives for the document half.
+    `openlaw.api.artifacts._turn_card` used to join claim text itself and so
+    was the one path with no fallback at all: every unanswerable turn reloaded
+    as the reader's question above an empty paragraph (final whole-plan
+    review, MEDIUM-1). It is also what makes the localised fallback below
+    reachable from both sides of the persistence boundary.
+
+    Never reads `unverified_summary` -- see the module docstring; this
+    function is handed claims and cannot reach anything else. When no claim
+    survived, a fixed, non-model string in `language` is returned rather than
+    an empty (or wrong-language, final review M4) answer.
     """
-    if not answer.is_answerable or not answer.claims:
+    if not claims:
         return _static_text(_NO_VERIFIABLE_ANSWER, language)
-    return "\n\n".join(claim.text for claim in answer.claims)
+    return "\n\n".join(claim.text for claim in claims)
+
+
+def render_crisis_answer(crisis: CrisisKind, language: str) -> tuple[str, str]:
+    """Return `(answer, crisis_response)` for a crisis turn, in `language`.
+
+    The ONE renderer for the H3 shape -- `_HELP_IS_AVAILABLE` above the
+    category's helpline text -- used by both `_crisis_only_response` (live)
+    and `openlaw.api.artifacts._turn_card` (restored). Two copies is how the
+    restored path came to render `""` where the live one rendered Tele-MANAS
+    (HIGH-3): a client that renders `answer` alone, the naive and most likely
+    default, must see real help on both.
+
+    Both halves are static EN/HI text (`openlaw.answers.escalation`), never a
+    live translation, so no model failure can hold the most safety-critical
+    response this system produces hostage.
+    """
+    help_text = crisis_text(crisis, language)
+    return f"{_static_text(_HELP_IS_AVAILABLE, language)}\n\n{help_text}", help_text
+
+
+def crisis_card_helplines(
+    crisis: CrisisKind | None, language: str
+) -> tuple[Helpline, ...]:
+    """The numbers a turn renders: the category's, then NALSA, deduplicated.
+
+    The same composition `openlaw.language.pipeline._crisis_answer` performs
+    for a live turn, as one function, so a restored crisis turn cannot come
+    back with a different set of numbers than the one that was shown. Always
+    at least the NALSA number the escalation footer cites, crisis or not.
+    """
+    numbers = crisis_helplines(crisis, language) if crisis is not None else ()
+    return dedupe_helplines(numbers + (nalsa_helpline(language),))
+
+
+def _render_answer(answer: ValidatedAnswer, language: str) -> str:
+    """Render a live turn's legal answer through `render_claim_answer`.
+
+    NOT called for a crisis turn -- see `to_response`, which branches before
+    this function ever runs (H3).
+    """
+    claims = answer.claims if answer.is_answerable else ()
+    return render_claim_answer(claims, language)
 
 
 def render_document_claims(
@@ -552,10 +646,11 @@ def _crisis_only_response(
     and this is the one branch where "the turn carries no legal answer" and
     "the turn carries no document answer" have to be true together.
     """
-    help_text = crisis_text(localised.crisis, localised.language)
-    lead_in = _static_text(_HELP_IS_AVAILABLE, localised.language)
+    answer_text, help_text = render_crisis_answer(
+        localised.crisis, localised.language
+    )
     return AskResponse(
-        answer=f"{lead_in}\n\n{help_text}",
+        answer=answer_text,
         sources=[],
         language=localised.language,
         corpus_version=corpus_version,
@@ -595,8 +690,13 @@ def to_response(
     correct response for this turn, even though it contains no cited legal
     claim.
 
-    **A DOCUMENT-derived crisis is the other shape, and takes the ordinary
-    branch on purpose (Plan 6 Task 10, ruling 1).**
+    **An ALONGSIDE-strength crisis is the other shape, and takes the ordinary
+    branch on purpose (Plan 6 Task 10, ruling 1).** Two verdicts arrive at
+    that shape: an attached document's stored one, and -- since the final
+    whole-plan review reversed carry-forward 18 -- a crisis disclosed in an
+    EARLIER turn's question. They are the same strength of evidence (a
+    disclosure on turn one is historical by turn four), resolve by severity,
+    and are rendered through the one `crisis_response` field below.
     `localised.document_crisis` means the question was clean and a crisis
     phrase was found only in an attached file -- weaker evidence, possibly
     historical or about someone else. That turn carries a real legal answer,
@@ -627,10 +727,17 @@ def to_response(
             localised, corpus_version, quota_remaining, conversation_id
         )
 
+    # Both alongside-strength verdicts reach this field, resolved by severity
+    # rather than by which layer found one: an attached document's stored
+    # verdict and a crisis disclosed in an EARLIER turn's question (CF-18,
+    # reversed -- see `LocalisedAnswer.history_crisis`). Neither replaces the
+    # legal answer; `openlaw.language.pipeline._with_alongside_crisis` has
+    # already prepended the numbers to `helplines` and the prose to `footer`.
+    alongside = most_urgent_crisis(
+        (localised.document_crisis, localised.history_crisis)
+    )
     document_help = (
-        crisis_text(localised.document_crisis, localised.language)
-        if localised.document_crisis is not None
-        else None
+        crisis_text(alongside, localised.language) if alongside is not None else None
     )
     return AskResponse(
         answer=_render_answer(localised.answer, localised.language),

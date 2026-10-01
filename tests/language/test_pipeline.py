@@ -980,9 +980,13 @@ def test_the_pipeline_is_handed_stored_verdicts_and_never_document_text() -> Non
     parameters = inspect.signature(answer_in_language).parameters
 
     assert "document_crisis_kinds" in parameters
-    assert not {"document_context", "excerpts", "pages", "document_text"} & set(
-        parameters
-    )
+    assert not {
+        "document_context",
+        "document_excerpts",
+        "excerpts",
+        "pages",
+        "document_text",
+    } & set(parameters)
 
 
 # --- Hindi is not second-class on any of these paths ----------------------

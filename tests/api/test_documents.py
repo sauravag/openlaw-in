@@ -237,26 +237,67 @@ def test_uploads_disabled_refuses_the_upload_with_helplines(tmp_path: Path) -> N
     _assert_carries_help(response.json())
 
 
-def test_uploads_disabled_ignores_document_ids_on_ask(tmp_path: Path) -> None:
+def test_uploads_disabled_reads_no_document_text_on_ask(tmp_path: Path) -> None:
     """A deployment that turns uploads off mid-flight must not 500, and must
-    not read a document either -- the ids are ignored, the question is still
-    answered, and the person still gets help."""
+    not read a document's TEXT either -- the question is still answered, and
+    the person still gets help."""
     from .conftest import RecordingAnswerFn
 
-    settings = api_settings(tmp_path, uploads_enabled=False)
     answer_fn = RecordingAnswerFn()
-    client = build_client(tmp_path, settings=settings, answer_fn=answer_fn)
+    client = build_client(tmp_path, answer_fn=answer_fn)
+    document = upload(client, headers=bearer()).json()
 
-    response = client.post(
+    off = build_client(
+        tmp_path,
+        settings=api_settings(tmp_path, uploads_enabled=False),
+        answer_fn=answer_fn,
+    )
+    response = off.post(
         "/ask",
         json={
             "question": "my landlord kept my deposit",
-            "document_ids": ["0f1f2f3f-4f5f-6f7f-8f9f-aabbccddeeff"],
+            "conversation_id": document["conversation_id"],
+            "document_ids": [document["id"]],
         },
+        headers=bearer(),
     )
 
     assert response.status_code == 200
-    assert answer_fn.calls[0]["document_crisis_kinds"] == ()
+    assert answer_fn.calls[-1]["document_excerpts"] == ()
+
+
+def test_uploads_disabled_still_carries_a_stored_document_crisis_verdict(
+    tmp_path: Path,
+) -> None:
+    """LOW-2: the kill switch withdraws the CAPABILITY, never the safety
+    signal. A protection order uploaded before the switch was thrown keeps
+    attaching its helplines to every later turn, even though not one byte of
+    its text is decrypted."""
+    from .conftest import RecordingAnswerFn
+
+    answer_fn = RecordingAnswerFn()
+    client = build_client(tmp_path, answer_fn=answer_fn)
+    order = b"FIR copy: the complainant states that her husband beats her daily."
+    document = upload(client, content=order, headers=bearer()).json()
+
+    off = build_client(
+        tmp_path,
+        settings=api_settings(tmp_path, uploads_enabled=False),
+        answer_fn=answer_fn,
+    )
+    response = off.post(
+        "/ask",
+        json={
+            "question": "can I claim my security deposit back?",
+            "conversation_id": document["conversation_id"],
+            "document_ids": [document["id"]],
+        },
+        headers=bearer(),
+    )
+
+    assert response.status_code == 200
+    assert answer_fn.calls[-1]["document_crisis_kinds"] == ("domestic_violence",)
+    assert answer_fn.calls[-1]["document_excerpts"] == ()
 
 
 def test_too_many_document_ids_on_ask_is_refused_with_helplines(

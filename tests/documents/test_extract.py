@@ -19,8 +19,19 @@ import pytest
 from pypdf import PdfWriter
 
 from openlaw.config import Settings
-from openlaw.documents import DOCUMENT_EXCERPT_PREFIX, MAX_EXCERPT_CHARS
-from openlaw.documents.extract import ExtractedPage, ExtractionError, chunk_pages, extract_pages
+from openlaw.documents import (
+    CHARS_PER_TEXT_PAGE,
+    DOCUMENT_EXCERPT_PREFIX,
+    MAX_EXCERPT_CHARS,
+    MAX_PAGE_CHARS,
+)
+from openlaw.documents.extract import (
+    ExtractedPage,
+    ExtractionError,
+    chunk_pages,
+    extract_pages,
+    parse_excerpt_id,
+)
 
 _PDF_TYPE = "application/pdf"
 _DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -309,13 +320,84 @@ def test_extracts_a_two_page_pdf_with_correct_one_based_monotonic_pages() -> Non
     assert "Page two text here" in pages[1].text
 
 
-def test_extracts_a_docx_as_one_synthetic_page() -> None:
+def test_extracts_a_short_docx_as_one_synthetic_page() -> None:
     data = _docx_bytes(["First paragraph.", "Second paragraph."])
     pages = extract_pages(data, _DOCX_TYPE, _settings())
     assert len(pages) == 1
     assert pages[0].page_number == 1
     assert "First paragraph." in pages[0].text
     assert "Second paragraph." in pages[0].text
+
+
+# --- HIGH-2: one page-shaped limit, every format ------------------------
+
+
+def test_a_long_docx_is_paginated_exactly_as_plain_text_is() -> None:
+    """The HIGH-2 regression. `_extract_docx_pages` reported `page_number=1`
+    for the whole document whatever its size, so `max_document_pages` and the
+    `ceil(pages / PAGES_PER_QUOTA_UNIT)` quota charge were both inert for
+    `.docx` -- a 124 KB file expanding to 20.2 MB of text was accepted as one
+    page and one quota unit while the same text as `.txt` was refused.
+
+    Revert the pagination and this asserts `1 == 4`.
+    """
+    paragraph = "x" * (CHARS_PER_TEXT_PAGE // 2)
+    data = _docx_bytes([paragraph] * 7)
+
+    pages = extract_pages(data, _DOCX_TYPE, _settings())
+
+    assert len(pages) > 1
+    assert [page.page_number for page in pages] == list(range(1, len(pages) + 1))
+    assert all(len(page.text) <= CHARS_PER_TEXT_PAGE for page in pages)
+
+
+def test_a_docx_and_the_same_text_as_txt_report_the_same_page_count() -> None:
+    """One limit governs every format: the two paginated types cannot
+    disagree about how many pages the same characters are."""
+    paragraph = "y" * (CHARS_PER_TEXT_PAGE // 2)
+    docx_pages = extract_pages(
+        _docx_bytes([paragraph] * 7), _DOCX_TYPE, _settings()
+    )
+    text = "\n\n".join([paragraph] * 7)
+    text_pages = extract_pages(text.encode(), _TEXT_TYPE, _settings())
+
+    assert len(docx_pages) == len(text_pages)
+
+
+def test_a_docx_past_the_page_cap_is_refused_like_a_long_text_file() -> None:
+    """The cap that already existed now actually fires for `.docx`."""
+    settings = _settings(max_document_pages=2)
+    paragraph = "z" * CHARS_PER_TEXT_PAGE
+    data = _docx_bytes([paragraph] * 5)
+
+    with pytest.raises(ExtractionError) as exc_info:
+        extract_pages(data, _DOCX_TYPE, settings)
+
+    assert exc_info.value.reason == "too_many_pages"
+
+
+def test_a_pdf_page_holding_more_than_max_page_chars_is_refused() -> None:
+    """PDF's pagination is real and must stay real, so its volume is bounded
+    per page instead (`MAX_PAGE_CHARS`). Without it a one-page PDF with a
+    crafted content stream buys one quota unit and unbounded excerpt rows --
+    the same hole as the docx one, reached by the one format this module does
+    not paginate itself."""
+    oversized = " ".join(["word"] * (MAX_PAGE_CHARS // 2))
+    data = _text_pdf_bytes([oversized])
+
+    with pytest.raises(ExtractionError) as exc_info:
+        extract_pages(data, _PDF_TYPE, _settings())
+
+    assert exc_info.value.reason == "too_many_pages"
+
+
+def test_an_ordinary_dense_pdf_page_is_still_accepted() -> None:
+    """The volume cap must not refuse real paperwork: `MAX_PAGE_CHARS` is four
+    times a densely typed A4 page."""
+    dense = " ".join(["word"] * (CHARS_PER_TEXT_PAGE // 10))
+    pages = extract_pages(_text_pdf_bytes([dense]), _PDF_TYPE, _settings())
+
+    assert len(pages) == 1
 
 
 def test_extracts_plain_text_as_one_page() -> None:
@@ -427,3 +509,26 @@ def test_a_single_word_longer_than_the_cap_is_hard_split_without_exceeding_it() 
     for _, _, text in excerpts:
         assert len(text) <= MAX_EXCERPT_CHARS
     assert "".join(text for _, _, text in excerpts) == giant_word
+
+
+# --- parse_excerpt_id: the inverse of chunk_pages ----------------------
+
+
+def test_parse_excerpt_id_round_trips_every_id_chunk_pages_builds() -> None:
+    pages = (
+        ExtractedPage(page_number=1, text="first page"),
+        ExtractedPage(page_number=7, text="seventh page"),
+    )
+    excerpts = chunk_pages(pages, "11111111-2222-3333-4444-555555555555")
+
+    for excerpt_id, page_number, _ in excerpts:
+        location = parse_excerpt_id(excerpt_id)
+        assert location is not None
+        assert location.document_id == "11111111-2222-3333-4444-555555555555"
+        assert location.page_number == page_number
+
+
+def test_parse_excerpt_id_returns_none_for_anything_else() -> None:
+    """A stored claim is data: a malformed id must not break a transcript."""
+    for value in ("", "doc:", "doc:abc:p1", "acts_india_v1:1:0", "doc:a:pX:0"):
+        assert parse_excerpt_id(value) is None

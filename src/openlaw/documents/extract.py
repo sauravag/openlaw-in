@@ -44,12 +44,44 @@ to a caller; instead, `extract_pages` raises `ExtractionError(reason=
 tell the user plainly that the scan could not be read. There is no OCR
 anywhere in this module.
 
+**One limit governs every format, and `page_count` is how it is
+expressed.** `page_count` bounds three things at once -- the page cap
+(`Settings.max_document_pages`), the quota charge
+(`max(1, ceil(page_count / PAGES_PER_QUOTA_UNIT))`) and, through
+`chunk_pages`, how many encrypted excerpt rows one upload can create. It is
+therefore only a real bound if it is a function of extracted VOLUME for
+every content type, and exactly one format gets that for free:
+
+* **PDF** reports its real page count, read from the `/Pages` tree before
+  any text is decoded. Volume per page is not ours to choose, so
+  `MAX_PAGE_CHARS` bounds it instead (see below).
+* **`.docx`** has no pagination of its own and is cut into synthetic pages of
+  `CHARS_PER_TEXT_PAGE`, exactly as `text/plain` is. It previously reported
+  `page_number=1` for the whole document whatever its size, which made both
+  the page cap and the quota charge inert for it: a 124 KB `.docx` expanding
+  to 20.2 MB of text was accepted as one page, one quota unit and ~28,000
+  encrypted rows, while the same text as `.txt` was refused (final whole-plan
+  review, HIGH-2). Pagination closes that with the cap that already exists
+  rather than a second, docx-only limit.
+* **`text/plain`** is cut the same way (Plan 6 Task 15, the instance that was
+  reported then).
+
+`MAX_PAGE_CHARS` is the companion bound for the one format this module does
+not paginate: a page whose extracted text exceeds it is refused as
+`too_many_pages`, because "more text than a page can hold" is the same
+refusal as "more pages than we read" expressed in the other unit. For the two
+paginated formats it can never fire, which is the point -- there is one rule,
+and each format either satisfies it by construction or is checked against it.
+
 **Page provenance is never dropped.** Every `ExtractedPage` carries its
-1-based `page_number`; DOCX has no native pagination, so its whole content
-is `page_number=1` (documented as "one synthetic page" in the plan). Every
-excerpt `chunk_pages` produces carries the page it came from, both in
-`excerpt_id` and as its own return field, because the citation class this
-feeds ("From your document, page 2") is meaningless without it.
+1-based `page_number`; for `.docx` and `text/plain` that number is synthetic
+(a fixed character stride, so re-extracting the same bytes reproduces the
+same numbers), for PDF it is the real page. Every excerpt `chunk_pages`
+produces carries the page it came from, both in `excerpt_id` and as its own
+return field, because the citation class this feeds ("From your document,
+page 2") is meaningless without it -- and `parse_excerpt_id` is the inverse,
+so a stored excerpt id can be resolved back to its document and page without
+reading the document.
 
 **Excerpt ids are deterministic.** `chunk_pages` derives each excerpt_id
 from `document_id`, the page number, and the excerpt's ordinal position on
@@ -83,6 +115,7 @@ from openlaw.documents import (
     CHARS_PER_TEXT_PAGE,
     DOCUMENT_EXCERPT_PREFIX,
     MAX_EXCERPT_CHARS,
+    MAX_PAGE_CHARS,
 )
 
 _PDF_CONTENT_TYPE = "application/pdf"
@@ -166,6 +199,7 @@ def extract_pages(data: bytes, content_type: str, settings: Settings) -> tuple[E
         pages = _extract_text_pages(data)
 
     _require_page_count_within_cap(len(pages), settings)
+    _require_page_volume_within_cap(pages)
 
     if not any(page.text.strip() for page in pages):
         raise ExtractionError(
@@ -286,7 +320,7 @@ def _extract_docx_pages(data: bytes) -> tuple[ExtractedPage, ...]:
         ) from exc
 
     text = "\n\n".join(paragraph for paragraph in paragraphs if paragraph.strip())
-    return (ExtractedPage(page_number=1, text=text),)
+    return _paginate(text)
 
 
 def _require_page_count_within_cap(page_count: int, settings: Settings) -> None:
@@ -306,20 +340,47 @@ def _require_page_count_within_cap(page_count: int, settings: Settings) -> None:
         )
 
 
-def _extract_text_pages(data: bytes) -> tuple[ExtractedPage, ...]:
-    """Decode plain text into synthetic pages of `CHARS_PER_TEXT_PAGE`.
+def _require_page_volume_within_cap(pages: tuple[ExtractedPage, ...]) -> None:
+    """Refuse a document any page of which holds more than `MAX_PAGE_CHARS`.
 
-    Plain text has no pagination of its own, so one is imposed: see
-    `CHARS_PER_TEXT_PAGE`'s comment for the metering and volume hole that
-    treating any size of text file as a single page left open. The split is
-    on a fixed character count rather than paragraph boundaries on purpose --
-    page provenance for a text file is synthetic either way, and a fixed
+    The other half of the one page-shaped limit, applied to EVERY content
+    type (final whole-plan review, HIGH-2). `_require_page_count_within_cap`
+    bounds how many pages there are; this bounds what a page may contain, so
+    that `page_count` -- which the quota charge and the excerpt-row count are
+    both derived from -- cannot be made meaningless by a format whose
+    pagination this module does not control.
+
+    Unreachable for `text/plain` and `.docx`, by construction: `_paginate`
+    cuts both at `CHARS_PER_TEXT_PAGE`, a quarter of this cap. It exists for
+    PDF, whose real pagination must be preserved for provenance and whose
+    per-page extracted volume is chosen by whoever crafted the file.
+    """
+    if any(len(page.text) > MAX_PAGE_CHARS for page in pages):
+        raise ExtractionError(
+            "too_many_pages",
+            "This document holds more text on one page than we can read. "
+            "Please upload a shorter document.",
+        )
+
+
+def _paginate(text: str) -> tuple[ExtractedPage, ...]:
+    """Cut `text` into synthetic pages of `CHARS_PER_TEXT_PAGE`.
+
+    Shared by `text/plain` and `.docx`, which both arrive as one string and
+    neither of which has pagination of its own -- one function, so the limit
+    that governs them cannot drift between the two formats (the way it did
+    until HIGH-2: the identical fix was applied to text and not to docx).
+    See `CHARS_PER_TEXT_PAGE`'s comment for the metering and volume hole that
+    treating any size of input as a single page leaves open.
+
+    The split is on a fixed character count rather than paragraph boundaries
+    on purpose -- page provenance here is synthetic either way, and a fixed
     stride is deterministic, so re-extracting the same bytes reproduces the
     same page numbers and therefore the same `excerpt_id`s (the stability
-    guarantee `chunk_pages` documents). A document shorter than one page
-    stays exactly one page, as it always was.
+    guarantee `chunk_pages` documents). Text shorter than one page stays
+    exactly one page, as it always was, so an ordinary one-page notice in
+    either format is unaffected.
     """
-    text = data.decode("utf-8", errors="replace")
     if len(text) <= CHARS_PER_TEXT_PAGE:
         return (ExtractedPage(page_number=1, text=text),)
     return tuple(
@@ -329,6 +390,11 @@ def _extract_text_pages(data: bytes) -> tuple[ExtractedPage, ...]:
         )
         for index, offset in enumerate(range(0, len(text), CHARS_PER_TEXT_PAGE))
     )
+
+
+def _extract_text_pages(data: bytes) -> tuple[ExtractedPage, ...]:
+    """Decode plain text into synthetic pages (see `_paginate`)."""
+    return _paginate(data.decode("utf-8", errors="replace"))
 
 
 def chunk_pages(
@@ -350,6 +416,50 @@ def chunk_pages(
             excerpt_id = f"{DOCUMENT_EXCERPT_PREFIX}{document_id}:p{page.page_number}:{ordinal}"
             excerpts.append((excerpt_id, page.page_number, chunk_text))
     return tuple(excerpts)
+
+
+#: The shape `chunk_pages` gives every excerpt id, as a pattern, so
+#: `parse_excerpt_id` reads back exactly what that function writes. A
+#: `document_id` is a UUID and therefore contains no `:`, which is what makes
+#: the three parts unambiguous.
+_EXCERPT_ID_PATTERN = re.compile(
+    rf"^{re.escape(DOCUMENT_EXCERPT_PREFIX)}"
+    r"(?P<document_id>[^:]+):p(?P<page_number>\d+):(?P<ordinal>\d+)$"
+)
+
+
+class ExcerptLocation(BaseModel):
+    """Where a stored excerpt id points: its document, and the page within it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    document_id: str
+    page_number: int
+
+
+def parse_excerpt_id(excerpt_id: str) -> ExcerptLocation | None:
+    """Return the document and page `excerpt_id` names, or `None`.
+
+    The inverse of `chunk_pages`' id construction, and deliberately in the
+    same module as it so the two cannot drift. It exists because a reloaded
+    transcript has to re-attach a `DocumentCitation` to a stored
+    `DocumentClaim` (final whole-plan review, MEDIUM-2): the claim carries
+    only `excerpt_ids`, and `filename`/`page_number` are "the only
+    verification available for a statement about a document only they hold".
+    The page number is recoverable from the id itself -- no decryption, no
+    excerpt row read, and no new column.
+
+    Returns `None` rather than raising for anything that is not one of our
+    ids: a stored claim is data, and a transcript must still render when one
+    row of it is malformed.
+    """
+    match = _EXCERPT_ID_PATTERN.match(excerpt_id)
+    if match is None:
+        return None
+    return ExcerptLocation(
+        document_id=match.group("document_id"),
+        page_number=int(match.group("page_number")),
+    )
 
 
 def _paragraphs(text: str) -> list[str]:

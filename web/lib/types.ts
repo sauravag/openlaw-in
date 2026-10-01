@@ -195,6 +195,22 @@ export interface ConversationTurnCardData {
   answer: string
   document_answer: string | null
   language: string
+  /**
+   * Crisis content carried on a RESTORED turn, so help survives a reload.
+   *
+   * Optional, like `ConversationViewData.documents`, for the same reason: a
+   * response from a server that predates these fields must still restore the
+   * transcript rather than failing its type guard and losing the thread.
+   * `turnCrisis` in `lib/thread.ts` reads them for a `replay` outcome exactly
+   * as it does for a live one.
+   */
+  crisis_response?: string | null
+  helplines?: Helpline[]
+  is_answerable?: boolean
+  /** Where in the reader's own paperwork each restored document claim came
+   * from. Without it a restored claim about somebody's lease outlives the only
+   * pointer that lets her check it against her own paper. */
+  document_citations?: DocumentCitationCard[]
 }
 
 /**

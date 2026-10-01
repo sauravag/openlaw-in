@@ -67,6 +67,14 @@ an uploaded document is prose an attacker may have influenced (see
 `openlaw.answers.validate`'s "fifth route"), so it gets the same treatment
 rather than being trusted because a validator passed its citations.
 
+**History is crisis-scanned, at document strength** (`history_crisis`).
+Until the final whole-plan review nothing in the codebase scanned history at
+all, and carry-forward 18's instruction to do it at question strength would
+have silenced the legal answer on every turn after a disclosure. The verdict
+found here therefore rides ALONGSIDE the answer, exactly as a document's
+stored verdict does, and costs nothing: free regex over the person's own
+earlier questions, never a model call and never over assistant text.
+
 **Language-blind by construction.** Nothing here branches on
 `HistoryTurn.language`: the same code renders a Hindi turn and an English
 one, so a property that holds for English cannot silently fail in
@@ -84,6 +92,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from openlaw.answers.escalation import CrisisKind, detect_crisis, most_urgent_crisis
 from openlaw.answers.schema import Claim, DocumentClaim
 from openlaw.answers.validate import ValidatedAnswer
 from openlaw.documents import (
@@ -151,6 +160,42 @@ class HistoryTurn(BaseModel):
             document_claims=answer.document_claims,
             language=language,
         )
+
+
+def history_crisis(turns: tuple[HistoryTurn, ...]) -> CrisisKind | None:
+    """Return the most urgent crisis disclosed in an EARLIER turn's question.
+
+    Carry-forward 18, as the final whole-plan review reversed it. CF-18 ruled
+    that a crisis in history should be QUESTION-strength and short-circuit the
+    turn; applied literally, a woman who discloses abuse on turn one could
+    never receive a legal answer again in that conversation, which is exactly
+    the harm the "rides alongside" ruling exists to prevent. A disclosure on
+    turn one IS historical by turn four -- the same category of weaker
+    evidence as a document's stored verdict -- so the verdict found here is
+    carried at DOCUMENT strength: `openlaw.language.pipeline
+    ._with_alongside_crisis` attaches its helplines beside a full legal
+    answer, and the legal question is still answered.
+
+    **The FREE regex layer only, and deliberately.** `detect_crisis` is a
+    deterministic pattern match -- no model call, no cost, no API key. History
+    grows with every turn, so a paid classifier call here would make the price
+    of turn ten proportional to turns one through nine; the stored document
+    verdict exists to avoid that same shape of cost. The coverage limit is
+    therefore the regex layer's own (English, transliterated Hinglish, and the
+    narrow precision-tuned Devanagari set), and the compensating control is
+    that the question of every turn, including this one, still reaches the
+    paid classifier on its own account.
+
+    Reads `turn.question` only -- the person's own words. Never a claim, never
+    model prose: an assistant turn's text is this system's own output, and
+    scanning it would route on the helpline wording it had already emitted.
+
+    NOT windowed by `recent_turns`: `MAX_HISTORY_TURNS` bounds what is
+    rendered into a prompt, which is a cost budget. A safety signal that
+    expired after six turns would be a disclosure this system heard and then
+    forgot, which is the defect CF-18 was opened about.
+    """
+    return most_urgent_crisis(detect_crisis(turn.question) for turn in turns)
 
 
 def recent_turns(turns: tuple[HistoryTurn, ...]) -> tuple[HistoryTurn, ...]:

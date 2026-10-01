@@ -31,6 +31,7 @@ from openlaw.documents.store import (
     audit,
     delete_document,
     list_conversation_documents,
+    load_document_crisis_kinds,
     load_excerpts,
     store_document,
 )
@@ -488,3 +489,41 @@ def test_a_deleted_document_leaves_the_listing() -> None:
     assert [entry.id for entry in list_conversation_documents(session, conversation.id, owner)] == [
         second.id
     ]
+
+
+# --- LOW-2: verdicts without text, for the uploads kill switch --------------
+
+
+def test_load_document_crisis_kinds_of_no_documents_is_empty() -> None:
+    assert load_document_crisis_kinds(_session(), (), Owner(None, "t")) == ()
+
+
+def test_load_document_crisis_kinds_returns_the_stored_verdict_only() -> None:
+    """With uploads disabled the route reads verdicts and no text. This needs
+    no `Settings` at all, which is the structural half of that: a function
+    that takes no keyring cannot decrypt an excerpt."""
+    session = _session()
+    settings = _settings()
+    owner = Owner(None, "token-a")
+    conversation = _conversation(session, owner, settings)
+    order = b"FIR copy: the complainant states that her husband beats her daily."
+    document = store_document(
+        session, owner, conversation.id, "fir.txt", _TEXT_TYPE, order, settings
+    )
+
+    kinds = load_document_crisis_kinds(session, (document.id,), owner)
+
+    assert kinds == ("domestic_violence",)
+
+
+def test_load_document_crisis_kinds_refuses_another_owners_document() -> None:
+    session = _session()
+    settings = _settings()
+    owner = Owner(None, "token-a")
+    conversation = _conversation(session, owner, settings)
+    document = store_document(
+        session, owner, conversation.id, "f.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+
+    with pytest.raises(AccessDenied):
+        load_document_crisis_kinds(session, (document.id,), Owner(None, "token-b"))

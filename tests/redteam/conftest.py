@@ -203,18 +203,23 @@ class ObedientModel:
         state: str | None,
         *,
         history: tuple = (),
-        document_context: DocumentContext | None = None,
+        document_excerpts: tuple = (),
         document_crisis_kinds: tuple[str | None, ...] = (),
     ) -> LocalisedAnswer:
         self.calls.append(
             {
                 "question": question,
                 "language": language,
-                "document_context": document_context,
+                "document_excerpts": document_excerpts,
                 "document_crisis_kinds": document_crisis_kinds,
             }
         )
-        documents = document_context or DocumentContext()
+        # Every excerpt the route decrypted is treated as selected. The real
+        # pipeline ranks them against the TRANSLATED query first (HIGH-1);
+        # skipping that here is deliberate, and strictly more hostile: it puts
+        # every attack body in front of the validator rather than only the
+        # ones BM25 happened to rank.
+        documents = DocumentContext(excerpts=tuple(document_excerpts))
         context = retrieval_context(question)
         draft = obedient_draft(documents, context, self.hostile_text or question)
         validated = validate_answer(draft, context, documents)

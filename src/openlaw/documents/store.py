@@ -257,24 +257,41 @@ def load_attached_documents(
     .answer_in_conversation`/`answer_in_language` without re-querying. It is
     read from the stored column only: nothing here re-scans or re-classifies
     document text, which is what keeps a document's crisis verdict free on
-    every turn after the upload that computed it.
+    every turn after the upload that computed it. A caller that wants ONLY
+    those verdicts -- the uploads kill switch is one, see
+    `load_document_crisis_kinds` -- should not come through here, because this
+    function decrypts.
+
+    **Every excerpt of every attached document is decrypted, and the bound on
+    that is the page cap rather than a second selection pass.**
+    `openlaw.documents.context.select_excerpts` keeps at most
+    `MAX_DOCUMENT_EXCERPTS` of what this returns, so "decrypt only what is
+    selected" is the obvious optimisation -- and it is not possible as stated:
+    selection is BM25 over the document's own excerpts, so it needs the
+    plaintext of ALL of them to compute term frequencies and the IDF
+    denominator before it can rank any. Doing it anyway would mean two
+    decryption passes over every row (one to score, one to fetch the winners)
+    plus a streaming ranker, to save memory that is already bounded.
+
+    What bounds it is `openlaw.documents.extract`'s page caps, which the final
+    whole-plan review's HIGH-2 closed for every content type: at most
+    `max_document_pages * MAX_PAGE_CHARS` characters per document (20 *
+    12,000 = 240,000, so ~200 excerpt rows), times
+    `max_documents_per_conversation`. Before HIGH-2 a single `.docx` could
+    reach ~28,000 rows and ~32 MB of plaintext per question -- the
+    amplification the review measured -- not because this function decrypts
+    eagerly but because nothing bounded what had been stored.
     """
     if not document_ids:
         return AttachedDocuments(excerpts=(), crisis_kinds=())
 
     keyring = load_keyring(settings)
     excerpts: list[DocumentExcerpt] = []
-    crisis_kinds: list[str | None] = []
-    for document_id in document_ids:
-        document = _find_owned_document(session, document_id, owner)
-        if document is None:
-            audit_fn(session, document_id, owner, "denied")
-            raise AccessDenied(
-                f"document {document_id!r} is not accessible to this identity"
-            )
-        audit_fn(session, document_id, owner, "read")
-        crisis_kinds.append(document.crisis_kind)
-
+    documents = _resolve_owned_documents(session, document_ids, owner, audit_fn)
+    crisis_kinds: list[str | None] = [
+        document.crisis_kind for document in documents
+    ]
+    for document_id, document in zip(document_ids, documents):
         rows = (
             session.execute(
                 select(DocumentExcerptRow)
@@ -297,6 +314,66 @@ def load_attached_documents(
             )
     return AttachedDocuments(
         excerpts=tuple(excerpts), crisis_kinds=tuple(crisis_kinds)
+    )
+
+
+def _resolve_owned_documents(
+    session: Session,
+    document_ids: tuple[str, ...],
+    owner: Owner,
+    audit_fn: AuditFn,
+) -> list[Document]:
+    """Return the `Document` rows `owner` owns, in `document_ids` order.
+
+    The single implementation of the ownership check and its audit trail,
+    shared by `load_attached_documents` and `load_document_crisis_kinds` so
+    the two cannot drift: a `denied` row is written (durably, by the caller's
+    `audit_fn`) before the raise, a `read` row for every id that resolves, and
+    the FIRST unresolvable id raises rather than a partial set coming back.
+    """
+    documents: list[Document] = []
+    for document_id in document_ids:
+        document = _find_owned_document(session, document_id, owner)
+        if document is None:
+            audit_fn(session, document_id, owner, "denied")
+            raise AccessDenied(
+                f"document {document_id!r} is not accessible to this identity"
+            )
+        audit_fn(session, document_id, owner, "read")
+        documents.append(document)
+    return documents
+
+
+def load_document_crisis_kinds(
+    session: Session,
+    document_ids: tuple[str, ...],
+    owner: Owner,
+    audit_fn: AuditFn = audit,
+) -> tuple[str | None, ...]:
+    """Return only the STORED crisis verdicts of `document_ids`, aligned.
+
+    The verdicts-without-text view of `load_attached_documents`, and the
+    reason it exists is the uploads kill switch (final whole-plan review,
+    LOW-2). With `Settings.uploads_enabled` off, `openlaw.api.turns` reads no
+    document TEXT -- that is what the switch is for -- but it must still read
+    the verdicts: a protection order uploaded before the switch was thrown is
+    already stored, its crisis helplines were already being shown on every
+    turn, and a disabled feature must not withdraw a safety signal it has
+    already given. Capability is what the switch revokes; help is not a
+    capability.
+
+    Takes no `Settings` because it decrypts nothing -- `crisis_kind` is a
+    plain column, written once at upload by
+    `openlaw.documents.extract.scan_for_crisis`. Ownership and auditing are
+    `_resolve_owned_documents`', identical to the full read.
+    """
+    if not document_ids:
+        return ()
+    return tuple(
+        document.crisis_kind
+        for document in _resolve_owned_documents(
+            session, document_ids, owner, audit_fn
+        )
     )
 
 

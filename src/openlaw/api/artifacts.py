@@ -69,7 +69,11 @@ from openlaw.api.schemas import (
     ConversationDocumentCard,
     ConversationTurnCard,
     ConversationView,
+    DocumentCitationCard,
     DocumentSummary,
+    crisis_card_helplines,
+    render_claim_answer,
+    render_crisis_answer,
     render_document_claims,
     validated_uuid,
 )
@@ -86,7 +90,8 @@ from openlaw.db.conversations import (
 from openlaw.db.models import Document
 from openlaw.answers.history import HistoryTurn
 from openlaw.documents import ALLOWED_CONTENT_TYPES, PAGES_PER_QUOTA_UNIT
-from openlaw.documents.extract import ExtractionError
+from openlaw.answers.escalation import detect_crisis
+from openlaw.documents.extract import ExtractionError, parse_excerpt_id
 from openlaw.documents.fence import sanitise
 from openlaw.documents.store import (
     StoredDocument,
@@ -474,10 +479,11 @@ def read_conversation(
             raise_refusal("not_found")
         documents = list_conversation_documents(session, conversation_id, owner)
         notice = _retention_notice(owner, settings, language)
+    filenames = {document.id: document.filename for document in documents}
     return ConversationView(
         conversation_id=conversation_id,
         turns=tuple(
-            _turn_card(index, turn) for index, turn in enumerate(turns)
+            _turn_card(index, turn, filenames) for index, turn in enumerate(turns)
         ),
         documents=tuple(
             _document_card(document, notice) for document in documents
@@ -506,21 +512,87 @@ def _document_card(
     )
 
 
-def _turn_card(index: int, turn: HistoryTurn) -> ConversationTurnCard:
-    """Render one stored turn, keeping document claims apart from legal ones.
+def _turn_card(
+    index: int, turn: HistoryTurn, filenames: dict[str, str]
+) -> ConversationTurnCard:
+    """Render one stored turn through the same renderers a live turn uses.
 
-    Both halves go through the same renderers a live turn uses
-    (`openlaw.api.schemas.render_document_claims` for the document half), so a
-    reloaded transcript cannot become the one place where a statement about
-    somebody's lease reads as law.
+    EVERY half goes through the shared renderer, and that is the whole fix for
+    three findings of the final whole-plan review that were one defect in this
+    function: `render_claim_answer` (so an unanswerable turn reloads with the
+    localised "no verifiable answer" fallback instead of `""`, MEDIUM-1),
+    `render_crisis_answer` + `crisis_card_helplines` (so a crisis turn reloads
+    with its helpline card rather than a blank, HIGH-3), `render_document_claims`
+    (so a statement about somebody's lease never reads as law), and
+    `_replayed_citations` (so a document claim keeps the only pointer that lets
+    its reader check it, MEDIUM-2).
+
+    **The crisis is re-derived, not stored.** `detect_crisis` over the person's
+    own stored question: free, deterministic, no migration, and no model call
+    on a read path. The narrowing it accepts is that a crisis only the paid
+    CLASSIFIER caught is not restored -- the README states that limit rather
+    than this function hiding it. A turn that somehow holds BOTH claims and a
+    crisis phrase renders its claims with the card beside them, which is the
+    "rides alongside" composition the rest of the system already uses.
     """
+    crisis = detect_crisis(turn.question)
+    crisis_answer, crisis_response = (
+        render_crisis_answer(crisis, turn.language) if crisis is not None else ("", None)
+    )
+    answer = (
+        crisis_answer
+        if crisis is not None and not turn.claims
+        else render_claim_answer(turn.claims, turn.language)
+    )
     return ConversationTurnCard(
         turn_index=index,
         question=turn.question,
-        answer="\n\n".join(claim.text for claim in turn.claims),
+        answer=answer,
         document_answer=render_document_claims(turn.document_claims, turn.language),
         language=turn.language,
+        crisis_response=crisis_response,
+        helplines=crisis_card_helplines(crisis, turn.language),
+        is_answerable=bool(turn.claims) or crisis is not None,
+        document_citations=_replayed_citations(turn, filenames),
     )
+
+
+def _replayed_citations(
+    turn: HistoryTurn, filenames: dict[str, str]
+) -> tuple[DocumentCitationCard, ...]:
+    """Rebuild this turn's document citations from its stored excerpt ids.
+
+    `DocumentClaim` stores only `excerpt_ids`, and `ReplayedTurn` used to
+    hard-code `citations={[]}` -- so a statement about the reader's lease
+    outlived the `filename`/`page_number` that `DocumentCitation`'s docstring
+    calls "the only verification available for a statement about a document
+    only they hold" (final whole-plan review, MEDIUM-2).
+
+    Nothing new is stored to fix it: `openlaw.documents.extract
+    .parse_excerpt_id` reads the document id and page straight back out of the
+    id `chunk_pages` built, and `filenames` is the still-attached document list
+    this endpoint already loaded. A document the reader has since DELETED has
+    no filename, and its citation is then omitted rather than invented -- a
+    pointer into paperwork this service no longer holds would be worse than
+    none. Deduplicated on `excerpt_id`, oldest claim first, so two claims
+    quoting one excerpt yield one card.
+    """
+    cards: dict[str, DocumentCitationCard] = {}
+    for claim in turn.document_claims:
+        for excerpt_id in claim.excerpt_ids:
+            location = parse_excerpt_id(excerpt_id)
+            if location is None or location.document_id not in filenames:
+                continue
+            cards.setdefault(
+                excerpt_id,
+                DocumentCitationCard(
+                    excerpt_id=excerpt_id,
+                    document_id=location.document_id,
+                    filename=filenames[location.document_id],
+                    page_number=location.page_number,
+                ),
+            )
+    return tuple(cards.values())
 
 
 @router.delete("/conversations/{conversation_id}", status_code=204)

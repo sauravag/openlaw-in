@@ -5,6 +5,8 @@ from openlaw.answers.history import (
     HISTORY_QUESTION_FENCE_OPEN,
     HistoryTurn,
 )
+import pytest
+
 from openlaw.answers.prompts import SYSTEM_PROMPT, build_context_message, build_turn_messages
 from openlaw.answers.schema import Claim
 from openlaw.documents.context import DocumentContext, DocumentExcerpt
@@ -183,8 +185,27 @@ def test_excerpt_rendering_is_unchanged_for_a_single_turn_english_question() -> 
     assert "Question:" not in excerpt_text
 
 
+def _document_pass_context() -> RetrievalContext:
+    """The corpus context the DOCUMENT pass is built with: query, no chunks.
+
+    `build_document_turn_messages` passes exactly this, and since LOW-1 it is
+    the only shape that may accompany a non-empty document context -- see
+    `test_a_prompt_can_never_carry_both_a_chunk_and_an_excerpt`.
+    """
+    return RetrievalContext(query="my landlord kept my deposit")
+
+
+def test_a_prompt_can_never_carry_both_a_chunk_and_an_excerpt() -> None:
+    """LOW-1: ruling A's separation is a property of this builder, not of the
+    two call sites remembering to pass an empty argument."""
+    with pytest.raises(ValueError, match="never both"):
+        build_turn_messages(_context(), _document_context())
+
+
 def test_question_is_the_last_message() -> None:
-    messages = build_turn_messages(_context(), _document_context(), _history())
+    messages = build_turn_messages(
+        _document_pass_context(), _document_context(), _history()
+    )
 
     last = messages[-1]
     assert last["role"] == "user"
@@ -194,10 +215,10 @@ def test_question_is_the_last_message() -> None:
 
 
 def test_document_excerpts_are_fenced_and_follow_the_corpus_excerpts() -> None:
-    messages = build_turn_messages(_context(), _document_context())
+    messages = build_turn_messages(_document_pass_context(), _document_context())
 
-    # No history in this call, so index 0 is the corpus-excerpt message and
-    # index 1 is the document-excerpt message, with the question last.
+    # No history in this call, so index 0 is the (empty) corpus-excerpt
+    # message and index 1 is the document-excerpt message, question last.
     assert "Source excerpts:" in _text_of(messages[0])
     document_text = _text_of(messages[1])
     assert DOCUMENT_FENCE_OPEN.format(excerpt_id="doc:lease:1", page=1) in document_text
@@ -227,13 +248,11 @@ def test_prefix_is_byte_stable_across_two_questions_in_one_conversation() -> Non
 
     turn_two = build_turn_messages(
         RetrievalContext(query="can my landlord keep the whole deposit", chunks=chunks),
-        _document_context(),
-        history,
+        history=history,
     )
     turn_three = build_turn_messages(
         RetrievalContext(query="how long does the landlord have to pay it back", chunks=chunks),
-        _document_context(),
-        history,
+        history=history,
     )
 
     assert json.dumps(turn_two[:-1]) == json.dumps(turn_three[:-1])

@@ -381,17 +381,17 @@ def test_production_app_builds_a_working_app_without_touching_qdrant_or_neo4j(
     # EVERY keyword deliberately has NO default (Task 5 review, H1, extended
     # for Plan 6 Task 15): the earlier stub's `state=None` default let
     # `answer_fn` silently drop `language` without any test ever noticing, and
-    # `history`/`document_context`/`document_crisis` are now three more
+    # `history`/`document_excerpts`/`document_crisis` are now three more
     # arguments that could be dropped the same way -- the last of them
     # silently hiding an attached FIR's crisis verdict. A stub that requires
     # all of them turns a dropped one back into an immediate `TypeError`.
     def _fake_answer_in_conversation(
         question, retriever, adapter, registry, glossary, *,
-        history, document_context, document_crisis, state, language,
+        history, document_excerpts, document_crisis, state, language,
     ):
         seen.update(
             question=question, retriever=retriever, state=state, language=language,
-            history=history, document_context=document_context,
+            history=history, document_excerpts=document_excerpts,
             document_crisis=document_crisis,
         )
         return "sentinel-answer"

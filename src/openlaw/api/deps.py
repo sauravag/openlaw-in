@@ -66,10 +66,7 @@ from openlaw.graph.connection import graph_driver
 from openlaw.graph.queries import expand_chunks
 from openlaw.language.glossary import load_glossary
 from openlaw.answers.history import HistoryTurn
-from openlaw.documents.context import (
-    EMPTY_DOCUMENT_CONTEXT,
-    DocumentContext,
-)
+from openlaw.documents.context import DocumentExcerpt
 from openlaw.language.pipeline import (
     LocalisedAnswer,
     resolve_document_crisis,
@@ -348,7 +345,7 @@ class ConversationAnswerFn(Protocol):
         state: str | None,
         *,
         history: tuple[HistoryTurn, ...] = (),
-        document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+        document_excerpts: tuple[DocumentExcerpt, ...] = (),
         document_crisis_kinds: tuple[str | None, ...] = (),
     ) -> LocalisedAnswer:
         """Answer `question` as turn `len(history)` of its conversation."""
@@ -385,7 +382,7 @@ def build_conversation_answer_fn(settings: Settings) -> ConversationAnswerFn:
     **This is what makes multi-turn reachable at all.** `answer_in_conversation`
     has existed since Plan 6 Task 9 and nothing in production called it: this
     module built a single-turn `answer_fn` that passed no history, no document
-    context and no document crisis verdicts, so every one of those paths was
+    excerpts and no document crisis verdicts, so every one of those paths was
     dead code behind a live endpoint. The retriever built below is a
     `ConversationRetriever` -- it re-fetches `carried_chunk_ids` through
     `fetch_chunks_by_id` and merges them into this turn's context -- and the
@@ -410,7 +407,7 @@ def build_conversation_answer_fn(settings: Settings) -> ConversationAnswerFn:
         state: str | None,
         *,
         history: tuple[HistoryTurn, ...] = (),
-        document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+        document_excerpts: tuple[DocumentExcerpt, ...] = (),
         document_crisis_kinds: tuple[str | None, ...] = (),
     ) -> LocalisedAnswer:
         """Answer one turn, in `language` or the language it was asked in.
@@ -438,7 +435,7 @@ def build_conversation_answer_fn(settings: Settings) -> ConversationAnswerFn:
             registry,
             glossary,
             history=history,
-            document_context=document_context,
+            document_excerpts=document_excerpts,
             document_crisis=resolve_document_crisis(document_crisis_kinds),
             state=state,
             language=language,

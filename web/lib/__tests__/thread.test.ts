@@ -74,7 +74,7 @@ describe('turnCrisis', () => {
     expect(crisis?.language).toBe('hi')
   })
 
-  it('is null when there is no crisis, and for a replayed turn', () => {
+  it('is null when there is no crisis, and for a replayed turn without one', () => {
     expect(turnCrisis(turn())).toBeNull()
     expect(
       turnCrisis(
@@ -92,5 +92,53 @@ describe('turnCrisis', () => {
         }),
       ),
     ).toBeNull()
+  })
+
+  // HIGH-3: this returned null for every `replay` outcome, so a restored
+  // crisis turn could not hoist its own helpline card. Revert the change and
+  // both expectations below fail.
+  it('reads the crisis off a replayed turn, in that turn own language', () => {
+    const crisis = turnCrisis(
+      turn({
+        language: 'en',
+        outcome: {
+          kind: 'replay',
+          data: {
+            turn_index: 0,
+            question: 'मैं आत्महत्या करना चाहता हूँ',
+            answer: 'मदद अभी उपलब्ध है -- नीचे देखें।',
+            document_answer: null,
+            language: 'hi',
+            crisis_response: 'अगर आप खुद को नुकसान पहुँचाने के बारे में सोच रहे हैं',
+            helplines: [{ number: '14416', label: 'टेली-मानस' }],
+            is_answerable: true,
+          },
+        },
+      }),
+    )
+
+    expect(crisis?.crisisResponse).toContain('नुकसान')
+    expect(crisis?.helplines).toEqual([{ number: '14416', label: 'टेली-मानस' }])
+    expect(crisis?.language).toBe('hi')
+  })
+
+  it('tolerates a replayed turn from a server with no helpline field', () => {
+    const crisis = turnCrisis(
+      turn({
+        outcome: {
+          kind: 'replay',
+          data: {
+            turn_index: 0,
+            question: 'q',
+            answer: 'a',
+            document_answer: null,
+            language: 'en',
+            crisis_response: 'Help is available.',
+          },
+        },
+      }),
+    )
+
+    expect(crisis?.helplines).toEqual([])
   })
 })

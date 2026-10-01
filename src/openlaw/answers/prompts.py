@@ -257,7 +257,27 @@ def build_turn_messages(
     byte-identical across two calls that share the same `history` and the
     same retrieved chunks, regardless of `context.query` — that stable run
     is the part an automatic OpenRouter cache can actually match.
+
+    **A corpus chunk and a document excerpt can never appear in the same
+    message list, and that is enforced here rather than trusted to callers**
+    (final whole-plan review, LOW-1). Ruling A's two-pass separation was real
+    but rested on two disciplined call sites: `_generate_from_context` passes
+    `EMPTY_DOCUMENT_CONTEXT` and `build_document_turn_messages` passes an
+    empty `RetrievalContext`. This builder accepted both non-empty, so adding
+    a `document_context` argument back at the legal pass's call site would
+    have reopened the HIGH finding Task 13 closed with no test going red. It
+    now raises instead -- one guard in the one function both passes go
+    through, which is cheaper than two non-overlapping builders and catches
+    the same mistake.
     """
+    if context.chunks and document_context.excerpts:
+        raise ValueError(
+            "a prompt may carry corpus chunks or document excerpts, never "
+            "both: the legal pass is never shown a document and the document "
+            "pass is never shown the law (ruling A). Got "
+            f"{len(context.chunks)} chunk(s) and "
+            f"{len(document_context.excerpts)} excerpt(s)."
+        )
     messages: list[dict[str, Any]] = list(
         build_history_messages(
             history,

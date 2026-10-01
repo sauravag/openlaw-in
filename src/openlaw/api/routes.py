@@ -95,7 +95,7 @@ from openlaw.api.auth import AuthError, decode_token, extract_bearer, upsert_use
 from openlaw.api.refusal import crisis_extras, refusal_detail
 from openlaw.api.schemas import AskRequest, AskResponse, QuotaExceeded, to_response
 from openlaw.config import Settings
-from openlaw.api.turns import load_turn_inputs, persist_turn, turn_document_ids
+from openlaw.api.turns import load_turn_inputs, persist_turn, turn_documents
 from openlaw.db.conversations import Owner
 from openlaw.db.quota import (
     QuotaDecision,
@@ -679,7 +679,7 @@ def ask(
     request.state.state = body.state
     request.state.language = body.language
 
-    document_ids = turn_document_ids(
+    documents = turn_documents(
         body.document_ids, settings, body.question, body.state, body.language
     )
     caller = metered_caller(
@@ -689,14 +689,14 @@ def ask(
 
     turn = load_turn_inputs(
         session_factory, settings, caller.owner, body.conversation_id,
-        document_ids, body.question, body.state, body.language,
+        documents, body.question, body.state, body.language,
     )
     localised = answer_fn(
         body.question,
         body.language,
         body.state,
         history=turn.history,
-        document_context=turn.document_context,
+        document_excerpts=turn.document_excerpts,
         document_crisis_kinds=turn.document_crisis_kinds,
     )
     persist_answer_events(localised, settings)

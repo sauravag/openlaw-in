@@ -199,4 +199,101 @@ describe('ConversationThread', () => {
     expect(region).toHaveTextContent('Your lease says two months.')
     expect(region).not.toHaveTextContent('Notice must be one month.')
   })
+
+  // HIGH-3: `ReplayedTurn` rendered `<p>{data.answer}</p>` and nothing else,
+  // so the single most safety-critical response this product produces was the
+  // one that did not survive a reload. Remove the `CrisisAlert` block and this
+  // fails.
+  it('renders a restored crisis turn helpline card above its answer', () => {
+    render(
+      <ConversationThread
+        turns={[
+          turn({
+            outcome: {
+              kind: 'replay',
+              data: {
+                turn_index: 0,
+                question: 'i want to kill myself',
+                answer: 'Help is available right now -- see below.',
+                document_answer: null,
+                language: 'en',
+                crisis_response: 'If you are thinking about harming yourself',
+                helplines: [{ number: '14416', label: 'Tele-MANAS' }],
+                is_answerable: true,
+              },
+            },
+          }),
+        ]}
+        language="en"
+      />,
+    )
+    const alert = screen.getByTestId('crisis')
+    expect(alert).toHaveTextContent('If you are thinking about harming yourself')
+    expect(alert).toHaveTextContent('14416')
+  })
+
+  it('omits a restored crisis box the page has already hoisted', () => {
+    render(
+      <ConversationThread
+        turns={[
+          turn({
+            id: 't1',
+            outcome: {
+              kind: 'replay',
+              data: {
+                turn_index: 0,
+                question: 'i want to kill myself',
+                answer: 'Help is available right now -- see below.',
+                document_answer: null,
+                language: 'en',
+                crisis_response: 'If you are thinking about harming yourself',
+                helplines: [{ number: '14416', label: 'Tele-MANAS' }],
+                is_answerable: true,
+              },
+            },
+          }),
+        ]}
+        language="en"
+        suppressCrisisForTurnId="t1"
+      />,
+    )
+    expect(screen.queryByTestId('crisis')).not.toBeInTheDocument()
+  })
+
+  // MEDIUM-2: `citations={[]}` was hard-coded, so a restored statement about
+  // the reader own paperwork outlived the only pointer letting her check it.
+  it('renders a restored document claim citation', () => {
+    render(
+      <ConversationThread
+        turns={[
+          turn({
+            outcome: {
+              kind: 'replay',
+              data: {
+                turn_index: 0,
+                question: 'q',
+                answer: 'Notice must be one month.',
+                document_answer: 'Your lease says two months.',
+                language: 'en',
+                document_citations: [
+                  {
+                    excerpt_id: 'doc:d1:p2:0',
+                    document_id: 'd1',
+                    filename: 'lease.pdf',
+                    page_number: 2,
+                  },
+                ],
+              },
+            },
+          }),
+        ]}
+        language="en"
+      />,
+    )
+    const region = screen.getByRole('region', {
+      name: getStrings('en').documentCitationsHeading,
+    })
+    expect(region).toHaveTextContent('lease.pdf')
+    expect(region).toHaveTextContent('2')
+  })
 })

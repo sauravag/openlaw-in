@@ -72,3 +72,20 @@ PAGES_PER_QUOTA_UNIT = 5
 # about one densely typed A4 page, so an ordinary one-page notice stays one
 # page and the existing fixtures are unaffected.
 CHARS_PER_TEXT_PAGE = 3_000
+# Maximum characters of extracted text ONE page may contribute, for every
+# content type (final whole-plan review, HIGH-2). `CHARS_PER_TEXT_PAGE`
+# bounds the formats this project paginates itself (`text/plain`, `.docx`) --
+# their pages are synthetic and cut at exactly that stride, so for them this
+# cap can never fire. It exists for PDF, the one format whose pagination is
+# real and therefore not ours to choose: `pypdf.extract_text()` will happily
+# return megabytes for a single page of a crafted, flate-compressed file, and
+# `page_count` is the quantity BOTH `Settings.max_document_pages` and the
+# quota charge are expressed in. Without it, a one-page PDF buys one quota
+# unit and an unbounded number of encrypted excerpt rows -- the identical hole
+# `CHARS_PER_TEXT_PAGE` closed for text and that `.docx` carried until HIGH-2.
+# Four times `CHARS_PER_TEXT_PAGE` is deliberate headroom: a densely typed A4
+# page is about one `CHARS_PER_TEXT_PAGE`, so no real page of a legal document
+# comes close, and the product's ceiling becomes
+# `max_document_pages * MAX_PAGE_CHARS` characters per upload
+# (20 * 12,000 = 240,000) instead of the ~50 MiB a DOCX zip could inflate to.
+MAX_PAGE_CHARS = 4 * CHARS_PER_TEXT_PAGE

@@ -2,6 +2,7 @@ import { getStrings, type UIStrings } from '@/lib/strings'
 import type { ThreadTurn } from '@/lib/thread'
 import type { ConversationTurnCardData } from '@/lib/types'
 import AnswerView from './AnswerView'
+import CrisisAlert from './CrisisAlert'
 import DocumentCitationList from './DocumentCitationList'
 import RefusalNotice from './RefusalNotice'
 
@@ -62,20 +63,38 @@ function QuestionBlock({
  * never show. `restoredTurnNote` says so in words instead, and the document
  * half still goes through `DocumentCitationList` so a restored turn cannot
  * become the one place where a quote from somebody's lease reads as law.
+ *
+ * **Two things a restored turn used to lose, and must not** (final whole-plan
+ * review). Its crisis block: `CrisisAlert` renders FIRST here, above the
+ * answer, exactly as `AnswerView` and `RefusalNotice` render it, so a woman
+ * whose phone reclaimed the tab comes back to Tele-MANAS rather than to her
+ * own disclosure above a blank (HIGH-3). And its document citations, which
+ * were hard-coded empty: `filename` and `page_number` are the only means she
+ * has of checking a statement about her own paperwork, so a claim must never
+ * outlive them (MEDIUM-2).
  */
 function ReplayedTurn({
   data,
   strings,
+  showCrisis,
 }: {
   data: ConversationTurnCardData
   strings: UIStrings
+  showCrisis: boolean
 }) {
   return (
     <article className="flex flex-col gap-3">
+      {showCrisis && data.crisis_response && (
+        <CrisisAlert
+          crisisResponse={data.crisis_response}
+          helplines={data.helplines ?? []}
+          language={data.language}
+        />
+      )}
       <p className="text-lg leading-relaxed whitespace-pre-line text-ink">{data.answer}</p>
       <DocumentCitationList
         documentAnswer={data.document_answer}
-        citations={[]}
+        citations={data.document_citations ?? []}
         language={data.language}
       />
       <p className="border-t border-line pt-3 text-sm leading-relaxed text-muted">
@@ -107,7 +126,13 @@ function TurnOutcomeView({
       />
     )
   }
-  return <ReplayedTurn data={turn.outcome.data} strings={strings} />
+  return (
+    <ReplayedTurn
+      data={turn.outcome.data}
+      strings={strings}
+      showCrisis={showCrisis}
+    />
+  )
 }
 
 /**

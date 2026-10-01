@@ -220,10 +220,21 @@ reading a photograph as an empty document and answering anyway would not be
 — but it is a real coverage gap, not a detail. Adding OCR is a project of its
 own.
 
-**A plain-text file over about 60 KB is refused, and this is documented rather
-than fixed.** Plain text is paginated at 3,000 characters per page
-(`openlaw.documents.CHARS_PER_TEXT_PAGE`), so 60,000 characters is 20 pages
-and anything past that crosses the 20-page cap. Raising the text page size
+**One page-shaped limit governs every format.** `page_count` bounds the page
+cap, the `ceil(pages / 5)` quota charge and the number of encrypted excerpt
+rows one upload can create, so it is only a real bound if it tracks extracted
+volume for each content type. `text/plain` and `.docx` are both paginated at
+3,000 characters (`openlaw.documents.CHARS_PER_TEXT_PAGE`); PDF keeps its real
+page numbers, because a citation saying "page 2" must mean the reader's page 2,
+and its per-page volume is bounded by `openlaw.documents.MAX_PAGE_CHARS`
+(12,000 — four times a densely typed A4 page) instead. `.docx` reported a
+single page whatever its size until the final whole-plan review: a 124 KB file
+expanding to 20.2 MB of text was accepted as one page, one quota unit and
+~28,000 encrypted rows, while the same text as `.txt` was refused.
+
+**A plain-text or Word file over about 60 KB of text is refused, and this is
+documented rather than fixed.** 60,000 characters is 20 pages at 3,000 per
+page, and anything past that crosses the 20-page cap. Raising the text page size
 was considered and rejected: `max_document_pages` is simultaneously the page
 cap, the basis of the `ceil(pages / 5)` quota charge, and the unit a reader
 sees in a document citation, so making a text "page" six or ten times larger
@@ -337,20 +348,59 @@ would otherwise over-trust these paths.
   prints the whole backlog as a review sheet; it is not validated until a
   native speaker has signed off on that sheet. Treat Hindi crisis routing as
   unverified, not as tested.
-- **A Devanagari document contributes no excerpt to the answer at all.** Found
+- **A Devanagari DOCUMENT contributes no excerpt to the answer at all.** Found
   by the adversarial gate while writing it, and not yet fixed.
   `openlaw.index.sparse.tokenise` matches `[a-z0-9]+`, so a document written in
-  Devanagari yields no tokens beyond its digits, shares none with a Devanagari
-  question, and `select_excerpts` returns nothing — the turn proceeds as if no
-  file had been attached, with no refusal shown. Upload-time crisis scanning is
+  Devanagari yields no tokens beyond its digits, can share none with any query,
+  and `select_excerpts` returns nothing — the turn proceeds as if no file had
+  been attached, with no refusal shown. Upload-time crisis scanning is
   unaffected, because it reads the whole document rather than selected
   excerpts. It is not fixed here because `tokenise` is shared with the BM25
   sparse vectors already built into Qdrant
   (`scripts/build_sparse_vectors.py`): widening its pattern would make
   query-time tokenisation disagree with the built index, which is a measured
   retrieval change and a task of its own. Pinned by
-  `tests/redteam/test_document_injection.py::test_a_devanagari_document_contributes_no_excerpt`,
+  `tests/redteam/test_document_injection.py::test_a_devanagari_document_contributes_no_excerpt_even_to_english`,
   so a future fix cannot land without this paragraph being revisited.
+
+  **This paragraph used to be wider than the truth, and the gap was a live
+  defect.** It said "shares none with a *Devanagari question*", which reads as
+  "Hindi documents do not work" and invites the conclusion that a Hindi speaker
+  with an English notice is fine. She was not: excerpt selection ran in the API
+  layer on the **raw** question, before translation, so *any* non-Latin-script
+  questioner got an empty document context whatever language her own document
+  was in — the common case, since Indian legal paper is overwhelmingly in
+  English. `document_answer` came back `null`, no refusal was shown, and the
+  upload's quota was spent. That half is now fixed: selection happens inside
+  `openlaw.language.pipeline.answer_in_conversation`, on the translated query,
+  and `answer_in_conversation` takes unselected excerpts so no caller can
+  select on the wrong string. Only the document-side half above remains.
+- **A crisis that only the paid classifier caught is not restored after a
+  reload.** `GET /conversations/{id}` re-derives a past turn's crisis verdict
+  from the person's own stored question with the free regex layer
+  (`openlaw.answers.escalation.detect_crisis`), because no crisis column is
+  stored. A live turn runs regex **and** the CLASSIFIER-role model, which reads
+  every script; a turn whose crisis only the classifier found therefore reloads
+  as an ordinary turn. The static helpline block at the top of the page
+  (`web/app/page.tsx`) is unconditional and server-rendered, so general numbers
+  are still present; what is lost is the category-specific card. The
+  alternative — storing the verdict — needs a migration on a safety column and
+  is deliberately not taken at the close of this plan.
+- **A crisis disclosed in an earlier turn rides alongside later answers, at
+  document strength.** It is detected by the free regex layer over the stored
+  questions of the conversation (`openlaw.answers.history.history_crisis`), so
+  its coverage is the regex layer's own and a paid classifier is never called
+  per turn for history. It deliberately does **not** short-circuit the turn:
+  question strength would mean a woman who discloses abuse on turn one could
+  never receive a legal answer again in that conversation. A disclosure on turn
+  one is historical by turn four, which is the same weaker evidence a
+  document's verdict is.
+- **`uploads_enabled=False` stops reading document TEXT, not document safety
+  verdicts.** With the kill switch off no excerpt is decrypted and no document
+  pass runs, but the stored `crisis_kind` of a document attached to the turn is
+  still read, so the helpline card on an already-uploaded protection order does
+  not vanish when an operator disables the feature. Deletion is likewise never
+  blocked by the switch.
 - **The Devanagari crisis patterns favour precision over recall**, so a
   Devanagari document can still miss. They require complete, unambiguous
   phrases rather than single evocative words, because a document-only match

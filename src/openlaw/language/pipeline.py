@@ -64,7 +64,7 @@ question she actually asked with a helpline card would be unhelpful, and
 for someone attaching an old document as background, close to insulting.
 Suppressing the helplines would be equally wrong. So when, and only when,
 the question and its translation are both clean, the legal question is
-answered normally AND `_with_document_crisis` prepends the crisis response
+answered normally AND `_with_alongside_crisis` prepends the crisis response
 and its helplines to the footer, setting `LocalisedAnswer.document_crisis`
 rather than `crisis`.
 
@@ -223,11 +223,15 @@ from openlaw.answers.escalation import (
     nalsa_helpline,
 )
 from openlaw.answers.generate import _failures_of, generate_turn
-from openlaw.answers.history import HistoryTurn, carried_chunk_ids
+from openlaw.answers.history import (
+    HistoryTurn,
+    carried_chunk_ids,
+    history_crisis,
+)
 from openlaw.answers.models import LLMAdapter, ModelRegistry
 from openlaw.answers.schema import Claim, DocumentClaim
 from openlaw.answers.validate import DocumentCitation, ValidatedAnswer
-from openlaw.documents.context import EMPTY_DOCUMENT_CONTEXT, DocumentContext
+from openlaw.documents.context import DocumentExcerpt, select_excerpts
 from openlaw.language.detect import detect_language
 from openlaw.language.glossary import Glossary
 from openlaw.language.translate import translate_answer, translate_query
@@ -321,6 +325,22 @@ class LocalisedAnswer(BaseModel):
     #: helplines would be wrong; so would replacing the question she
     #: actually asked. `openlaw.api.schemas.to_response` renders both.
     document_crisis: CrisisKind | None = None
+    #: Set when a crisis phrase was found in the QUESTION OF AN EARLIER TURN
+    #: of this conversation (carry-forward 18, reversed by the final
+    #: whole-plan review). Document strength, deliberately: CF-18 originally
+    #: ruled this question-strength, which would have short-circuited every
+    #: turn after a disclosure and so suppressed the legal answer the person
+    #: came back for -- the exact harm ruling 1 exists to prevent. "A
+    #: disclosure on turn one is historical by turn four", which is the same
+    #: category of weaker evidence as a document's verdict. A SECOND field
+    #: rather than a reuse of `document_crisis`: both ride alongside, but the
+    #: provenance of each verdict survives, and
+    #: `openlaw.api.schemas.to_response` renders the more urgent of the two.
+    #: Derived by the FREE regex layer only
+    #: (`openlaw.answers.history.history_crisis`) -- history can be long and
+    #: a paid classifier call per turn is the cost trap the stored document
+    #: verdict exists to avoid.
+    history_crisis: CrisisKind | None = None
     footer: str = ""
     #: Structured, tap-to-call numbers for `footer` (Task 6 fix round, C2) --
     #: at minimum the NALSA number every footer cites, plus the
@@ -375,6 +395,7 @@ def _crisis_answer(
     classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
     document_crisis: CrisisKind | None = None,
     turn_index: int = 0,
+    earlier_crisis: CrisisKind | None = None,
 ) -> LocalisedAnswer:
     """Return the immediate, generation-free result for a crisis question.
 
@@ -402,8 +423,15 @@ def _crisis_answer(
     over. Numbers are deduplicated (`dedupe_helplines`): 112 is in three of
     the four category sets, and the custodial set contains the NALSA number
     itself, so overlap is the normal case and not an edge one.
+
+    `earlier_crisis` -- a disclosure in an EARLIER turn's own question -- is
+    treated exactly like the document verdict here, for the reason
+    `LocalisedAnswer.history_crisis` records. The two resolve by severity
+    (`most_urgent_crisis`), never by argument order, so the secondary slot
+    holds the more urgent of them rather than whichever was passed first.
     """
-    secondary = document_crisis if document_crisis is not crisis else None
+    alongside = most_urgent_crisis((document_crisis, earlier_crisis))
+    secondary = alongside if alongside is not crisis else None
     responses = [crisis_response(kind, language) for kind in (crisis, secondary) if kind]
     responses.append(escalation_footer(state, language))
     numbers = crisis_helplines(crisis, language)
@@ -416,6 +444,7 @@ def _crisis_answer(
         english_query=english_query,
         crisis=crisis,
         document_crisis=document_crisis,
+        history_crisis=earlier_crisis,
         footer="\n\n".join(responses),
         helplines=dedupe_helplines(numbers + (nalsa_helpline(language),)),
         classifier_failures=classifier_failures,
@@ -444,31 +473,49 @@ def resolve_document_crisis(
 _document_crisis = resolve_document_crisis
 
 
-def _with_document_crisis(
-    answer: LocalisedAnswer, crisis: CrisisKind | None
+def _with_alongside_crisis(
+    answer: LocalisedAnswer,
+    document_crisis: CrisisKind | None,
+    earlier_crisis: CrisisKind | None = None,
 ) -> LocalisedAnswer:
-    """Return `answer` with a document-derived crisis riding ALONGSIDE it.
+    """Return `answer` with every ALONGSIDE-strength crisis riding beside it.
 
-    The question was clean and has been answered normally; a document
-    attached to this turn was not. The helpline card is prepended to the
-    footer and its numbers are prepended to `helplines`, and the legal
-    answer is left completely untouched -- see the module docstring for why
-    a document verdict adds to the answer instead of replacing it.
+    Two sources of weaker evidence reach this function, and they are handled
+    identically because they are the same category of evidence: a verdict
+    stored for a document attached to this turn, and a crisis phrase in the
+    QUESTION OF AN EARLIER TURN of this conversation (carry-forward 18,
+    reversed -- see `LocalisedAnswer.history_crisis`). The question was clean
+    and has been answered normally; the helpline card is prepended to the
+    footer and its numbers to `helplines`, and the legal answer is left
+    completely untouched -- see the module docstring for why a verdict of
+    this strength adds to the answer instead of replacing it.
 
-    `document_crisis` is set, NOT `crisis`: `crisis` means "this turn was
-    short-circuited and carries no legal answer", and
+    The two resolve among themselves by SEVERITY (`most_urgent_crisis`), the
+    same order `detect_crisis` applies within one message, so a document
+    revealing self-harm is never answered with the domestic-violence card
+    merely because an earlier turn mentioned that first. Both are still
+    recorded on their own fields.
+
+    `document_crisis`/`history_crisis` are set, NOT `crisis`: `crisis` means
+    "this turn was short-circuited and carries no legal answer", and
     `openlaw.api.schemas.to_response` branches on exactly that to decide
-    whether to render claims and sources at all. Setting it here would
-    throw away the answer this path exists to preserve.
+    whether to render claims and sources at all. Setting it here would throw
+    away the answer this path exists to preserve.
     """
-    if crisis is None:
+    alongside = most_urgent_crisis((document_crisis, earlier_crisis))
+    if alongside is None:
         return answer
-    footer = f"{crisis_response(crisis, answer.language)}\n\n{answer.footer}"
+    footer = f"{crisis_response(alongside, answer.language)}\n\n{answer.footer}"
     helplines = dedupe_helplines(
-        crisis_helplines(crisis, answer.language) + answer.helplines
+        crisis_helplines(alongside, answer.language) + answer.helplines
     )
     return answer.model_copy(
-        update={"footer": footer, "helplines": helplines, "document_crisis": crisis}
+        update={
+            "footer": footer,
+            "helplines": helplines,
+            "document_crisis": document_crisis,
+            "history_crisis": earlier_crisis,
+        }
     )
 
 
@@ -480,6 +527,7 @@ def _clear_crisis_and_translate(
     state: str | None,
     document_crisis: CrisisKind | None,
     turn_index: int = 0,
+    earlier_crisis: CrisisKind | None = None,
 ) -> LocalisedAnswer | tuple[str, tuple[ClassifierFailureEvent, ...]]:
     """Run both question-side crisis checks and, if neither fires, translate.
 
@@ -488,13 +536,13 @@ def _clear_crisis_and_translate(
     bare regex `detect_crisis` -- see the module docstring for why the
     classifier is not asked a second time.
 
-    Both of these are QUESTION-side: the person telling us, now, that they
-    are in danger. Either one short-circuits the turn, and `document_crisis`
-    is passed along so a second, different category found in an attached
-    document still contributes its numbers to that response (see
-    `_crisis_answer`). When neither fires, the document's weaker verdict is
-    handled by the caller after generation instead
-    (`_with_document_crisis`).
+    Both of these are QUESTION-side and about THIS turn: the person telling
+    us, now, that they are in danger. Either one short-circuits the turn, and
+    `document_crisis`/`earlier_crisis` are passed along so a second,
+    different category found in an attached document or in an earlier turn's
+    question still contributes its numbers to that response (see
+    `_crisis_answer`). When neither fires, those weaker verdicts are handled
+    by the caller after generation instead (`_with_alongside_crisis`).
 
     Returns a crisis `LocalisedAnswer` the moment either check fires --
     before `translate_query` is even called for the first, and before the
@@ -517,6 +565,7 @@ def _clear_crisis_and_translate(
             failures,
             document_crisis,
             turn_index,
+            earlier_crisis,
         )
 
     english_query = translate_query(question, language, adapter, registry)
@@ -531,6 +580,7 @@ def _clear_crisis_and_translate(
             failures,
             document_crisis,
             turn_index,
+            earlier_crisis,
         )
 
     return english_query, failures
@@ -543,7 +593,7 @@ def answer_in_conversation(
     registry: ModelRegistry,
     glossary: Glossary,
     history: tuple[HistoryTurn, ...] = (),
-    document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+    document_excerpts: tuple[DocumentExcerpt, ...] = (),
     document_crisis: CrisisKind | None = None,
     state: str | None = None,
     language: str | None = None,
@@ -568,13 +618,34 @@ def answer_in_conversation(
     themselves are replayed into the prompt, narrowed to the ids actually
     shown -- a claim whose chunk did not come back is simply not rendered.
 
-    `document_context` is this turn's selected excerpts
-    (`openlaw.documents.context.select_excerpts`). When it is non-empty,
-    generation runs as TWO passes (`openlaw.answers.generate.generate_turn`):
-    the legal pass, which cannot be handed the document, and the document
-    pass, which cannot be handed the law. That is ruling A, and it is what
-    makes it impossible for text in an uploaded file to steer a statement
-    about the law.
+    `document_excerpts` is EVERY decrypted excerpt of every document
+    attached to this turn (`openlaw.documents.store.load_attached_documents`)
+    -- deliberately NOT a pre-selected `DocumentContext`. Selection
+    (`openlaw.documents.context.select_excerpts`) happens HERE, after
+    `translate_query`, on the same `english_query` the corpus retriever is
+    given.
+
+    **That parameter type is the fix for a HIGH finding** (final whole-plan
+    review, HIGH-1). Selection is BM25 over `openlaw.index.sparse.tokenise`
+    (`[a-z0-9]+`), so a Devanagari question tokenises to its digits alone and
+    selects nothing -- and the API layer used to select on the RAW question,
+    before this function was reached. Every non-Latin-script questioner
+    therefore got an empty document context whatever language her own document
+    was in: a woman uploading the English eviction notice her landlord
+    actually served her, asking about it in Hindi, was shown
+    `document_answer: null` with no refusal and her quota charged. Corpus
+    retrieval had had the translated query since Task 9; only this namespace
+    was missed. Taking excerpts rather than a context means a caller CANNOT
+    select on the wrong string, because it no longer holds the function that
+    selects. `tokenise` is untouched -- it backs BM25 sparse vectors already
+    written for millions of corpus points -- so the Devanagari-DOCUMENT half
+    of the limit remains, documented in `README.md`.
+
+    When selection yields anything, generation runs as TWO passes
+    (`openlaw.answers.generate.generate_turn`): the legal pass, which cannot
+    be handed the document, and the document pass, which cannot be handed the
+    law. That is ruling A, and it is what makes it impossible for text in an
+    uploaded file to steer a statement about the law.
 
     `document_crisis` is the STORED, upload-time verdict of the attached
     documents (`openlaw.documents.extract.scan_for_crisis`), already
@@ -583,19 +654,29 @@ def answer_in_conversation(
     text to derive it; it rides alongside a normal answer, never instead of
     one -- see the module docstring.
 
+    A crisis disclosed in an EARLIER turn's question is detected here too, at
+    document strength (`openlaw.answers.history.history_crisis`, free regex
+    only) -- carry-forward 18, reversed by the final whole-plan review. See
+    `LocalisedAnswer.history_crisis` for why question strength was harmful.
+
     `turn_index` on the result is `len(history)`, on every return path
     including both crisis short-circuits.
     """
     target = language or detect_language(question)
     turn_index = len(history)
+    earlier_crisis = history_crisis(history)
 
     cleared = _clear_crisis_and_translate(
-        question, target, adapter, registry, state, document_crisis, turn_index
+        question, target, adapter, registry, state, document_crisis,
+        turn_index, earlier_crisis,
     )
     if isinstance(cleared, LocalisedAnswer):
         return cleared
     english_query, classifier_failures = cleared
 
+    # Both namespaces are selected from the TRANSLATED query, never the raw
+    # one (HIGH-1) -- see this function's docstring on `document_excerpts`.
+    document_context = select_excerpts(english_query, document_excerpts)
     context = retriever.retrieve(english_query, carried_chunk_ids(history))
     footer = escalation_footer(state, target)
     result = generate_turn(
@@ -625,7 +706,7 @@ def answer_in_conversation(
         classifier_failures=result.classifier_failures,
         turn_index=turn_index,
     )
-    return _with_document_crisis(answered, document_crisis)
+    return _with_alongside_crisis(answered, document_crisis, earlier_crisis)
 
 
 class _SingleTurnRetriever:
