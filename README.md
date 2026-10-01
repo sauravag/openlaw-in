@@ -86,8 +86,37 @@ used:
 
 ### Retention
 
-Three stores hold verbatim, potentially sensitive user text, all subject to
-the same documented 90-day window:
+**The rule is asymmetric, not a single age cutoff: an authenticated user's
+uploads and conversations are kept until the user deletes them; an
+anonymous upload or conversation is kept only for a bounded number of
+hours.** The anonymous path exists so someone asking about domestic violence
+need not attach an email — and a cookie-keyed identity cannot reliably come
+back later and delete anything itself, so this project bounds its lifetime
+on a timer instead of leaving it to the person who may never return. An
+undeletable FIR or eviction notice belonging to nobody is exactly the
+outcome this is designed to prevent. Concretely:
+
+- `documents.expires_at` / `conversations.expires_at` are `NULL` for an
+  authenticated upload or conversation — **no purge below ever touches a
+  `NULL` row, under any configuration.** An anonymous row instead gets
+  `now + Settings.anonymous_upload_ttl_hours` /
+  `+ anonymous_conversation_ttl_hours` (both default **24 hours**) at write
+  time, and both columns are indexed so an expired-row scan is cheap.
+- Purging a conversation cascades to its messages and every document filed
+  under it (and each of those documents' excerpts), regardless of that
+  document's own `expires_at` — a conversation's lifetime bounds everything
+  in it.
+- **Document access-log rows (`document_access_log`) are never deleted when
+  their document is purged** — the audit trail is intentionally not
+  foreign-keyed to the document it describes, so a record of who read (or
+  was denied) a document survives that document's deletion. Audit rows are
+  not kept forever either, though: an audit trail that never ages out is
+  its own privacy problem, so they are purged independently, on the same
+  90-day window below, once they are old enough that they no longer serve
+  an active investigation.
+
+Three further stores hold verbatim, potentially sensitive user text, all
+subject to that same documented 90-day window:
 
 - `./data/app/hallucinations.jsonl` — the question and rejected-claim text
   behind every citation the validator refused to render.
@@ -97,11 +126,11 @@ the same documented 90-day window:
   purged regardless, so the mechanism is already correct on the day it
   isn't).
 
-Task 7's fix mounted `./data/app` as a host volume specifically so these logs
-survive a container recreate. **That also means they are now permanent
-unless something purges them** — nothing in `docker compose up -d` does this
-automatically, by design: a retention purge deletes data, so this project's
-default is opt-in-by-schedule, not opt-out. Run it yourself:
+Task 7's fix mounted `./data/app` as a host volume specifically so the two
+JSONL logs survive a container recreate. **That also means they are now
+permanent unless something purges them** — nothing in `docker compose up -d`
+does this automatically, by design: a retention purge deletes data, so this
+project's default is opt-in-by-schedule, not opt-out. Run it yourself:
 
     docker compose run --rm purge
 
@@ -112,6 +141,18 @@ service). Outside Compose:
 
     python scripts/purge_retention.py
 
+One run purges, in a single database transaction, the `hallucination_log`
+table, expired anonymous `documents`, expired anonymous `conversations`
+(with their messages and documents), and stale `document_access_log` rows —
+plus the two JSONL logs — and prints one `[purge] ...: removed N row(s)`
+line per store, so a cron log always shows exactly what happened, never
+nothing. Pass `--dry-run` to preview the same counts for the database stores
+without deleting anything (the JSONL logs are reported as skipped in
+dry-run, since previewing them would need a second copy of the file-reading
+logic that could drift from the real one):
+
+    python scripts/purge_retention.py --dry-run
+
 **Schedule it — neither command above runs on its own.** A host cron entry
 (adjust the path):
 
@@ -119,25 +160,27 @@ service). Outside Compose:
     15 3 * * * root cd /path/to/openlaw-in && docker compose run --rm purge >> /var/log/openlaw-purge.log 2>&1
 
 or the systemd-timer equivalent. The command is idempotent and safe to run
-more often than the window requires — an empty or not-yet-stale log is a
-normal no-op (exit 0), not a failure; it only exits non-zero if a purge
-itself raises (e.g. the database is unreachable), which a cron log should
-surface, not hide.
+more often than the window requires, including overlapping itself — an
+empty or not-yet-stale store is a normal no-op (exit 0), not a failure; a
+second run back-to-back finds nothing newly stale and reports zeroes rather
+than erroring or double-counting. It only exits non-zero if a purge itself
+raises (e.g. the database is unreachable), which a cron log should surface,
+not hide — and in that case nothing from that run is committed.
 
 ### Reserved, currently-unused tables
 
-`alembic upgrade head` creates five tables: `users`, `quota_usage`,
-`conversations`, `messages`, and `hallucination_log`. Only the first two are
-written by any shipped code path today (authentication and quota tracking).
-**`conversations`, `messages`, and `hallucination_log` are reserved for
-future use and are currently dead weight** — nothing in `src/` or `scripts/`
-writes to them; only `tests/db/` constructs them, to prove the schema itself
-is sound. An operator inspecting the schema might reasonably infer this
-product stores conversation history or a queryable hallucination audit
-trail; it does not, yet. They stay in the migration (rather than being
-dropped) because the schema is intentional forward design, not accidental
-debt, and `hallucination_log`'s access precondition above is written down
-precisely so a future writer sets up the restricted role first, not after.
+`alembic upgrade head` creates the application tables, including `users`,
+`quota_usage`, `conversations`, `messages`, `documents`, `document_excerpts`,
+`document_access_log`, and `hallucination_log`. All but `hallucination_log`
+are written by shipped code today (conversations, messages, and documents
+since the persistence work that followed this schema; users and quota_usage
+since authentication and quota tracking). **`hallucination_log` alone
+remains reserved for future use** — nothing in `src/` or `scripts/` writes
+to it; only `tests/db/` constructs it, to prove the schema itself is sound.
+It stays in the migration (rather than being dropped) because the schema is
+intentional forward design, not accidental debt, and its access precondition
+above is written down precisely so a future writer sets up the restricted
+role first, not after.
 
 ## Setup
 
