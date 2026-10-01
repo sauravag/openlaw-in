@@ -825,6 +825,62 @@ def test_saturated_fresh_retrieval_crowds_out_carried_not_the_reverse() -> None:
     assert f"[chunk_id: {carried_ids[0]}]" not in rendered_text
 
 
+# --- Task 14, ruling 4: a failed carried re-fetch is persisted, countable --
+
+
+class _RetrieveFailsClient:
+    """The points/query endpoint (fresh search) always succeeds; every
+    points-retrieve request (carried-chunk re-fetch) raises, simulating a
+    transport failure isolated to the re-fetch path."""
+
+    def post(self, url: str, json: dict[str, Any], timeout: float) -> Any:
+        if url.endswith("/points/query"):
+            return _FakeResponse([])
+        raise ConnectionError("simulated carried-chunk re-fetch outage")
+
+
+def test_build_retrieval_context_persists_a_carried_fetch_failure_event(
+    tmp_path: Path,
+) -> None:
+    """A re-fetch transport failure must land in the JSONL log, not just an
+    ERROR line -- see `openlaw.retrieval.fetch`'s module docstring."""
+    log_path = tmp_path / "classifier_failures.jsonl"
+    settings = _settings(qdrant_url=_QDRANT_URL, classifier_failure_log_path=log_path)
+
+    context = build_retrieval_context(
+        "q",
+        settings,
+        _RetrieveFailsClient(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+        carried_chunk_ids=("carried1",),
+    )
+
+    # The new question is still answerable: only history went empty.
+    assert context.chunk_ids == set()
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) >= 1
+    records = [json.loads(line) for line in lines]
+    assert any("requested_ids" in record for record in records)
+
+
+def test_build_retrieval_context_writes_nothing_when_no_carried_ids_fail(
+    tmp_path: Path,
+) -> None:
+    """The ordinary case (no history, or a clean re-fetch) must not create
+    the log file at all."""
+    log_path = tmp_path / "classifier_failures.jsonl"
+    settings = _settings(qdrant_url=_QDRANT_URL, classifier_failure_log_path=log_path)
+    client = _FakeCorpusClient(
+        search_points_by_collection={"acts_india_v1": [_point("fresh1")], "sc_judgments_v1": []},
+    )
+
+    build_retrieval_context(
+        "q", settings, client, embedder=StubQueryEmbedder([0.1] * 1024)
+    )
+
+    assert not log_path.exists()
+
+
 # --- The full pipeline, end to end -----------------------------------------
 
 

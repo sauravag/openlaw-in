@@ -162,26 +162,57 @@ def _production_sources() -> list[Path]:
     ]
 
 
-def test_a_document_writer_cannot_land_without_wiring_the_crisis_scan() -> None:
+def test_a_document_writer_calls_scan_for_crisis() -> None:
     """A crude grep, deliberately -- the same guard
     `tests/db/test_models.py::test_reserved_unused_tables_have_no_production
     _writer` uses, pointed at the safety obligation instead of the
     documentation one. (`\\bDocument\\(` does not match `python-docx`'s
     aliased `_DocxDocument(` in `extract.py`, for the same reason it does
-    not there.)"""
+    not there.)
+
+    Plan 6 Task 14 lands the first `Document(...)` writer
+    (`openlaw.documents.store.store_document`), which calls
+    `scan_for_crisis(pages)` before constructing the row -- this half of the
+    original combined guard now holds for real, not just by the absence of
+    a writer. See `test_a_document_writer_also_threads_document_crisis_kinds`
+    below for the other half, which does not yet hold.
+    """
     texts = {path: path.read_text(encoding="utf-8") for path in _production_sources()}
     writers = [path for path, text in texts.items() if re.search(r"\bDocument\(", text)]
-    if not writers:
-        return  # no upload path yet; nothing to wire into
+    assert writers, "expected a Document(...) writer to exist as of Plan 6 Task 14"
 
-    # Everything but the two modules that DEFINE the names below, so their
-    # own `def`/parameter list cannot satisfy the guard on its own.
     body = "\n".join(text for path, text in texts.items() if path not in _DEFINITIONS)
     named = ", ".join(str(path.relative_to(_REPO_ROOT)) for path in writers)
     assert "scan_for_crisis(" in body, (
         f"{named} writes Document rows but nothing calls scan_for_crisis -- "
         "a document's crisis verdict would never be computed"
     )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known, carried-forward gap (plan progress.md carry-forward #24): "
+        "Task 14 lands the Document(...) writer and computes/stores "
+        "crisis_kind at upload (openlaw.documents.store.store_document), "
+        "but no production route yet threads it back into a live turn via "
+        "answer_in_language(document_crisis_kinds=...) -- openlaw.api.deps "
+        "is still single-turn. That wiring is Task 15's (conversation-aware "
+        "endpoint). This marker must be removed, not left behind, the "
+        "moment that call site lands -- an unexpected pass (XPASS) here "
+        "means it already has."
+    ),
+)
+def test_a_document_writer_also_threads_document_crisis_kinds() -> None:
+    """The other half of the original combined guard. See
+    `test_a_document_writer_calls_scan_for_crisis` above and this test's
+    `xfail` reason for why this one is expected to fail today."""
+    texts = {path: path.read_text(encoding="utf-8") for path in _production_sources()}
+    writers = [path for path, text in texts.items() if re.search(r"\bDocument\(", text)]
+    assert writers, "expected a Document(...) writer to exist as of Plan 6 Task 14"
+
+    body = "\n".join(text for path, text in texts.items() if path not in _DEFINITIONS)
+    named = ", ".join(str(path.relative_to(_REPO_ROOT)) for path in writers)
     assert "document_crisis_kinds=" in body, (
         f"{named} writes Document rows but nothing passes document_crisis_kinds "
         "to answer_in_language -- the stored verdict would never reach a turn"

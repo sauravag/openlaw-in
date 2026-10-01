@@ -78,13 +78,43 @@ carried judgment citation, say); which collection a given id lives in is not
 known in advance, so each of `SEARCH_COLLECTIONS` -- the same set
 `search()` queries -- gets exactly one request carrying every requested
 point id, and whichever ids that collection actually holds come back.
+
+**A re-fetch failure is now a countable event, not just a log line** (Plan
+6 Task 14, ruling 4). The `ERROR` log above was the only trace of a failed
+carried-chunk re-fetch -- indistinguishable, to anyone not watching logs in
+the moment, from an ordinary turn whose history happened to age out of the
+corpus. That is the exact silent-outage shape Plan 3's review refused to
+accept for the crisis classifier (`openlaw.answers.crisis_classifier
+.ClassifierFailureEvent`): a sustained failure must be discoverable after
+the fact, not only while someone happens to be tailing a log. `on_failure`,
+an optional callback on both functions below, is invoked with a
+`CarriedFetchFailureEvent` exactly where the `ERROR` log already fires --
+never for an ordinary miss, only for a failure of the retrieve call itself
+-- so a caller can collect these events and persist them with
+`append_carried_fetch_failure_events`. It defaults to `None` (a no-op), so
+every existing caller's behaviour, and every test in `tests/retrieval
+/test_fetch.py`, is unchanged by this addition -- `fetch_chunks_by_id`
+still never raises and still returns exactly the same chunks it always did.
+`openlaw.answers.generate.build_retrieval_context` is the caller that
+supplies the callback and persists what it collects, to
+`Settings.classifier_failure_log_path` -- reusing that path, and
+`openlaw.answers.escalation.append_jsonl_records`'s existing append-only,
+`0600`-permissioned JSONL mechanism, rather than adding a new Settings
+field or a migration for what is, at the storage layer, the same shape of
+problem `ClassifierFailureEvent` already solved.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict
+
+from openlaw.answers.escalation import append_jsonl_records
 from openlaw.index.upsert import point_id
 from openlaw.retrieval.context import RetrievedChunk
 from openlaw.retrieval.search import SEARCH_COLLECTIONS, chunk_from_point
@@ -92,8 +122,58 @@ from openlaw.retrieval.search import SEARCH_COLLECTIONS, chunk_from_point
 logger = logging.getLogger(__name__)
 
 
+class CarriedFetchFailureEvent(BaseModel):
+    """A record of one carried-chunk re-fetch call that could not complete.
+
+    Deliberately carries no chunk or claim text -- unlike
+    `ClassifierFailureEvent`, there is no model input to diagnose here, only
+    a failing collection and a count. Built once per failing collection
+    call, never per id, matching `_retrieve_from_collection`'s own
+    all-or-nothing failure (the whole batched request failed, not
+    individual ids within it).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    collection: str
+    requested_ids: int
+    error: str
+    timestamp: str
+
+
+def build_carried_fetch_failure_event(
+    collection: str, point_ids: list[str], error: BaseException
+) -> CarriedFetchFailureEvent:
+    """Build the recordable event for one failed collection re-fetch."""
+    return CarriedFetchFailureEvent(
+        collection=collection,
+        requested_ids=len(point_ids),
+        error=f"{type(error).__name__}: {error}",
+        timestamp=datetime.now(UTC).isoformat(),
+    )
+
+
+def append_carried_fetch_failure_events(
+    events: tuple[CarriedFetchFailureEvent, ...], path: Path
+) -> int:
+    """Append `events` to the JSONL log at `path`. Returns the number written.
+
+    Delegates to `escalation.append_jsonl_records` -- the same owner-only
+    permission, append-only write already used for `HallucinationEvent` and
+    `ClassifierFailureEvent`.
+    """
+    return append_jsonl_records(events, path)
+
+
+OnFailure = Callable[[CarriedFetchFailureEvent], None]
+
+
 def _retrieve_from_collection(
-    client: Any, qdrant_url: str, collection: str, point_ids: list[str]
+    client: Any,
+    qdrant_url: str,
+    collection: str,
+    point_ids: list[str],
+    on_failure: OnFailure | None = None,
 ) -> list[dict[str, Any]]:
     """Return the points `point_ids` resolve to in `collection`.
 
@@ -101,7 +181,9 @@ def _retrieve_from_collection(
     transport error, a non-2xx response, or a malformed body) -- see the
     module docstring for why this is the one place "re-fetch failed" is
     distinguished from "the id just does not exist any more", and why that
-    distinction must never raise into the caller.
+    distinction must never raise into the caller. `on_failure`, when given,
+    is called with the same failure, once, so it is countable rather than
+    only logged -- see the module docstring's "countable event" paragraph.
     """
     try:
         response = client.post(
@@ -120,11 +202,16 @@ def _retrieve_from_collection(
             type(error).__name__,
             error,
         )
+        if on_failure is not None:
+            on_failure(build_carried_fetch_failure_event(collection, point_ids, error))
         return []
 
 
 def fetch_chunks_by_id(
-    client: Any, qdrant_url: str, chunk_ids: tuple[str, ...]
+    client: Any,
+    qdrant_url: str,
+    chunk_ids: tuple[str, ...],
+    on_failure: OnFailure | None = None,
 ) -> tuple[RetrievedChunk, ...]:
     """Read-only retrieve of specific points by deterministic point id
     (`openlaw.index.upsert.point_id`) across the same collections `search`
@@ -134,17 +221,18 @@ def fetch_chunks_by_id(
     An id that fails to resolve for ANY reason -- not found, or the retrieve
     call itself failing -- is absent from the result and this function never
     raises; see the module docstring for how the two cases are still made
-    distinguishable to an operator. Results are built with the same
-    `chunk_from_point` `search()` uses, so a carried chunk is
-    indistinguishable in shape from a freshly-retrieved one, and a chunk
-    whose payload changed since it was first cited comes back in its
+    distinguishable to an operator, and countable via `on_failure`. Results
+    are built with the same `chunk_from_point` `search()` uses, so a carried
+    chunk is indistinguishable in shape from a freshly-retrieved one, and a
+    chunk whose payload changed since it was first cited comes back in its
     current, not its original, form.
 
     Returned in the order `chunk_ids` was given, deduplicated. Callers merge
     this result into a turn's fresh retrieval with `openlaw.retrieval.rerank.
     merge_chunks`, which dedupes by `chunk_id` with the fresh side winning --
     so a carried id that also came back from this turn's own search is not
-    duplicated.
+    duplicated. `on_failure` defaults to `None` (no-op): a caller that does
+    not pass it gets exactly the pre-Task-14 behaviour.
     """
     if not chunk_ids:
         return ()
@@ -152,7 +240,9 @@ def fetch_chunks_by_id(
     point_ids = [point_id(chunk_id) for chunk_id in chunk_ids]
     resolved: dict[str, RetrievedChunk] = {}
     for collection in SEARCH_COLLECTIONS:
-        points = _retrieve_from_collection(client, qdrant_url, collection, point_ids)
+        points = _retrieve_from_collection(
+            client, qdrant_url, collection, point_ids, on_failure
+        )
         for point in points:
             chunk = chunk_from_point(point)
             if chunk is not None and chunk.chunk_id not in resolved:

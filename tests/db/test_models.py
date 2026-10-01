@@ -107,29 +107,20 @@ def test_deleting_a_conversation_deletes_its_messages() -> None:
     assert session.query(Message).count() == 0
 
 
-# --- Final whole-plan review, M3 (Plan 5), revisited in Plan 6 Task 2:
-# six tables are created and, today, still not written by any shipped code
-# path -- see openlaw.db.models's module docstring for the split this test
-# now tracks: `Conversation`/`Message`/`Document`/`DocumentExcerptRow`/
-# `DocumentAccessLog` have a *known* future writer (Task 14 onward of the
-# conversations-and-artifacts plan) but no writer yet, while
-# `HallucinationLog` stays reserved indefinitely pending its restricted-role
-# precondition. Both halves are still "no production writer today", so both
-# stay covered by the same grep-based guard: if a future change starts
-# constructing any of them from `src/` or `scripts/` without updating the
-# docstring (and, for the first five, without this table actually landing in
-# a persistence layer), this test is what catches it. -----------------------
+# --- Final whole-plan review, M3 (Plan 5), revisited in Plan 6 Task 2, and
+# narrowed by Task 14: six tables were once all unwritten. Task 14 landed
+# the first real writers -- `openlaw.db.conversations` (`Conversation`,
+# `Message`) and `openlaw.documents.store` (`Document`, `DocumentExcerptRow`,
+# `DocumentAccessLog`), directly tested in `tests/db/test_conversations.py`
+# and `tests/documents/test_store.py` -- so those five are no longer
+# "reserved, unused" and are removed from the guard below. `HallucinationLog`
+# alone remains reserved indefinitely, pending the restricted database role
+# its own class docstring requires; this test now exists only to catch that
+# one table gaining a writer without that precondition being met. ----------
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PRODUCTION_DIRS = (_REPO_ROOT / "src", _REPO_ROOT / "scripts")
-_NOT_YET_WRITTEN_TABLE_CLASSES = (
-    "Conversation",
-    "Message",
-    "Document",
-    "DocumentExcerptRow",
-    "DocumentAccessLog",
-    "HallucinationLog",
-)
+_NOT_YET_WRITTEN_TABLE_CLASSES = ("HallucinationLog",)
 
 
 def _unwritten_class_constructed_in(path: Path) -> str | None:
@@ -145,23 +136,20 @@ def _unwritten_class_constructed_in(path: Path) -> str | None:
 
 
 def test_reserved_unused_tables_have_no_production_writer() -> None:
-    """None of `Conversation`, `Message`, `Document`, `DocumentExcerptRow`,
-    `DocumentAccessLog`, or `HallucinationLog` is written by any shipped code
-    path today (`openlaw.db.models`'s module docstring). This is the
-    boundary test for that claim: if a future change starts constructing any
-    of them from `src/` or `scripts/`, this test fails -- forcing that
-    change to also update the documentation that currently asserts
-    otherwise, rather than the two silently drifting apart the way
-    `verify_selfhost.sh` and `escalation.py`'s stale comment already did
-    elsewhere in this plan.
+    """`HallucinationLog` is not written by any shipped code path today
+    (`openlaw.db.models`'s module docstring). This is the boundary test for
+    that claim: if a future change starts constructing it from `src/` or
+    `scripts/`, this test fails -- forcing that change to also update the
+    documentation that currently asserts otherwise, rather than the two
+    silently drifting apart the way `verify_selfhost.sh` and
+    `escalation.py`'s stale comment already did elsewhere in this plan.
 
-    As of Plan 6 Task 2, `Conversation`/`Message`/`Document`/
-    `DocumentExcerptRow`/`DocumentAccessLog` are no longer *speculative*
-    placeholders -- their schema is final and a writer is planned for Task
-    14 onward -- but no shipped code writes to them yet, so this test still
-    holds for all six until that writer lands. `HallucinationLog` alone
-    remains reserved indefinitely, pending the restricted database role its
-    own class docstring requires.
+    Until Plan 6 Task 14, this guard also covered `Conversation`, `Message`,
+    `Document`, `DocumentExcerptRow`, and `DocumentAccessLog` -- all five now
+    have a real, tested writer (`openlaw.db.conversations`,
+    `openlaw.documents.store`) and are removed from the list above.
+    `HallucinationLog` alone remains reserved indefinitely, pending the
+    restricted database role its own class docstring requires.
     """
     offenders: list[str] = []
     for directory in _PRODUCTION_DIRS:

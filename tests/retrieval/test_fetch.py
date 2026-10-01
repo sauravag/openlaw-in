@@ -7,14 +7,21 @@ flat list), which is distinct from the points-QUERY response
 `fetch_chunks_by_id` calls the retrieve endpoint, not query.
 """
 
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from openlaw.index.upsert import point_id
 from openlaw.retrieval.context import ChunkKind, RetrievedChunk
-from openlaw.retrieval.fetch import fetch_chunks_by_id
+from openlaw.retrieval.fetch import (
+    CarriedFetchFailureEvent,
+    append_carried_fetch_failure_events,
+    build_carried_fetch_failure_event,
+    fetch_chunks_by_id,
+)
 from openlaw.retrieval.rerank import merge_chunks
 from openlaw.retrieval.search import ACTS_INDIA_V1, HC_COLLECTION, SC_COLLECTION
 
@@ -225,3 +232,76 @@ def test_result_order_matches_the_requested_chunk_ids_order() -> None:
     result = fetch_chunks_by_id(client, _QDRANT_URL, ("act:2", "act:1"))
 
     assert [chunk.chunk_id for chunk in result] == ["act:2", "act:1"]
+
+
+# --- Task 14, ruling 4: a failed re-fetch is a countable event -------------
+
+
+def test_on_failure_fires_for_a_transport_failure_not_a_plain_miss() -> None:
+    """The callback must fire exactly where the ERROR log already does --
+    never for an ordinary "id not found" miss."""
+    client = _FakeClient(
+        {ACTS_INDIA_V1: []},  # ordinary miss on this collection: no event
+        unreachable_collections=frozenset({SC_COLLECTION}),
+    )
+    events: list[CarriedFetchFailureEvent] = []
+
+    fetch_chunks_by_id(client, _QDRANT_URL, ("missing-id",), on_failure=events.append)
+
+    assert len(events) == 1
+    assert events[0].collection == SC_COLLECTION
+    assert events[0].requested_ids == 1
+    assert "ConnectionError" in events[0].error
+
+
+def test_on_failure_fires_once_per_failing_collection() -> None:
+    client = _FakeClient(
+        {}, unreachable_collections=frozenset({ACTS_INDIA_V1, SC_COLLECTION, HC_COLLECTION})
+    )
+    events: list[CarriedFetchFailureEvent] = []
+
+    fetch_chunks_by_id(client, _QDRANT_URL, ("act:1",), on_failure=events.append)
+
+    assert {event.collection for event in events} == {
+        ACTS_INDIA_V1,
+        SC_COLLECTION,
+        HC_COLLECTION,
+    }
+
+
+def test_on_failure_defaults_to_none_and_changes_no_existing_behaviour() -> None:
+    """A caller that passes nothing gets exactly the pre-Task-14 behaviour:
+    no exception just because nobody is listening for the event."""
+    client = _FakeClient(
+        {}, unreachable_collections=frozenset({ACTS_INDIA_V1, SC_COLLECTION, HC_COLLECTION})
+    )
+
+    result = fetch_chunks_by_id(client, _QDRANT_URL, ("act:1",))
+
+    assert result == ()
+
+
+def test_append_carried_fetch_failure_events_writes_jsonl(tmp_path: Path) -> None:
+    path = tmp_path / "classifier_failures.jsonl"
+    event = build_carried_fetch_failure_event(
+        ACTS_INDIA_V1, [point_id("act:1")], RuntimeError("boom")
+    )
+
+    written = append_carried_fetch_failure_events((event,), path)
+
+    assert written == 1
+    line = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert line["collection"] == ACTS_INDIA_V1
+    assert line["requested_ids"] == 1
+    assert "boom" in line["error"]
+
+
+def test_append_carried_fetch_failure_events_writes_nothing_when_empty(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "classifier_failures.jsonl"
+
+    written = append_carried_fetch_failure_events((), path)
+
+    assert written == 0
+    assert not path.exists()

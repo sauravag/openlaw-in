@@ -174,7 +174,11 @@ from openlaw.documents import MAX_CARRIED_CHUNKS
 from openlaw.documents.context import EMPTY_DOCUMENT_CONTEXT, DocumentContext
 from openlaw.retrieval.context import RetrievalContext, RetrievedChunk
 from openlaw.retrieval.factory import build_query_embedder
-from openlaw.retrieval.fetch import fetch_chunks_by_id
+from openlaw.retrieval.fetch import (
+    CarriedFetchFailureEvent,
+    append_carried_fetch_failure_events,
+    fetch_chunks_by_id,
+)
 from openlaw.retrieval.query import QueryEmbedder
 from openlaw.retrieval.rerank import merge_chunks
 from openlaw.retrieval.search import search
@@ -554,7 +558,13 @@ def build_retrieval_context(
     `fetch_chunks_by_id` never raises -- an id that fails to resolve (gone
     from the corpus, or the re-fetch itself failing) is simply absent, the
     same way a never-retrieved id is absent, so no new validator branch is
-    needed for carried claims to validate.
+    needed for carried claims to validate. A re-fetch call that fails
+    outright (as opposed to an ordinary miss) is still made countable, not
+    just logged (Plan 6 Task 14, ruling 4): this function collects any
+    `CarriedFetchFailureEvent` `fetch_chunks_by_id` reports via its
+    `on_failure` callback and persists them immediately to
+    `settings.classifier_failure_log_path`, reusing that log's existing
+    append-only JSONL mechanism rather than adding a new one.
     """
     active_embedder = embedder or build_query_embedder(settings)
     vector = active_embedder.embed_query(question)
@@ -567,7 +577,16 @@ def build_retrieval_context(
         primary_ids = tuple(chunk.chunk_id for chunk in primary)
         chunks = merge_chunks(primary, expand_fn(primary_ids))
 
-    carried = fetch_chunks_by_id(search_client, settings.qdrant_url, carried_chunk_ids)
+    fetch_failures: list[CarriedFetchFailureEvent] = []
+    carried = fetch_chunks_by_id(
+        search_client,
+        settings.qdrant_url,
+        carried_chunk_ids,
+        on_failure=fetch_failures.append,
+    )
+    append_carried_fetch_failure_events(
+        tuple(fetch_failures), settings.classifier_failure_log_path
+    )
     chunks = merge_chunks(chunks, carried, max_expanded=MAX_CARRIED_CHUNKS)
 
     return RetrievalContext(query=question, chunks=chunks)
