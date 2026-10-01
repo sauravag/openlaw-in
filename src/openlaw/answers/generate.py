@@ -130,8 +130,10 @@ from openlaw.answers.validate import (
     validate_answer,
 )
 from openlaw.config import Settings
+from openlaw.documents import MAX_CARRIED_CHUNKS
 from openlaw.retrieval.context import RetrievalContext, RetrievedChunk
 from openlaw.retrieval.factory import build_query_embedder
+from openlaw.retrieval.fetch import fetch_chunks_by_id
 from openlaw.retrieval.query import QueryEmbedder
 from openlaw.retrieval.rerank import merge_chunks
 from openlaw.retrieval.search import search
@@ -392,6 +394,7 @@ def build_retrieval_context(
     embedder: QueryEmbedder | None = None,
     expand_fn: ExpandFn | None = None,
     limit: int = 10,
+    carried_chunk_ids: tuple[str, ...] = (),
 ) -> RetrievalContext:
     """Retrieve, and optionally graph-expand, the sources for `question`.
 
@@ -408,6 +411,27 @@ def build_retrieval_context(
     Graph expansion runs only when both `settings.graph_expansion_enabled` is
     True and `expand_fn` is supplied -- see the module docstring for why this
     function does not call `expand_chunks` itself.
+
+    `carried_chunk_ids` (Task 9) is `openlaw.answers.history.carried_chunk_ids`'s
+    output: corpus chunk ids an earlier turn's surviving claims depend on.
+    They are re-fetched here, by id, via `openlaw.retrieval.fetch.
+    fetch_chunks_by_id` -- never replayed from a cached `RetrievedChunk` --
+    and merged in AFTER this turn's own primary/expanded hits, via the same
+    `merge_chunks` expansion already uses: dedup by `chunk_id` with the fresh
+    side winning, so an id both carried and freshly retrieved this turn is
+    not duplicated, and relevance order is unchanged (fresh hits always sort
+    before carried ones). This is also how the two caps interact when both
+    are saturated: `_bounded_context`/`_bounded_chunks` keep a PREFIX up to
+    `MAX_CONTEXT_CHUNKS`/`MAX_CONTEXT_CHARS` and trim from the tail, so a
+    full carried budget is what gets trimmed first -- carried history can
+    never crowd out this turn's own fresh retrieval. `max_expanded=
+    MAX_CARRIED_CHUNKS` additionally bounds how many carried chunks this
+    function will merge in regardless of how many ids a caller passes,
+    rather than trusting every caller to have already applied that cap.
+    `fetch_chunks_by_id` never raises -- an id that fails to resolve (gone
+    from the corpus, or the re-fetch itself failing) is simply absent, the
+    same way a never-retrieved id is absent, so no new validator branch is
+    needed for carried claims to validate.
     """
     active_embedder = embedder or build_query_embedder(settings)
     vector = active_embedder.embed_query(question)
@@ -419,6 +443,9 @@ def build_retrieval_context(
     if settings.graph_expansion_enabled and expand_fn is not None:
         primary_ids = tuple(chunk.chunk_id for chunk in primary)
         chunks = merge_chunks(primary, expand_fn(primary_ids))
+
+    carried = fetch_chunks_by_id(search_client, settings.qdrant_url, carried_chunk_ids)
+    chunks = merge_chunks(chunks, carried, max_expanded=MAX_CARRIED_CHUNKS)
 
     return RetrievalContext(query=question, chunks=chunks)
 

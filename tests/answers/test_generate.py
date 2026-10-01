@@ -39,6 +39,8 @@ from openlaw.answers.generate import (
 )
 from openlaw.answers.models import Completion, ModelRegistry, ModelRole, StubAdapter
 from openlaw.config import Settings
+from openlaw.documents import MAX_CARRIED_CHUNKS
+from openlaw.index.upsert import point_id
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
 from openlaw.retrieval.query import StubQueryEmbedder
 
@@ -128,6 +130,93 @@ def _fake_search_client(chunk_id: str = "a1") -> _FakeSearchClient:
     return _FakeSearchClient(
         {"acts_india_v1": [_search_hit(chunk_id)], "sc_judgments_v1": []}
     )
+
+
+# --- Task 9: carried-chunk re-fetch fixtures -------------------------------
+#
+# `_FakeSearchClient` above answers every POST with the points/QUERY response
+# shape (`{"result": {"points": [...]}}`), which is wrong for the points
+# RETRIEVE endpoint `fetch_chunks_by_id` calls (`{"result": [...]}`, a flat
+# list) -- see `openlaw.retrieval.fetch`'s module docstring. It is still safe
+# for every test above and in this file that does not pass
+# `carried_chunk_ids`: `fetch_chunks_by_id` returns `()` immediately for an
+# empty id tuple and never calls `.post` at all. Tests that exercise a
+# carried id use `_FakeCorpusClient` instead, which answers both endpoint
+# shapes correctly from one canned per-collection point list -- so a carried
+# id and a fresh search hit can be exercised against the same fake corpus.
+
+
+def _point(
+    chunk_id: str, text: str = "A landlord shall refund the deposit."
+) -> dict[str, Any]:
+    """A point carrying BOTH a `score` (for the query/search response shape)
+    and an `id` = `point_id(chunk_id)` (for the retrieve response shape), so
+    one fixture serves both endpoints -- `chunk_from_point` reads only
+    `score`/`payload` and ignores `id`, and the retrieve endpoint reads only
+    `id`/`payload` and ignores `score`."""
+    return {
+        "id": point_id(chunk_id),
+        "score": 0.9,
+        "payload": {
+            "chunk_id": chunk_id,
+            "text": text,
+            "source_url": f"https://www.indiacode.nic.in/{chunk_id}",
+        },
+    }
+
+
+class _QueryResponse:
+    def __init__(self, points: list[dict[str, Any]]) -> None:
+        self._points = points
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return {"result": {"points": self._points}}
+
+
+class _RetrieveResponse:
+    def __init__(self, points: list[dict[str, Any]]) -> None:
+        self._points = points
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, Any]:
+        return {"result": self._points}
+
+
+class _FakeCorpusClient:
+    """Answers both the points/query endpoint (`search`) and the points
+    retrieve endpoint (`fetch_chunks_by_id`), from two independent
+    per-collection point lists.
+
+    `search_points_by_collection` models what THIS turn's similarity search
+    would surface; `corpus_points_by_collection` (defaulting to the same
+    dict) models the full corpus a direct by-id retrieve can reach even when
+    it would not have surfaced from a fresh search -- the real-world shape of
+    a carried id from an earlier turn's citation.
+    """
+
+    def __init__(
+        self,
+        search_points_by_collection: dict[str, list[dict[str, Any]]],
+        corpus_points_by_collection: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
+        self._search_points = search_points_by_collection
+        self._corpus_points = corpus_points_by_collection or search_points_by_collection
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def post(self, url: str, json: dict[str, Any], timeout: float) -> Any:
+        self.requests.append((url, json))
+        if url.endswith("/points/query"):
+            collection = next((c for c in self._search_points if f"/{c}/" in url), None)
+            return _QueryResponse(self._search_points.get(collection, []))
+        collection = next((c for c in self._corpus_points if f"/{c}/" in url), None)
+        points = self._corpus_points.get(collection, [])
+        wanted = set(json.get("ids", ()))
+        return _RetrieveResponse([point for point in points if point["id"] in wanted])
 
 
 class _RaisingClient:
@@ -560,6 +649,168 @@ def test_graph_expansion_merges_in_expanded_chunks_when_enabled() -> None:
 
     assert captured_ids["ids"] == ("a1",)
     assert context.chunk_ids == {"a1", "expanded1"}
+
+
+# --- Task 9: carried chunks are re-fetched, re-rendered, re-validated -----
+#
+# `carried_chunk_ids` comes from `openlaw.answers.history.carried_chunk_ids`
+# (Task 8): corpus ids an earlier turn's surviving claims depend on. These
+# tests prove the only thing Task 9 adds -- that id is re-fetched BY ID (not
+# re-searched) and merged into THIS turn's own `RetrievalContext`, so it is
+# genuinely shown to the model again and the validator needs no new branch.
+
+
+def test_a_carried_chunk_id_is_refetched_and_shown_in_this_turns_context() -> None:
+    """A carried id must appear both in `context.chunk_ids` AND in the text
+    actually rendered to the generator -- "cited implies shown this turn"
+    must be true of the rendered prompt, not just the id set."""
+    client = _FakeCorpusClient(
+        search_points_by_collection={"acts_india_v1": [_point("fresh1")], "sc_judgments_v1": []},
+        corpus_points_by_collection={
+            "acts_india_v1": [_point("fresh1"), _point("carried1", text="an earlier citation")],
+            "sc_judgments_v1": [],
+        },
+    )
+    settings = _settings(qdrant_url=_QDRANT_URL)
+
+    context = build_retrieval_context(
+        "q",
+        settings,
+        client,
+        embedder=StubQueryEmbedder([0.1] * 1024),
+        carried_chunk_ids=("carried1",),
+    )
+
+    assert context.chunk_ids == {"fresh1", "carried1"}
+
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["fresh1"])])
+    generate_answer("q", context, adapter, ModelRegistry())
+    rendered_text = adapter.calls[-1]["messages"][0]["content"][0]["text"]
+
+    assert "[chunk_id: carried1]" in rendered_text
+    assert "an earlier citation" in rendered_text
+
+
+def test_a_carried_id_that_no_longer_resolves_drops_the_claim_like_an_invented_id() -> None:
+    """The corpus was rebuilt and no longer has this id -- re-fetch must not
+    raise, the id must be absent from the context, and a claim citing it
+    must be dropped and logged exactly as a fabricated citation would be."""
+    client = _FakeCorpusClient(
+        search_points_by_collection={"acts_india_v1": [_point("fresh1")], "sc_judgments_v1": []},
+    )
+    settings = _settings(qdrant_url=_QDRANT_URL)
+
+    context = build_retrieval_context(
+        "q",
+        settings,
+        client,
+        embedder=StubQueryEmbedder([0.1] * 1024),
+        carried_chunk_ids=("gone-from-corpus",),
+    )
+
+    assert "gone-from-corpus" not in context.chunk_ids
+    assert "fresh1" in context.chunk_ids
+
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["gone-from-corpus"])])
+    result = generate_answer("q", context, adapter, ModelRegistry())
+
+    assert result.answer.claims == ()
+    assert result.answer.is_answerable is False
+    assert result.events[0].dropped_chunk_ids == ("gone-from-corpus",)
+
+
+def test_claim_citing_a_carried_id_validates_exactly_as_one_citing_a_fresh_id() -> None:
+    """Once re-fetched and merged, a carried chunk is indistinguishable to
+    the validator from a freshly-retrieved one -- by construction, since it
+    really was shown to the model this turn."""
+    client = _FakeCorpusClient(
+        search_points_by_collection={"acts_india_v1": [], "sc_judgments_v1": []},
+        corpus_points_by_collection={
+            "acts_india_v1": [_point("carried1")],
+            "sc_judgments_v1": [],
+        },
+    )
+    settings = _settings(qdrant_url=_QDRANT_URL)
+
+    context = build_retrieval_context(
+        "q",
+        settings,
+        client,
+        embedder=StubQueryEmbedder([0.1] * 1024),
+        carried_chunk_ids=("carried1",),
+    )
+
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["carried1"])])
+    result = generate_answer("q", context, adapter, ModelRegistry())
+
+    assert result.answer.is_answerable is True
+    assert result.answer.claims[0].chunk_ids == ("carried1",)
+
+
+def test_more_carried_ids_than_the_cap_only_contributes_max_carried_chunks() -> None:
+    """`build_retrieval_context` enforces `MAX_CARRIED_CHUNKS` itself rather
+    than trusting every caller to have already applied Task 8's cap."""
+    carried_ids = tuple(f"carried{i}" for i in range(MAX_CARRIED_CHUNKS + 2))
+    client = _FakeCorpusClient(
+        search_points_by_collection={"acts_india_v1": [], "sc_judgments_v1": []},
+        corpus_points_by_collection={
+            "acts_india_v1": [_point(cid) for cid in carried_ids],
+            "sc_judgments_v1": [],
+        },
+    )
+    settings = _settings(qdrant_url=_QDRANT_URL)
+
+    context = build_retrieval_context(
+        "q",
+        settings,
+        client,
+        embedder=StubQueryEmbedder([0.1] * 1024),
+        carried_chunk_ids=carried_ids,
+    )
+
+    assert len(context.chunk_ids) == MAX_CARRIED_CHUNKS
+
+
+def test_saturated_fresh_retrieval_crowds_out_carried_not_the_reverse() -> None:
+    """Both caps saturated at once: `MAX_CONTEXT_CHUNKS` fresh hits AND a
+    full `MAX_CARRIED_CHUNKS` carry. Carried chunks are merged in AFTER
+    fresh ones, and `_bounded_chunks` keeps a PREFIX, trimming from the
+    tail -- so carried history is what gets trimmed, never this turn's own
+    fresh retrieval."""
+    fresh_ids = tuple(f"fresh{i}" for i in range(MAX_CONTEXT_CHUNKS))
+    carried_ids = tuple(f"carried{i}" for i in range(MAX_CARRIED_CHUNKS))
+    client = _FakeCorpusClient(
+        search_points_by_collection={
+            "acts_india_v1": [_point(cid) for cid in fresh_ids],
+            "sc_judgments_v1": [],
+        },
+        corpus_points_by_collection={
+            "acts_india_v1": [_point(cid) for cid in (*fresh_ids, *carried_ids)],
+            "sc_judgments_v1": [],
+        },
+    )
+    settings = _settings(qdrant_url=_QDRANT_URL)
+
+    context = build_retrieval_context(
+        "q",
+        settings,
+        client,
+        embedder=StubQueryEmbedder([0.1] * 1024),
+        carried_chunk_ids=carried_ids,
+        limit=MAX_CONTEXT_CHUNKS,
+    )
+
+    # Carried chunks DO enter the overall context -- only rendering bounds
+    # the turn, not context assembly itself.
+    assert carried_ids[0] in context.chunk_ids
+
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response([fresh_ids[0]])])
+    generate_answer("q", context, adapter, ModelRegistry())
+    rendered_text = adapter.calls[-1]["messages"][0]["content"][0]["text"]
+
+    assert f"[chunk_id: {fresh_ids[0]}]" in rendered_text
+    assert f"[chunk_id: {fresh_ids[-1]}]" in rendered_text
+    assert f"[chunk_id: {carried_ids[0]}]" not in rendered_text
 
 
 # --- The full pipeline, end to end -----------------------------------------
