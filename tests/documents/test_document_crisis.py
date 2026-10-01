@@ -189,24 +189,20 @@ def test_a_document_writer_calls_scan_for_crisis() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Known, carried-forward gap (plan progress.md carry-forward #24): "
-        "Task 14 lands the Document(...) writer and computes/stores "
-        "crisis_kind at upload (openlaw.documents.store.store_document), "
-        "but no production route yet threads it back into a live turn via "
-        "answer_in_language(document_crisis_kinds=...) -- openlaw.api.deps "
-        "is still single-turn. That wiring is Task 15's (conversation-aware "
-        "endpoint). This marker must be removed, not left behind, the "
-        "moment that call site lands -- an unexpected pass (XPASS) here "
-        "means it already has."
-    ),
-)
 def test_a_document_writer_also_threads_document_crisis_kinds() -> None:
-    """The other half of the original combined guard. See
-    `test_a_document_writer_calls_scan_for_crisis` above and this test's
-    `xfail` reason for why this one is expected to fail today."""
+    """The other half of the original combined guard, and it now holds.
+
+    Carried forward from Task 14 as a `xfail(strict=True)` marker, because
+    `openlaw.api.deps` was still single-turn: the verdict was computed and
+    stored at upload and no production route ever passed it back into a live
+    turn, so an attached protection order was invisible to every answer after
+    the upload that read it. Plan 6 Task 15 wired it --
+    `openlaw.api.turns.load_turn_inputs` reads the stored column on EVERY turn
+    and `openlaw.api.deps.build_conversation_answer_fn` forwards it -- which
+    turned the marker into an XPASS. The marker is removed rather than
+    inverted: this is now an ordinary guard against the wiring being deleted
+    again.
+    """
     texts = {path: path.read_text(encoding="utf-8") for path in _production_sources()}
     writers = [path for path, text in texts.items() if re.search(r"\bDocument\(", text)]
     assert writers, "expected a Document(...) writer to exist as of Plan 6 Task 14"

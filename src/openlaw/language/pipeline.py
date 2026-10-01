@@ -423,7 +423,9 @@ def _crisis_answer(
     )
 
 
-def _document_crisis(crisis_kinds: tuple[str | None, ...]) -> CrisisKind | None:
+def resolve_document_crisis(
+    crisis_kinds: tuple[str | None, ...]
+) -> CrisisKind | None:
     """Return the most urgent STORED verdict among the attached documents.
 
     Each entry is one document's `openlaw.db.models.Document.crisis_kind`
@@ -434,6 +436,12 @@ def _document_crisis(crisis_kinds: tuple[str | None, ...]) -> CrisisKind | None:
     contributes nothing; see `crisis_kind_from_value`.
     """
     return most_urgent_crisis(crisis_kind_from_value(value) for value in crisis_kinds)
+
+
+#: Public, because `openlaw.api.deps` resolves the same thing for a
+#: multi-turn call and must not reach for a private name to do it. The
+#: private alias is kept so `answer_in_language` below reads unchanged.
+_document_crisis = resolve_document_crisis
 
 
 def _with_document_crisis(

@@ -140,7 +140,7 @@ def _client(
         return Session(engine)
 
     def default_answer_fn(
-        question: str, language: str | None, state: str | None
+        question: str, language: str | None, state: str | None, **_turn: object
     ) -> LocalisedAnswer:
         return localised or _localised()
 
@@ -612,7 +612,7 @@ def test_no_events_written_for_an_ordinary_answerable_turn(tmp_path: Path) -> No
 def test_answer_fn_is_called_with_the_question_language_and_state() -> None:
     seen: dict[str, object] = {}
 
-    def answer_fn(question: str, language: str | None, state: str | None):
+    def answer_fn(question: str, language: str | None, state: str | None, **_turn: object):
         seen["question"] = question
         seen["language"] = language
         seen["state"] = state
@@ -777,7 +777,7 @@ def _shared_app(settings: Settings | None = None):
     def session_factory() -> Session:
         return Session(engine)
 
-    def answer_fn(question: str, language: str | None, state: str | None):
+    def answer_fn(question: str, language: str | None, state: str | None, **_turn: object):
         return _localised()
 
     return create_app(answer_fn, session_factory, settings or _settings())
@@ -988,7 +988,7 @@ def test_500_response_also_carries_the_escalation_footer() -> None:
     sustained ("try again" alone is misleading), so it must not be a dead
     end either."""
 
-    def broken_answer_fn(question: str, language: str | None, state: str | None):
+    def broken_answer_fn(question: str, language: str | None, state: str | None, **_turn: object):
         raise RuntimeError("boom")
 
     client = _client(answer_fn=broken_answer_fn)
@@ -1042,7 +1042,7 @@ def test_anonymous_quota_resets_for_a_new_billing_period() -> None:
 
 
 def test_an_unhandled_error_in_answer_fn_returns_a_generic_500() -> None:
-    def broken_answer_fn(question: str, language: str | None, state: str | None):
+    def broken_answer_fn(question: str, language: str | None, state: str | None, **_turn: object):
         raise RuntimeError("qdrant is down: connection refused at 10.0.0.5:6333")
 
     client = _client(answer_fn=broken_answer_fn)

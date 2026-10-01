@@ -16,11 +16,11 @@ then compute the same "+1", both see themselves as under the limit, and one
 increment is silently lost: the counter undercounts real usage, and more
 answers get served than the limit allows — the exact failure this module
 exists to prevent. `consume_quota` instead issues a single
-`UPDATE ... SET questions_used = questions_used + 1 WHERE questions_used <
-limit RETURNING questions_used`: the row lock Postgres takes for that
+`UPDATE ... SET questions_used = questions_used + :cost WHERE
+questions_used + :cost <= limit RETURNING questions_used`: the row lock Postgres takes for that
 statement's duration means a second concurrent UPDATE against the same row
 waits and then sees the first one's result, rather than racing it. The
-check (`questions_used < limit`) and the increment happen in the same
+check (`questions_used + :cost <= limit`) and the increment happen in the same
 statement, so there is no gap between them either — nothing can slip past
 the limit in a window that does not exist.
 
@@ -78,11 +78,38 @@ def next_period_start(today: date | None = None) -> date:
     return date(period.year, period.month + 1, 1)
 
 
-def check_quota(used: int, limit: int, enabled: bool) -> QuotaDecision:
-    """Return the quota decision for a user who has used `used` questions."""
+def _require_positive_cost(cost: int) -> None:
+    """Reject a cost below one -- a free request is not a metered request.
+
+    A zero or negative cost would make the conditional UPDATE in
+    `consume_quota` a no-op that still reported `allowed=True`, which is
+    silent unmetered usage rather than an error anybody would notice. Raised
+    rather than clamped: every cost in this codebase comes from
+    `max(1, ...)` arithmetic, so a value below one is a bug at the call
+    site, not a caller's choice.
+    """
+    if cost < 1:
+        raise ValueError(f"quota cost must be at least 1, got {cost}")
+
+
+def check_quota(used: int, limit: int, enabled: bool, cost: int = 1) -> QuotaDecision:
+    """Return the quota decision for a user who has used `used` questions.
+
+    `cost` is how many units THIS request consumes (Plan 6 Task 15): a turn
+    costs 1, an upload costs `max(1, ceil(page_count / PAGES_PER_QUOTA_UNIT))`
+    -- see `openlaw.documents.PAGES_PER_QUOTA_UNIT`. The decision is whether
+    the whole cost fits, never whether one unit does: a 4-unit upload with 2
+    units left is refused outright rather than consuming what it can.
+
+    `used` is reported back unchanged, exactly as it is given: this function
+    is pure policy and the caller owns the counter (see
+    `openlaw.api.routes._anonymous_decision`, which adds the cost to its own
+    in-memory tally only once the decision allows it).
+    """
+    _require_positive_cost(cost)
     if not enabled:
         return QuotaDecision(allowed=True, used=used, limit=limit)
-    return QuotaDecision(allowed=used < limit, used=used, limit=limit)
+    return QuotaDecision(allowed=used + cost <= limit, used=used, limit=limit)
 
 
 def _ensure_usage_row(session: Session, user_id: str, period: date) -> None:
@@ -127,15 +154,27 @@ def consume_quota(
     limit: int,
     enabled: bool,
     today: date | None = None,
+    cost: int = 1,
 ) -> QuotaDecision:
-    """Consume one question from `user_id`'s allowance for the current month.
+    """Consume `cost` units from `user_id`'s allowance for the current month.
 
-    Returns a refusal without incrementing when the allowance is exhausted,
-    and writes nothing at all when quota is disabled. See the module
-    docstring for why the increment is one atomic conditional UPDATE rather
-    than a read-modify-write, and why this function commits its own
+    Returns a refusal without incrementing when the allowance cannot absorb
+    the WHOLE cost, and writes nothing at all when quota is disabled. See the
+    module docstring for why the increment is one atomic conditional UPDATE
+    rather than a read-modify-write, and why this function commits its own
     transaction.
+
+    `cost` defaults to 1 -- one question, the only cost that existed before
+    Plan 6 Task 15. An upload costs `max(1, ceil(page_count /
+    PAGES_PER_QUOTA_UNIT))`, because a 20-page document is not the same
+    expense as a one-line question: it is parsed, crisis-scanned, encrypted
+    page by page, and then re-read into the model's context on every later
+    turn of its conversation. The `questions_used + cost <= limit` guard keeps
+    the check and the increment inside the same statement for a multi-unit
+    cost exactly as it did for a single one, so a 4-unit upload can never
+    half-consume an allowance that had room for only 2.
     """
+    _require_positive_cost(cost)
     if not enabled:
         return QuotaDecision(allowed=True, used=0, limit=limit)
 
@@ -147,9 +186,9 @@ def consume_quota(
         .where(
             QuotaUsage.user_id == user_id,
             QuotaUsage.period_month == period,
-            QuotaUsage.questions_used < limit,
+            QuotaUsage.questions_used + cost <= limit,
         )
-        .values(questions_used=QuotaUsage.questions_used + 1)
+        .values(questions_used=QuotaUsage.questions_used + cost)
         .returning(QuotaUsage.questions_used)
     )
     row = result.first()

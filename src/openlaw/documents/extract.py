@@ -78,7 +78,12 @@ from pypdf import PdfReader
 
 from openlaw.answers.escalation import CrisisKind, detect_crisis
 from openlaw.config import Settings
-from openlaw.documents import ALLOWED_CONTENT_TYPES, DOCUMENT_EXCERPT_PREFIX, MAX_EXCERPT_CHARS
+from openlaw.documents import (
+    ALLOWED_CONTENT_TYPES,
+    CHARS_PER_TEXT_PAGE,
+    DOCUMENT_EXCERPT_PREFIX,
+    MAX_EXCERPT_CHARS,
+)
 
 _PDF_CONTENT_TYPE = "application/pdf"
 _DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -159,6 +164,8 @@ def extract_pages(data: bytes, content_type: str, settings: Settings) -> tuple[E
     else:
         # The only content type left in `ALLOWED_CONTENT_TYPES`.
         pages = _extract_text_pages(data)
+
+    _require_page_count_within_cap(len(pages), settings)
 
     if not any(page.text.strip() for page in pages):
         raise ExtractionError(
@@ -282,9 +289,46 @@ def _extract_docx_pages(data: bytes) -> tuple[ExtractedPage, ...]:
     return (ExtractedPage(page_number=1, text=text),)
 
 
+def _require_page_count_within_cap(page_count: int, settings: Settings) -> None:
+    """Refuse a document with more than `Settings.max_document_pages` pages.
+
+    Applied to EVERY content type (Plan 6 Task 15), not only PDF. The PDF
+    path keeps its own earlier check because there it is also a cost control
+    -- it fires after reading the `/Pages` tree and before any page's text is
+    decoded -- but relying on that alone left `text/plain` with no page cap at
+    all, and therefore no bound on either its quota cost or the number of
+    excerpt rows one upload could create (see `CHARS_PER_TEXT_PAGE`).
+    """
+    if page_count > settings.max_document_pages:
+        raise ExtractionError(
+            "too_many_pages",
+            f"This document has more than {settings.max_document_pages} pages.",
+        )
+
+
 def _extract_text_pages(data: bytes) -> tuple[ExtractedPage, ...]:
+    """Decode plain text into synthetic pages of `CHARS_PER_TEXT_PAGE`.
+
+    Plain text has no pagination of its own, so one is imposed: see
+    `CHARS_PER_TEXT_PAGE`'s comment for the metering and volume hole that
+    treating any size of text file as a single page left open. The split is
+    on a fixed character count rather than paragraph boundaries on purpose --
+    page provenance for a text file is synthetic either way, and a fixed
+    stride is deterministic, so re-extracting the same bytes reproduces the
+    same page numbers and therefore the same `excerpt_id`s (the stability
+    guarantee `chunk_pages` documents). A document shorter than one page
+    stays exactly one page, as it always was.
+    """
     text = data.decode("utf-8", errors="replace")
-    return (ExtractedPage(page_number=1, text=text),)
+    if len(text) <= CHARS_PER_TEXT_PAGE:
+        return (ExtractedPage(page_number=1, text=text),)
+    return tuple(
+        ExtractedPage(
+            page_number=index + 1,
+            text=text[offset : offset + CHARS_PER_TEXT_PAGE],
+        )
+        for index, offset in enumerate(range(0, len(text), CHARS_PER_TEXT_PAGE))
+    )
 
 
 def chunk_pages(

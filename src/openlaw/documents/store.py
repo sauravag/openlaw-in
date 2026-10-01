@@ -37,13 +37,26 @@ anonymous owner and `NULL` for an authenticated one.
 so the record outlives a deleted document. Every function below that
 touches a document (create, read, delete) calls it, including the denial
 path: a mismatch writes `action="denied"` before `AccessDenied` is raised
-(`load_excerpts`) or `False` is returned (`delete_document`), so "who tried
-to read what, and when" survives even a refusal.
+(`load_attached_documents`) or `False` is returned (`delete_document`), so
+"who tried to read what, and when" survives even a refusal.
+
+**...but only durably if the caller's transaction commits, which is why
+`audit_fn` is injectable (Plan 6 Task 15 ruling).** `audit` writes on the
+session it is handed, so it lives and dies with that session's transaction --
+and a denied access is the single request most likely to end in a rollback,
+which is precisely the row an audit trail exists to keep. This module cannot
+fix that alone: it does not own the transaction boundary, the HTTP layer
+does. Every function here therefore takes an `audit_fn` (defaulting to
+`audit`, so nothing changes for an existing caller) and
+`openlaw.api.artifacts` passes one that writes each row on its own session
+and commits it immediately. See `AuditFn` below.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -89,6 +102,37 @@ def audit(session: Session, document_id: str, owner: Owner, action: str) -> None
     session.flush()
 
 
+#: How a function in this module records one access. Injectable for exactly
+#: one reason (Plan 6 Task 15 ruling): `audit` above shares its caller's
+#: transaction, so a DENIED cross-owner access whose request then rolls back
+#: left no row at all -- which defeats the point of auditing denials, since a
+#: denial is precisely the request most likely to end in a rollback. The HTTP
+#: layer owns the transaction boundary, so it is the layer that passes an
+#: `audit_fn` writing on its own, independently committed session (see
+#: `openlaw.api.artifacts.durable_audit`). The default is `audit` itself, so
+#: every existing caller keeps the previous same-transaction behaviour and
+#: this module gains no knowledge of sessions it does not already have.
+AuditFn = Callable[[Session, str, Owner, str], None]
+
+
+@dataclass(frozen=True)
+class AttachedDocuments:
+    """Everything one turn needs from the documents attached to it.
+
+    Two values from a single owner-scoped pass, rather than two passes and
+    two sets of audit rows: the decrypted `excerpts` the answer may quote,
+    and each document's STORED upload-time `crisis_kinds` verdict
+    (`openlaw.db.models.Document.crisis_kind`, positionally aligned with the
+    `document_ids` requested). The second is the one `openlaw.language
+    .pipeline.answer_in_conversation` needs on every turn, including turns
+    that select no excerpt at all -- a protection order can contribute its
+    verdict while sharing no token with the question.
+    """
+
+    excerpts: tuple[DocumentExcerpt, ...]
+    crisis_kinds: tuple[str | None, ...]
+
+
 def _anonymous_expiry(owner: Owner, ttl_hours: int) -> datetime | None:
     """Return the TTL-bounded expiry for an anonymous `owner`, else `None`."""
     if owner.user_id is not None:
@@ -118,6 +162,7 @@ def store_document(
     content_type: str,
     data: bytes,
     settings: Settings,
+    audit_fn: AuditFn = audit,
 ) -> Document:
     """Extract, encrypt and store one uploaded document, with its excerpts.
 
@@ -186,17 +231,19 @@ def store_document(
         )
 
     session.flush()
-    audit(session, document_id, owner, "create")
+    audit_fn(session, document_id, owner, "create")
     return document
 
 
-def load_excerpts(
+def load_attached_documents(
     session: Session,
     document_ids: tuple[str, ...],
     owner: Owner,
     settings: Settings,
-) -> tuple[DocumentExcerpt, ...]:
-    """Return every excerpt of every document in `document_ids`, decrypted.
+    audit_fn: AuditFn = audit,
+) -> AttachedDocuments:
+    """Return the decrypted excerpts and stored crisis verdicts of
+    `document_ids`.
 
     Raises `AccessDenied` on the FIRST `document_id` that does not resolve
     under `owner`'s scoped query -- never a partial result that silently
@@ -204,20 +251,29 @@ def load_excerpts(
     denial itself is still audited (`action="denied"`) before the
     exception is raised. A document that DOES resolve is audited as
     `action="read"` before its excerpts are decrypted and returned.
+
+    `crisis_kinds` is positionally aligned with `document_ids`, so a caller
+    can hand it straight to `openlaw.language.pipeline
+    .answer_in_conversation`/`answer_in_language` without re-querying. It is
+    read from the stored column only: nothing here re-scans or re-classifies
+    document text, which is what keeps a document's crisis verdict free on
+    every turn after the upload that computed it.
     """
     if not document_ids:
-        return ()
+        return AttachedDocuments(excerpts=(), crisis_kinds=())
 
     keyring = load_keyring(settings)
     excerpts: list[DocumentExcerpt] = []
+    crisis_kinds: list[str | None] = []
     for document_id in document_ids:
         document = _find_owned_document(session, document_id, owner)
         if document is None:
-            audit(session, document_id, owner, "denied")
+            audit_fn(session, document_id, owner, "denied")
             raise AccessDenied(
                 f"document {document_id!r} is not accessible to this identity"
             )
-        audit(session, document_id, owner, "read")
+        audit_fn(session, document_id, owner, "read")
+        crisis_kinds.append(document.crisis_kind)
 
         rows = (
             session.execute(
@@ -239,10 +295,36 @@ def load_excerpts(
                     text=text,
                 )
             )
-    return tuple(excerpts)
+    return AttachedDocuments(
+        excerpts=tuple(excerpts), crisis_kinds=tuple(crisis_kinds)
+    )
 
 
-def delete_document(session: Session, document_id: str, owner: Owner) -> bool:
+def load_excerpts(
+    session: Session,
+    document_ids: tuple[str, ...],
+    owner: Owner,
+    settings: Settings,
+    audit_fn: AuditFn = audit,
+) -> tuple[DocumentExcerpt, ...]:
+    """Return every excerpt of every document in `document_ids`, decrypted.
+
+    The excerpts-only view of `load_attached_documents`, kept because that is
+    all most callers want -- and implemented BY it rather than beside it, so
+    the ownership check, the audit rows and the decryption have exactly one
+    implementation that cannot drift.
+    """
+    return load_attached_documents(
+        session, document_ids, owner, settings, audit_fn
+    ).excerpts
+
+
+def delete_document(
+    session: Session,
+    document_id: str,
+    owner: Owner,
+    audit_fn: AuditFn = audit,
+) -> bool:
     """Delete `document_id` if `owner` owns it. Returns whether a row was
     deleted.
 
@@ -256,9 +338,9 @@ def delete_document(session: Session, document_id: str, owner: Owner) -> bool:
     """
     document = _find_owned_document(session, document_id, owner)
     if document is None:
-        audit(session, document_id, owner, "denied")
+        audit_fn(session, document_id, owner, "denied")
         return False
-    audit(session, document_id, owner, "delete")
+    audit_fn(session, document_id, owner, "delete")
     session.delete(document)
     session.flush()
     return True

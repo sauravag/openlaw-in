@@ -134,7 +134,7 @@ def test_a_judgment_reaches_the_client_with_everything_needed_to_cite_it() -> No
         headnote="Whether notice was required.",
     )
 
-    card = to_response(_localised_with(source), "v1", 5).sources[0]
+    card = to_response(_localised_with(source), "v1", 5, conversation_id="c-1").sources[0]
 
     assert card.kind is ChunkKind.JUDGMENT
     assert card.case_id == "1963_INSC_244"
@@ -152,7 +152,7 @@ def test_a_provision_card_leaves_judgment_fields_absent_rather_than_invented() -
         title="The Indian Succession Act, 1925",
     )
 
-    card = to_response(_localised_with(source), "v1", 5).sources[0]
+    card = to_response(_localised_with(source), "v1", 5, conversation_id="c-1").sources[0]
 
     assert card.kind is ChunkKind.PROVISION
     assert card.case_id is None
@@ -175,7 +175,7 @@ def test_the_response_never_carries_the_unverified_summary() -> None:
         kind=ChunkKind.PROVISION,
     )
 
-    response = to_response(_localised_with(source), "v1", 5)
+    response = to_response(_localised_with(source), "v1", 5, conversation_id="c-1")
 
     assert "unverified_summary" not in AskResponse.model_fields
     assert "must never render" not in response.model_dump_json()
@@ -190,7 +190,7 @@ def test_the_kind_reaches_the_browser_as_a_plain_string() -> None:
         kind=ChunkKind.JUDGMENT,
     )
 
-    payload = to_response(_localised_with(source), "v1", 5).model_dump(mode="json")
+    payload = to_response(_localised_with(source), "v1", 5, conversation_id="c-1").model_dump(mode="json")
 
     assert payload["sources"][0]["kind"] == "judgment"
 
@@ -226,12 +226,25 @@ def test_document_claims_cannot_make_a_response_answerable() -> None:
         footer="NALSA: 15100",
     )
 
-    response = to_response(localised, "v1", 5)
+    response = to_response(localised, "v1", 5, conversation_id="c-1")
 
     assert response.is_answerable is False
     assert response.answer.startswith("We could not find a verifiable answer")
     assert response.sources == []
-    assert "4 March" not in response.model_dump_json()
+    assert "4 March" not in response.answer
+
+    # Plan 6 Task 15 changed what happens to the document claim itself, on
+    # purpose. Until this task `to_response` rendered `document_claims`
+    # NOWHERE, so this test asserted the prose was absent from the entire
+    # body -- correct while there was no field for it, and the reason document
+    # analysis reached nobody at all. It now leaves through its own field,
+    # under its own heading. The property that actually mattered is unchanged
+    # and still asserted above: a turn with no citable law reports
+    # `is_answerable=False`, renders the fixed refusal as `answer`, and lets
+    # no document prose anywhere near it.
+    assert response.document_answer is not None
+    assert "4 March" in response.document_answer
+    assert response.document_citations[0].excerpt_id == "doc:a:p1:0"
 
 
 # --- a document-derived crisis is rendered ALONGSIDE the answer -----------
@@ -271,7 +284,10 @@ def _localised_with_document_crisis(crisis: CrisisKind | None) -> LocalisedAnswe
 
 def test_a_document_crisis_turn_still_renders_its_legal_answer() -> None:
     response = to_response(
-        _localised_with_document_crisis(CrisisKind.DOMESTIC_VIOLENCE), "v1", 5
+        _localised_with_document_crisis(CrisisKind.DOMESTIC_VIOLENCE),
+        "v1",
+        5,
+        conversation_id="c-1",
     )
 
     assert response.answer == "Notice is required."
@@ -281,7 +297,10 @@ def test_a_document_crisis_turn_still_renders_its_legal_answer() -> None:
 
 def test_a_document_crisis_turn_also_carries_the_helpline_card() -> None:
     response = to_response(
-        _localised_with_document_crisis(CrisisKind.DOMESTIC_VIOLENCE), "v1", 5
+        _localised_with_document_crisis(CrisisKind.DOMESTIC_VIOLENCE),
+        "v1",
+        5,
+        conversation_id="c-1",
     )
 
     assert response.crisis_response is not None
@@ -290,6 +309,6 @@ def test_a_document_crisis_turn_also_carries_the_helpline_card() -> None:
 
 
 def test_an_ordinary_turn_carries_no_crisis_response() -> None:
-    response = to_response(_localised_with_document_crisis(None), "v1", 5)
+    response = to_response(_localised_with_document_crisis(None), "v1", 5, conversation_id="c-1")
 
     assert response.crisis_response is None

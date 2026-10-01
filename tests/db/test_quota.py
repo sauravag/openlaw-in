@@ -189,3 +189,55 @@ def test_concurrent_requests_never_exceed_the_limit(live_engine) -> None:
                 QuotaUsage.user_id == user_id
             ).delete()
             cleanup_session.query(User).filter(User.id == user_id).delete()
+
+
+# --- cost: a 20-page upload is not a one-line question (Plan 6 Task 15) ----
+
+
+def test_check_quota_refuses_a_cost_that_would_cross_the_limit() -> None:
+    assert check_quota(used=28, limit=30, enabled=True, cost=2).allowed is True
+    assert check_quota(used=29, limit=30, enabled=True, cost=2).allowed is False
+
+
+def test_consuming_a_multi_unit_cost_increments_by_that_cost() -> None:
+    session = _session()
+    user = _user(session)
+
+    decision = consume_quota(session, user.id, limit=30, enabled=True, cost=4)
+
+    assert decision.allowed is True
+    assert decision.used == 4
+    assert decision.remaining == 26
+
+
+def test_a_cost_that_does_not_fit_is_refused_without_partial_consumption() -> None:
+    """The whole point of the single conditional UPDATE: a 4-unit upload with
+    2 units left must consume NOTHING, not 2 units and then fail."""
+    session = _session()
+    user = _user(session)
+    consume_quota(session, user.id, limit=5, enabled=True, cost=3)
+
+    refused = consume_quota(session, user.id, limit=5, enabled=True, cost=4)
+
+    assert refused.allowed is False
+    assert refused.used == 3
+    row = session.get(QuotaUsage, session.query(QuotaUsage).one().id)
+    assert row is not None and row.questions_used == 3
+
+
+def test_a_cost_exactly_filling_the_allowance_is_allowed() -> None:
+    session = _session()
+    user = _user(session)
+
+    decision = consume_quota(session, user.id, limit=4, enabled=True, cost=4)
+
+    assert decision.allowed is True
+    assert decision.remaining == 0
+
+
+def test_a_cost_below_one_is_a_programming_error() -> None:
+    session = _session()
+    user = _user(session)
+
+    with pytest.raises(ValueError):
+        consume_quota(session, user.id, limit=30, enabled=True, cost=0)

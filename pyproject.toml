@@ -22,6 +22,11 @@ dependencies = [
     "pypdf>=5.1",
     "python-docx>=1.1",
     "cryptography>=44.0",
+    # Required by FastAPI to parse `multipart/form-data` -- the only shape a
+    # document upload can arrive in (`POST /documents`, Plan 6 T15). FastAPI
+    # raises at import time, not request time, without it, so a deployment
+    # missing it cannot start rather than failing on a citizen's first upload.
+    "python-multipart>=0.0.18",
 ]
 
 [project.optional-dependencies]

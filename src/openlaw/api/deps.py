@@ -41,6 +41,7 @@ asked for an Anthropic key, and never constructs an Anthropic client. See
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from typing import Protocol
 
 import httpx
 from fastapi import FastAPI
@@ -64,10 +65,20 @@ from openlaw.db.session import engine_from_settings, session_scope
 from openlaw.graph.connection import graph_driver
 from openlaw.graph.queries import expand_chunks
 from openlaw.language.glossary import load_glossary
-from openlaw.language.pipeline import LocalisedAnswer, answer_in_language
+from openlaw.answers.history import HistoryTurn
+from openlaw.documents.context import (
+    EMPTY_DOCUMENT_CONTEXT,
+    DocumentContext,
+)
+from openlaw.language.pipeline import (
+    LocalisedAnswer,
+    resolve_document_crisis,
+    answer_in_conversation,
+)
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
 from openlaw.retrieval.factory import build_query_embedder
 from openlaw.retrieval.query import QueryEmbedder
+from openlaw.retrieval.fetch import fetch_chunks_by_id
 from openlaw.retrieval.rerank import ScoreReranker, merge_chunks
 from openlaw.retrieval.search import search
 
@@ -79,6 +90,9 @@ EXPANSION_LIMIT = 20
 ExpandFn = Callable[[list[str]], tuple[RetrievedChunk, ...]]
 #: A vector search over the configured corpus collections for one query.
 SearchFn = Callable[[list[float]], tuple[RetrievedChunk, ...]]
+#: A read-only re-fetch of specific corpus chunks by id, for the chunks an
+#: earlier turn's claims cite (`openlaw.retrieval.fetch.fetch_chunks_by_id`).
+FetchFn = Callable[[tuple[str, ...]], tuple[RetrievedChunk, ...]]
 
 
 class QdrantGraphRetriever:
@@ -96,18 +110,61 @@ class QdrantGraphRetriever:
         embedder: QueryEmbedder,
         search_fn: SearchFn,
         expand_fn: ExpandFn,
+        fetch_fn: FetchFn | None = None,
     ) -> None:
         self._embedder = embedder
         self._search = search_fn
         self._expand = expand_fn
+        self._fetch = fetch_fn
         self._reranker = ScoreReranker()
 
-    def retrieve(self, english_query: str) -> RetrievalContext:
-        """Return the retrieval context for `english_query`."""
+    def _fetch_carried(self, chunk_ids: tuple[str, ...]) -> tuple[RetrievedChunk, ...]:
+        """Re-fetch `chunk_ids`, or return nothing when no fetcher is wired.
+
+        `fetch_fn` is optional so a single-shot caller (and every test written
+        before conversations existed) builds this class unchanged. Carrying
+        ids with no fetcher would silently drop them, so that combination is a
+        programming error and says so -- the same reasoning
+        `openlaw.language.pipeline._SingleTurnRetriever` applies to the same
+        hazard.
+        """
+        if not chunk_ids:
+            return ()
+        if self._fetch is None:
+            raise ValueError(
+                "this retriever was built without a fetch_fn and cannot "
+                "re-fetch carried chunk ids; build it with one for multi-turn "
+                "conversations"
+            )
+        return self._fetch(chunk_ids)
+
+    def retrieve(
+        self, english_query: str, carried_chunk_ids: tuple[str, ...] = ()
+    ) -> RetrievalContext:
+        """Return the retrieval context for `english_query`.
+
+        Satisfies BOTH `openlaw.language.pipeline.Retriever` (one argument)
+        and `ConversationRetriever` (two), rather than two classes that would
+        have to keep the same merge and rerank behaviour in step.
+
+        `carried_chunk_ids` -- `openlaw.answers.history.carried_chunk_ids`'s
+        output, the corpus chunks an earlier turn's surviving claims cite --
+        is RE-FETCHED from the corpus (`openlaw.retrieval.fetch
+        .fetch_chunks_by_id`), never replayed from a cached copy. That is the
+        whole contract: a chunk that has since been re-indexed comes back in
+        its current form, and one that has left the corpus altogether does not
+        come back at all, so the claim that cited it is simply not replayed
+        into the prompt and "cited implies shown this turn" stays true with no
+        "cited earlier" branch anywhere in the validator.
+
+        `merge_chunks` dedupes with the fresh side winning, so a carried id
+        this turn's own search also returned is not counted twice.
+        """
         vector = self._embedder.embed_query(english_query)
         primary = self._search(vector)
         expanded = self._expand([chunk.chunk_id for chunk in primary])
-        merged = merge_chunks(primary, expanded)
+        carried = self._fetch_carried(carried_chunk_ids)
+        merged = merge_chunks(primary, merge_chunks(expanded, carried))
         return RetrievalContext(
             query=english_query, chunks=self._reranker.rerank(english_query, merged)
         )
@@ -273,27 +330,68 @@ def build_llm_adapter(settings: Settings, registry: ModelRegistry) -> LLMAdapter
     )
 
 
-#: The exact shape the task brief specifies and `routes.ask` calls against
-#: (`answer_fn(body.question, body.language, body.state)`). Precise on
-#: purpose (Task 5 review, H1/LOW): the loose `Callable[..., LocalisedAnswer]`
-#: this used to be typed as let `answer_fn` silently drop `language` without
-#: any type checker ever flagging it -- see `answer_fn`'s docstring below.
-AnswerFn = Callable[[str, str | None, str | None], LocalisedAnswer]
+#: What `openlaw.api.routes.ask` calls, once per turn. The three positional
+#: arguments are the caller's own words; the three keyword-only ones are what
+#: the route loaded for this turn before generation. Precise on purpose (Task 5
+#: review, H1/LOW): the loose `Callable[..., LocalisedAnswer]` this used to be
+#: let `answer_fn` silently drop `language`, and the identical hazard now
+#: applies three times over -- a closure that quietly ignored
+#: `document_crisis_kinds` would make a woman's attached protection order
+#: invisible with nothing failing anywhere.
+class ConversationAnswerFn(Protocol):
+    """One turn of a conversation, answered."""
+
+    def __call__(
+        self,
+        question: str,
+        language: str | None,
+        state: str | None,
+        *,
+        history: tuple[HistoryTurn, ...] = (),
+        document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+        document_crisis_kinds: tuple[str | None, ...] = (),
+    ) -> LocalisedAnswer:
+        """Answer `question` as turn `len(history)` of its conversation."""
+        ...
 
 
-def build_answer_fn(settings: Settings) -> AnswerFn:
+#: Retained name for the single-turn shape, so nothing that only ever asked a
+#: standalone question has to care that conversations exist.
+AnswerFn = ConversationAnswerFn
+
+
+def _build_fetch_fn(client: httpx.Client, settings: Settings) -> FetchFn:
+    """Return the carried-chunk re-fetch callable for one deployment.
+
+    Read-only and shared across requests (unlike `_build_search_fn`, which has
+    to curry the question text): `fetch_chunks_by_id` needs nothing from the
+    turn but the ids themselves.
+    """
+    return lambda chunk_ids: fetch_chunks_by_id(client, settings.qdrant_url, chunk_ids)
+
+
+def build_conversation_answer_fn(settings: Settings) -> ConversationAnswerFn:
     """Return the production answer function used by the `/ask` endpoint.
 
     Everything expensive -- the provider client(s), the model registry, the
     glossary, the query embedder, the shared HTTP client -- is built exactly
-    once, here, before this function returns. The closure it returns is
-    called once per request and builds nothing heavier than a
+    once, here, before this function returns. The closure it returns is called
+    once per request and builds nothing heavier than a
     `QdrantGraphRetriever` and its per-request `search_fn` closure (see
-    `_build_search_fn`). Calls `answer_in_language` only -- never
+    `_build_search_fn`). Calls `answer_in_conversation` only -- never
     `persist_answer_events` -- so `routes.ask` remains the single place a
     turn's events are written (see the module docstring).
 
-    `client` (the shared `httpx.Client` used for every search request) is
+    **This is what makes multi-turn reachable at all.** `answer_in_conversation`
+    has existed since Plan 6 Task 9 and nothing in production called it: this
+    module built a single-turn `answer_fn` that passed no history, no document
+    context and no document crisis verdicts, so every one of those paths was
+    dead code behind a live endpoint. The retriever built below is a
+    `ConversationRetriever` -- it re-fetches `carried_chunk_ids` through
+    `fetch_chunks_by_id` and merges them into this turn's context -- and the
+    three keyword arguments are forwarded, not defaulted away.
+
+    `client` (the shared `httpx.Client` used for every search and re-fetch) is
     deliberately never closed: it must live exactly as long as the closure
     that captures it, which is the lifetime of the process, so there is no
     earlier point at which closing it would be correct.
@@ -304,34 +402,56 @@ def build_answer_fn(settings: Settings) -> AnswerFn:
     embedder = build_query_embedder(settings)
     expand_fn = build_expand_fn(settings)
     client = httpx.Client(timeout=60)
+    fetch_fn = _build_fetch_fn(client, settings)
 
     def answer_fn(
-        question: str, language: str | None, state: str | None
+        question: str,
+        language: str | None,
+        state: str | None,
+        *,
+        history: tuple[HistoryTurn, ...] = (),
+        document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+        document_crisis_kinds: tuple[str | None, ...] = (),
     ) -> LocalisedAnswer:
-        """Answer `question` in `language`, or the language it was asked in.
+        """Answer one turn, in `language` or the language it was asked in.
 
-        Task 5 review, H1: an earlier version of this closure accepted
-        `language` and never forwarded it to `answer_in_language`, so an
-        explicit language selection from `AskRequest.language` -- which
-        `answer_in_language`'s own docstring documents as overriding
-        detection outright, and which is the only way a Marathi or Assamese
-        speaker (script-indistinguishable from Hindi/Bengali by detection)
-        gets served in their own language -- was silently discarded in
-        production. `language=language` below is the fix; see
-        `tests/api/test_deps.py` for the regression test, whose stub now
-        requires this keyword rather than defaulting it away.
+        Task 5 review, H1 (and its Plan 6 restatement): every argument this
+        closure accepts is forwarded, by keyword, to `answer_in_conversation`.
+        An earlier version accepted `language` and never passed it on, which
+        silently discarded the only way a Marathi or Assamese speaker is served
+        in their own language; `document_crisis_kinds` is the same hazard with
+        higher stakes, since dropping it would make an attached FIR's crisis
+        verdict vanish with nothing failing. `tests/api/test_deps.py`'s stub
+        requires all of them rather than defaulting them away, so a future
+        regression fails a test instead of a person.
         """
         retriever = QdrantGraphRetriever(
             embedder=embedder,
             search_fn=_build_search_fn(client, settings, question),
             expand_fn=expand_fn,
+            fetch_fn=fetch_fn,
         )
-        return answer_in_language(
-            question, retriever, adapter, registry, glossary,
-            state=state, language=language,
+        return answer_in_conversation(
+            question,
+            retriever,
+            adapter,
+            registry,
+            glossary,
+            history=history,
+            document_context=document_context,
+            document_crisis=resolve_document_crisis(document_crisis_kinds),
+            state=state,
+            language=language,
         )
 
     return answer_fn
+
+
+#: Kept as an alias rather than a second implementation: `build_answer_fn` was
+#: the name every caller and test used before conversations existed, and the
+#: function it named is now a special case of this one (empty history, no
+#: document) reached through exactly the same closure.
+build_answer_fn = build_conversation_answer_fn
 
 
 def _describe_one_error(error: dict) -> str:
@@ -470,4 +590,6 @@ def production_app() -> FastAPI:
     def session_factory() -> AbstractContextManager[Session]:
         return session_scope(engine)
 
-    return create_app(build_answer_fn(settings), session_factory, settings)
+    return create_app(
+        build_conversation_answer_fn(settings), session_factory, settings
+    )

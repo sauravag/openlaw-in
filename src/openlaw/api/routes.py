@@ -53,6 +53,22 @@ with no fallback to the allowance the code already had three lines away.
 `AuthError` (and its `.detail`, which still never reaches a client) is now
 caught inside `_authenticated_decision` and logged server-side only.
 
+**`/ask` is a CONVERSATION turn, not a standalone question (Plan 6 Task
+15).** `openlaw.language.pipeline.answer_in_conversation` had existed since
+Task 9 with nothing in production calling it: this module passed no history,
+no document context and no document crisis verdicts, so multi-turn and
+document analysis were live code behind a dead call site. `openlaw.api.turns
+.load_turn_inputs` now resolves (or mints) the conversation, loads its
+history, decrypts the attached documents into this turn's context and reads
+their stored crisis verdicts -- all of it owner-scoped, all of it before
+generation. The gates above are unchanged and still run first: the burst limit
+and the allowance are enforced before any of that work happens.
+
+**The document endpoints live in `openlaw.api.artifacts`,** and share this
+module's `metered_caller`/`caller_owner` so the order of the gates and the
+"stale token falls back to the anonymous identity" ruling cannot differ
+between the two routers.
+
 **Every turn's events are persisted at this boundary.**
 `openlaw.answers.generate.persist_answer_events` is called once `answer_fn`
 returns, on every non-refused turn -- `answer_in_language` deliberately
@@ -66,6 +82,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
 import httpx
@@ -78,6 +95,8 @@ from openlaw.api.auth import AuthError, decode_token, extract_bearer, upsert_use
 from openlaw.api.refusal import crisis_extras, refusal_detail
 from openlaw.api.schemas import AskRequest, AskResponse, QuotaExceeded, to_response
 from openlaw.config import Settings
+from openlaw.api.turns import load_turn_inputs, persist_turn, turn_document_ids
+from openlaw.db.conversations import Owner
 from openlaw.db.quota import (
     QuotaDecision,
     check_quota,
@@ -308,9 +327,18 @@ def _raise_quota_exceeded(
 
 
 def _authenticated_decision(
-    session_factory: Callable, settings: Settings, authorization: str | None
-) -> QuotaDecision | None:
+    session_factory: Callable,
+    settings: Settings,
+    authorization: str | None,
+    cost: int = 1,
+) -> tuple[QuotaDecision, str] | None:
     """Return the quota decision for a bearer-token request, or None.
+
+    Returns `(decision, user_id)` -- the Supabase subject alongside the
+    allowance verdict, because every row this request may go on to read or
+    write is scoped to that subject (`openlaw.db.conversations.Owner`) and
+    re-deriving it from the token a second time would be a second place for
+    the "key users by subject, never by email" rule to drift.
 
     None means "proceed on the anonymous allowance instead" -- both for no
     token/no auth configured, AND (Task 4 review, H1/M4 ruling) for a token
@@ -334,12 +362,14 @@ def _authenticated_decision(
         with session_factory() as session:
             identity = decode_token(token, settings.supabase_jwt_secret)
             user = upsert_user(session, identity)
-            return consume_quota(
+            decision = consume_quota(
                 session,
                 user.id,
                 limit=settings.monthly_quota,
                 enabled=settings.quota_enabled,
+                cost=cost,
             )
+            return decision, user.id
     except AuthError as error:
         logger.warning(
             "authentication failed, falling back to the anonymous allowance: %s",
@@ -365,7 +395,9 @@ def _prune_anonymous_counts(
         del counts[token]
 
 
-def _anonymous_decision(request: Request, settings: Settings, token: str) -> QuotaDecision:
+def _anonymous_decision(
+    request: Request, settings: Settings, token: str, cost: int = 1
+) -> QuotaDecision:
     """Return the quota decision for an unauthenticated request.
 
     Tracked in-memory, per process, on `app.state.anonymous_used`, keyed by
@@ -379,10 +411,12 @@ def _anonymous_decision(request: Request, settings: Settings, token: str) -> Quo
     _prune_anonymous_counts(counts, period)
 
     used = counts.get(token, (period, 0))[1]
-    decision = check_quota(used, settings.anonymous_quota, settings.quota_enabled)
+    decision = check_quota(used, settings.anonymous_quota, settings.quota_enabled, cost)
     if decision.allowed and settings.quota_enabled:
-        counts[token] = (period, used + 1)
-        return QuotaDecision(allowed=True, used=used + 1, limit=settings.anonymous_quota)
+        counts[token] = (period, used + cost)
+        return QuotaDecision(
+            allowed=True, used=used + cost, limit=settings.anonymous_quota
+        )
     return decision
 
 
@@ -504,19 +538,135 @@ def readyz(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200 if healthy else 503, content=body)
 
 
+#: The identity a request acts as, plus what it still owes the caller.
+#: `signup_required` is True exactly when the request fell back to the
+#: anonymous allowance, which is the one fact a refusal needs that the
+#: `Owner` itself does not carry in a form the response shape wants.
+@dataclass(frozen=True)
+class MeteredCaller:
+    """The result of metering one request: who it is, and what it has left."""
+
+    owner: Owner
+    decision: QuotaDecision
+    signup_required: bool
+
+
+def caller_owner(
+    request: Request,
+    settings: Settings,
+    session_factory: Callable,
+    authorization: str | None,
+) -> Owner:
+    """Return the identity this request acts as, consuming NO quota.
+
+    For the operations that must stay free: deleting a document or a
+    conversation, and re-reading a transcript the caller already paid for.
+    Charging for a delete would be charging someone to withdraw an uploaded
+    FIR, which is the opposite of what the retention promise means.
+
+    A token that fails to verify falls back to the anonymous identity rather
+    than refusing, the same ruling `_authenticated_decision` follows, and
+    `AuthError.detail` reaches only `logger.warning` -- never a client.
+    """
+    token = extract_bearer(authorization)
+    if token and settings.supabase_jwt_secret:
+        try:
+            with session_factory() as session:
+                identity = decode_token(token, settings.supabase_jwt_secret)
+                return Owner(user_id=upsert_user(session, identity).id, anon_token=None)
+        except AuthError as error:
+            logger.warning(
+                "authentication failed, falling back to the anonymous identity: %s",
+                error.detail,
+            )
+    return Owner(user_id=None, anon_token=_anon_token(request, settings))
+
+
+def metered_caller(
+    request: Request,
+    settings: Settings,
+    session_factory: Callable,
+    authorization: str | None,
+    question: str,
+    state: str | None,
+    language: str | None,
+    cost: int,
+) -> MeteredCaller:
+    """Rate-limit, identify and meter one request, or raise its refusal.
+
+    The single entry point every metered endpoint (`/ask` and `POST
+    /documents`) goes through, so the order the module docstring fixes cannot
+    differ between them: the IP-keyed burst limit first, then the allowance --
+    cookie-keyed for an anonymous caller, row-locked for a signed-in one --
+    and only then does the caller get to spend anything expensive. Raises the
+    429 itself (help attached, via `_raise_rate_limited`/
+    `_raise_quota_exceeded`) rather than returning a refusal for a caller to
+    remember to check.
+    """
+    _check_rate_limit(
+        request, _client_key(request, settings), question, state, language, settings
+    )
+
+    authenticated = _authenticated_decision(
+        session_factory, settings, authorization, cost
+    )
+    if authenticated is None:
+        anon_token = _anon_token(request, settings)
+        return _refuse_or_return(
+            MeteredCaller(
+                owner=Owner(user_id=None, anon_token=anon_token),
+                decision=_anonymous_decision(request, settings, anon_token, cost),
+                signup_required=True,
+            ),
+            question, state, language, settings,
+        )
+    decision, user_id = authenticated
+    return _refuse_or_return(
+        MeteredCaller(
+            owner=Owner(user_id=user_id, anon_token=None),
+            decision=decision,
+            signup_required=False,
+        ),
+        question, state, language, settings,
+    )
+
+
+def _refuse_or_return(
+    caller: MeteredCaller,
+    question: str,
+    state: str | None,
+    language: str | None,
+    settings: Settings,
+) -> MeteredCaller:
+    """Return `caller`, or raise the help-carrying 429 it was refused with."""
+    if not caller.decision.allowed:
+        _raise_quota_exceeded(
+            question, state, language, caller.signup_required, settings
+        )
+    return caller
+
+
 @router.post("/ask", response_model=AskResponse)
 def ask(
     request: Request,
     body: AskRequest,
     authorization: str | None = Header(default=None),
 ) -> AskResponse:
-    """Answer a legal question, metering it against the caller's allowance.
+    """Answer one turn of a conversation, metering it against the allowance.
 
-    Order matters: the allowance is checked, and enforced, before `answer_fn`
-    is ever called -- retrieval and generation cost real money and a refused
-    request must not pay for them. `answer_fn` itself still runs its own
-    full, two-layer crisis check (regex, then classifier) ahead of retrieval
-    and generation for every request that IS allowed through.
+    Order matters, and is unchanged from the single-turn version: the burst
+    limit and the allowance are enforced before `answer_fn` is ever called --
+    retrieval and generation cost real money and a refused request must not
+    pay for them -- and `answer_fn` itself still runs the full, two-layer
+    crisis check ahead of retrieval and generation for every request allowed
+    through, on turn five exactly as on turn one.
+
+    What is new is everything between the gate and the answer: the
+    conversation is resolved (or minted), its history loaded, its attached
+    documents decrypted into this turn's context, and their STORED crisis
+    verdicts threaded in. All of it is owner-scoped, all of it happens before
+    generation, and a document id belonging to somebody else ends the request
+    at a 404 whose denial is already recorded.
     """
     settings = request.app.state.settings
     answer_fn: Callable = request.app.state.answer_fn
@@ -529,21 +679,34 @@ def ask(
     request.state.state = body.state
     request.state.language = body.language
 
-    ip_key = _client_key(request, settings)
-    _check_rate_limit(request, ip_key, body.question, body.state, body.language, settings)
+    document_ids = turn_document_ids(
+        body.document_ids, settings, body.question, body.state, body.language
+    )
+    caller = metered_caller(
+        request, settings, session_factory, authorization,
+        body.question, body.state, body.language, cost=1,
+    )
 
-    decision = _authenticated_decision(session_factory, settings, authorization)
-    signup_required = decision is None
-    if decision is None:
-        anon_token = _anon_token(request, settings)
-        decision = _anonymous_decision(request, settings, anon_token)
-
-    if not decision.allowed:
-        _raise_quota_exceeded(
-            body.question, body.state, body.language, signup_required, settings
-        )
-
-    localised = answer_fn(body.question, body.language, body.state)
+    turn = load_turn_inputs(
+        session_factory, settings, caller.owner, body.conversation_id,
+        document_ids, body.question, body.state, body.language,
+    )
+    localised = answer_fn(
+        body.question,
+        body.language,
+        body.state,
+        history=turn.history,
+        document_context=turn.document_context,
+        document_crisis_kinds=turn.document_crisis_kinds,
+    )
     persist_answer_events(localised, settings)
+    persist_turn(
+        session_factory, caller.owner, turn.conversation_id, body.question, localised
+    )
 
-    return to_response(localised, settings.corpus_version, decision.remaining)
+    return to_response(
+        localised,
+        settings.corpus_version,
+        caller.decision.remaining,
+        conversation_id=turn.conversation_id,
+    )

@@ -30,6 +30,16 @@ contains non-Latin-script characters (a proxy for "this matcher is known not
 to fire here"), the caller still gets `GENERIC_SAFETY_NOTE` -- the full set
 of helplines, un-triaged by category -- rather than silence.
 
+**The upload surface's refusals go out through the same helper (Plan 6 Task
+15).** `POST /documents` can fail five new ways -- too large, unsupported
+type, unreadable, too many documents, uploads disabled -- and `DELETE
+/documents/{id}` and `/ask` can both 404 on an id the caller does not own.
+Every one of those is a terminal response for somebody who may be in danger,
+so every one is raised by `raise_refusal` below, which assembles
+`crisis_extras` and `refusal_detail` into one body shape shared with the 500
+and 422 handlers in `app.py`. There is deliberately no path on that surface
+that returns a bare status code.
+
 **Refusal `detail` strings are static and bilingual, not translated.**
 `refusal_detail` selects from a fixed, pre-written English/Hindi pair rather
 than calling the translation pipeline: an error path must not depend on the
@@ -40,6 +50,10 @@ own static pairs are written -- a deliberate, narrower promise than the
 answer pipeline's full language coverage, and documented as such rather than
 silently mistranslating.
 """
+
+from typing import NoReturn
+
+from fastapi import HTTPException
 
 from openlaw.answers.escalation import (
     Helpline,
@@ -155,7 +169,167 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
         "en": "Something went wrong on our end. Please try again.",
         "hi": "हमारी तरफ़ से कुछ गड़बड़ हो गई। कृपया दोबारा प्रयास करें।",
     },
+    # Plan 6 Task 15: the upload and conversation surface's own terminal
+    # responses. Each one is somebody's last screen -- a woman who has just
+    # photographed an FIR on a borrowed phone and been told "no" -- so each
+    # goes out through `raise_refusal` below with the full escalation footer
+    # and helpline list, exactly like the quota refusal above. Hindi is
+    # best-effort pending a native-speaker review pass, the same caveat the
+    # rest of this module already carries.
+    "upload_too_large": {
+        "en": (
+            "This file is too large to read. Please upload a smaller file, "
+            "or type out the part you have a question about."
+        ),
+        "hi": (
+            "यह फ़ाइल पढ़ने के लिए बहुत बड़ी है। कृपया छोटी फ़ाइल भेजें, या जिस "
+            "हिस्से के बारे में सवाल है उसे टाइप कर दें।"
+        ),
+    },
+    "upload_unsupported_type": {
+        "en": (
+            "This file type is not supported. Please upload a PDF, a Word "
+            "(.docx) document, or a plain text file."
+        ),
+        "hi": (
+            "यह फ़ाइल प्रकार समर्थित नहीं है। कृपया PDF, Word (.docx) या सादा "
+            "टेक्स्ट फ़ाइल भेजें।"
+        ),
+    },
+    "upload_too_many_pages": {
+        "en": (
+            "This document has too many pages to read. Please upload only "
+            "the pages your question is about."
+        ),
+        "hi": (
+            "इस दस्तावेज़ में पढ़ने के लिए बहुत अधिक पृष्ठ हैं। कृपया केवल वे पृष्ठ "
+            "भेजें जिनके बारे में आपका सवाल है।"
+        ),
+    },
+    "upload_no_text": {
+        "en": (
+            "We could not read any text in this file. If it is a scan or a "
+            "photo, please type out what it says instead."
+        ),
+        "hi": (
+            "इस फ़ाइल में हमें कोई टेक्स्ट नहीं मिला। अगर यह स्कैन या फ़ोटो है, तो "
+            "कृपया उसमें लिखी बात टाइप कर दें।"
+        ),
+    },
+    "upload_corrupt": {
+        "en": (
+            "This file could not be opened. Please try uploading it again, "
+            "or type out the part you have a question about."
+        ),
+        "hi": (
+            "यह फ़ाइल खोली नहीं जा सकी। कृपया इसे दोबारा भेजें, या जिस हिस्से के "
+            "बारे में सवाल है उसे टाइप कर दें।"
+        ),
+    },
+    "uploads_disabled": {
+        "en": (
+            "File uploads are turned off on this service right now. You can "
+            "still ask your question in your own words."
+        ),
+        "hi": (
+            "इस सेवा पर अभी फ़ाइल अपलोड बंद है। आप अपना सवाल अपने शब्दों में "
+            "अब भी पूछ सकते हैं।"
+        ),
+    },
+    "too_many_documents": {
+        "en": (
+            "This conversation already has as many files as it can hold. "
+            "Remove one, or start a new conversation."
+        ),
+        "hi": (
+            "इस बातचीत में जितनी फ़ाइलें रखी जा सकती हैं, उतनी पहले से हैं। एक "
+            "हटाएँ, या नई बातचीत शुरू करें।"
+        ),
+    },
+    # Returned for a conversation or document the caller does not own, AND
+    # for one that does not exist -- deliberately the same response, so the
+    # reply cannot be used to enumerate real ids (see `openlaw.db
+    # .conversations.AccessDenied`). Never 403: a 403 confirms the id is
+    # real.
+    "not_found": {
+        "en": "We could not find that. It may have been deleted, or it may have expired.",
+        "hi": "हमें वह नहीं मिला। हो सकता है वह मिटा दिया गया हो या उसकी अवधि बीत गई हो।",
+    },
 }
+
+#: The HTTP status each refusal key goes out with. Only "too large" is 413
+#: (the one failure that is genuinely about the request entity's size);
+#: everything else describing a file we could not use is a 422, and an
+#: unowned/absent id is a 404. Kept as data beside the copy above so adding a
+#: refusal means adding both halves in one place, and `raise_refusal` can
+#: never be called with a key that has no status.
+REFUSAL_STATUS: dict[str, int] = {
+    "upload_too_large": 413,
+    "upload_unsupported_type": 422,
+    "upload_too_many_pages": 422,
+    "upload_no_text": 422,
+    "upload_corrupt": 422,
+    "uploads_disabled": 422,
+    "too_many_documents": 422,
+    "not_found": 404,
+}
+
+#: `openlaw.documents.extract.ExtractionError.reason` -> refusal key. The
+#: extraction layer deliberately exposes a closed set of reasons rather than
+#: a message to parse (see that exception's docstring); this is the single
+#: place that set is turned into user-facing copy and a status code, so a new
+#: reason surfaces as a `KeyError` at the boundary during development rather
+#: than as a bare 500 for a citizen.
+EXTRACTION_REFUSAL_KEYS: dict[str, str] = {
+    "too_large": "upload_too_large",
+    "unsupported_type": "upload_unsupported_type",
+    "too_many_pages": "upload_too_many_pages",
+    "no_text": "upload_no_text",
+    "corrupt": "upload_corrupt",
+}
+
+
+def refusal_body(
+    key: str, question: str, state: str | None, language: str | None
+) -> dict[str, object]:
+    """Return the full JSON body for refusal `key` -- help included, always.
+
+    One function, so "every terminal response delivers help" is a property of
+    this module rather than of each call site remembering to assemble it.
+    The shape matches `openlaw.api.app._unhandled_error_content` field for
+    field (`detail`, `escalation_footer`, `crisis_response`, `helplines`), so
+    a client has one error shape to render across the 404, 413, 422 and 500
+    paths. `helplines` is serialised to plain dicts here for the same reason
+    it is there: `JSONResponse` encodes with the stdlib `json` module, which
+    cannot encode a pydantic model.
+    """
+    footer, crisis, helplines = crisis_extras(question, state, language)
+    return {
+        "detail": refusal_detail(key, language),
+        "escalation_footer": footer,
+        "crisis_response": crisis,
+        "helplines": [helpline.model_dump() for helpline in helplines],
+    }
+
+
+def raise_refusal(
+    key: str,
+    question: str = "",
+    state: str | None = None,
+    language: str | None = None,
+) -> NoReturn:
+    """Raise the HTTPException for refusal `key`, carrying help.
+
+    `question` defaults to the empty string so a path with no question in
+    hand (a `DELETE /documents/{id}`) still gets the footer and the NALSA
+    number -- a narrower safety net than a question-bearing path, never a
+    missing one, exactly as `app._validation_error` documents for a body that
+    failed to parse.
+    """
+    raise HTTPException(
+        status_code=REFUSAL_STATUS[key],
+        detail=refusal_body(key, question, state, language),
+    )
 
 
 def refusal_detail(key: str, language: str | None) -> str:

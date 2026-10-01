@@ -1,6 +1,9 @@
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import Engine, create_engine, text
 
 from openlaw.config import Settings
 
@@ -55,3 +58,44 @@ def vaquill_fixture_dir() -> Path:
 def kanoongpt_fixture_dir() -> Path:
     """Directory holding sampled KanoonGPT Parquet files."""
     return FIXTURE_DIR / "kanoongpt"
+
+
+# --- live Postgres (moved here from tests/db/conftest.py) -----------------
+#
+# Suite-wide rather than db-only: `tests/api/test_documents.py` asserts the
+# audit-durability ruling on the engine production actually runs on, and that
+# property cannot be asserted on sqlite (see that test's docstring).
+
+#: Assumes the same user/password as `docker-compose.yml`'s `postgres`
+#: service -- only the database name differs from `Settings.database_url`'s
+#: default. Override with `OPENLAW_TEST_DATABASE_URL` for a differently
+#: named or differently hosted test database.
+_DEFAULT_TEST_DATABASE_URL = (
+    "postgresql+psycopg://openlaw:openlaw@localhost:5432/openlaw_test"
+)
+
+
+def _test_database_url() -> str:
+    """Return the URL live-Postgres-backed tests connect to.
+
+    Deliberately NOT `openlaw.config.get_settings().database_url` -- see the
+    module docstring for why sharing that URL with the operator's real
+    application database was the defect, not a detail.
+    """
+    return os.environ.get("OPENLAW_TEST_DATABASE_URL", _DEFAULT_TEST_DATABASE_URL)
+
+
+@pytest.fixture
+def live_engine() -> Iterator[Engine]:
+    """A real Postgres engine against the TEST database, skipping cleanly if
+    unreachable (including "the test database itself doesn't exist yet" --
+    see README's Setup section for the one-time `createdb`)."""
+    engine = create_engine(_test_database_url(), pool_pre_ping=True)
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:  # pragma: no cover - depends on live environment
+        engine.dispose()
+        pytest.skip(f"Test Postgres database is not reachable: {exc}")
+    yield engine
+    engine.dispose()

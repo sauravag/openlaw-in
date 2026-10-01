@@ -62,6 +62,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from openlaw.api.artifacts import router as artifacts_router
 from openlaw.api.refusal import crisis_extras, refusal_detail
 from openlaw.api.routes import router
 from openlaw.config import Settings
@@ -194,6 +195,12 @@ def create_app(
     app.state.anonymous_used = {}
     app.state.rate_limit_hits = {}
     app.include_router(router)
+    # The conversation/document surface (Plan 6 T15). A second router
+    # rather than more endpoints in `routes.py`: it shares every error
+    # handler and the anonymous-cookie middleware registered below, which
+    # is what makes "every terminal response carries help" hold for the
+    # upload paths too without a second implementation of it.
+    app.include_router(artifacts_router)
 
     _register_anonymous_token_middleware(app)
     _register_error_handlers(app)

@@ -59,3 +59,16 @@ MAX_HISTORY_CHARS = 8_000
 # Pages per quota unit when costing an upload: an upload costs
 # max(1, ceil(page_count / PAGES_PER_QUOTA_UNIT)) quota units.
 PAGES_PER_QUOTA_UNIT = 5
+# Characters of plain text treated as one synthetic page (Plan 6 Task 15).
+# `text/plain` had no page notion at all: `_extract_text_pages` returned a
+# single page regardless of length, so `Settings.max_document_pages` could
+# never fire for it and a 10 MiB text upload cost ONE quota unit (page_count
+# 1) while producing roughly 8,700 excerpts -- a hole both in metering and in
+# stored volume that PDF uploads never had. Paginating plain text closes it
+# with the caps that already exist rather than a second, text-only limit:
+# 10 MiB becomes ~3,500 synthetic pages, which `max_document_pages` refuses
+# as `too_many_pages`, and an accepted text document is bounded at
+# `max_document_pages * CHARS_PER_TEXT_PAGE` characters. 3,000 characters is
+# about one densely typed A4 page, so an ordinary one-page notice stays one
+# page and the existing fixtures are unaffected.
+CHARS_PER_TEXT_PAGE = 3_000

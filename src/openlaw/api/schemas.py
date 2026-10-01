@@ -16,9 +16,12 @@ text. `_render_answer` below mirrors `scripts/review_translations.py`'s
 `ValidatedAnswer` into displayable text, and for the identical reason.
 """
 
+import uuid
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from openlaw.answers.escalation import Helpline
+from openlaw.answers.schema import DocumentClaim
 from openlaw.answers.escalation import crisis_response as crisis_text
 from openlaw.answers.validate import ValidatedAnswer
 from openlaw.api.jurisdictions import INDIAN_STATES_AND_UTS
@@ -79,6 +82,53 @@ _HELP_IS_AVAILABLE: dict[str, str] = {
 }
 
 
+#: Heading rendered above `AskResponse.document_answer` (Plan 6 Task 15).
+#: `openlaw.answers.validate.ValidatedAnswer` states the obligation --
+#: "present these as what your document says, visibly apart from the legal
+#: claims, never under a heading that reads as law" -- and until this task
+#: nothing rendered `document_claims` at all, so the obligation was carried
+#: by a docstring and nothing else. Two things make it real here: document
+#: claims go out in their OWN field, never merged into `answer`, and that
+#: field opens with this heading, so even a client that naively concatenates
+#: the two still shows the reader where the law stops and their own paperwork
+#: starts. Static EN/HI, the same rule as every other API-composed safety
+#: string in this module -- a renderer must not depend on the translation
+#: pipeline to tell a person which half of an answer is law.
+_FROM_YOUR_DOCUMENT: dict[str, str] = {
+    "en": "From the document you uploaded (this is what your paper says, not the law):",
+    "hi": "आपने जो दस्तावेज़ भेजा, उसमें से (यह आपके कागज़ की बात है, क़ानून नहीं):",
+}
+
+#: Absolute cap on how many `document_ids` one request body may carry. This
+#: is a parse bound, not the product limit: the product limit is
+#: `Settings.max_documents_per_conversation`, which is configurable at
+#: runtime and therefore cannot live in a pydantic field constraint, and which
+#: `openlaw.api.routes` enforces with a help-carrying `too_many_documents`
+#: refusal. Both exist on purpose -- a static bound stops an attacker posting
+#: a hundred thousand ids and making the server validate every one of them,
+#: and the configurable one is what a deployment actually tunes.
+MAX_DOCUMENT_IDS = 32
+
+
+def validated_uuid(value: str, field: str) -> str:
+    """Return `value` if it is a UUID string, else raise.
+
+    `conversation_id` and `document_id` are interpolated into database
+    lookups and echoed back in responses, and arrive from the same untrusted
+    place `state` and `language` do. Parsing them as UUIDs at the boundary is
+    the same rule those two already follow (see `AskRequest`'s docstring):
+    anything that is not one is rejected here rather than trusted downstream.
+    Returns the ORIGINAL string, not `str(uuid.UUID(value))` -- stored ids are
+    whatever `uuid.uuid4()` produced, and silently re-canonicalising a
+    caller's value would make a lookup succeed or fail on formatting.
+    """
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError) as error:
+        raise ValueError(f"{field} must be a UUID") from error
+    return value
+
+
 def _static_text(pairs: dict[str, str], language: str) -> str:
     """Return the static EN/HI string for `language`, falling back to English.
 
@@ -114,6 +164,39 @@ class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     language: str | None = Field(default=None, max_length=8)
     state: str | None = Field(default=None, max_length=64)
+    #: The conversation this turn continues, or `None` to start a new one.
+    #: A conversation the caller does not own is a 404, never a 403 -- see
+    #: `openlaw.api.refusal`'s `"not_found"` entry.
+    conversation_id: str | None = Field(default=None, max_length=36)
+    #: Documents already uploaded to `conversation_id` whose text this turn
+    #: may quote. Ids only: this request never carries document bytes, so the
+    #: upload path's size, type and page caps cannot be bypassed through
+    #: `/ask`.
+    document_ids: tuple[str, ...] = Field(default=(), max_length=MAX_DOCUMENT_IDS)
+
+    @field_validator("conversation_id")
+    @classmethod
+    def _conversation_id_must_be_a_uuid(cls, value: str | None) -> str | None:
+        """Reject a non-UUID conversation id at the boundary."""
+        if value is None:
+            return None
+        return validated_uuid(value, "conversation_id")
+
+    @field_validator("document_ids")
+    @classmethod
+    def _document_ids_must_be_uuids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject any non-UUID document id, and any duplicate.
+
+        Duplicates are rejected rather than silently deduplicated: the same
+        id twice would be audited twice, cost its excerpts twice in the
+        prompt budget, and tell the caller nothing about why their answer
+        looked odd.
+        """
+        for document_id in value:
+            validated_uuid(document_id, "document_ids")
+        if len(set(value)) != len(value):
+            raise ValueError("document_ids must not contain duplicates")
+        return value
 
     @field_validator("question")
     @classmethod
@@ -203,6 +286,32 @@ class SourceCard(BaseModel):
     headnote: str | None = None
 
 
+class DocumentCitationCard(BaseModel):
+    """One pointer into the reader's OWN uploaded document.
+
+    Mirrors `openlaw.answers.validate.DocumentCitation` field for field, and
+    inherits the field that type most pointedly does not have: there is no
+    `source_url` here, not optional, not `None`, absent. A lease has no
+    government URL and must not be able to acquire one by passing through an
+    API shape -- see `DocumentCitation`'s docstring and `SourceCard`'s closing
+    paragraph. `filename` and `page_number` are here so a person can find the
+    passage in their own paperwork, which is the only verification available
+    for a statement about a document only they hold.
+
+    `filename` is attacker-controlled text that reaches a browser. It is
+    sanitised once, at the upload boundary (`openlaw.api.artifacts`, via
+    `openlaw.documents.fence.sanitise`), so what is stored is already safe and
+    this type never has to re-clean it on the way out.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    excerpt_id: str
+    document_id: str
+    filename: str
+    page_number: int
+
+
 class AskResponse(BaseModel):
     """A verified answer with everything needed to render it responsibly.
 
@@ -224,6 +333,82 @@ class AskResponse(BaseModel):
     helplines: tuple[Helpline, ...] = ()
     is_answerable: bool
     quota_remaining: int
+    #: The conversation this turn belongs to -- minted on a first turn, so a
+    #: client can continue the thread without a second round trip.
+    conversation_id: str
+    #: This turn's 0-based position in `conversation_id`, straight from
+    #: `LocalisedAnswer.turn_index`.
+    turn_index: int = 0
+    #: What the reader's OWN uploaded document says, rendered SEPARATELY from
+    #: `answer` and never merged into it (Plan 6 Task 15). `None` when no
+    #: document contributed anything to this turn. See `_FROM_YOUR_DOCUMENT`
+    #: for why separation alone was not judged enough, and
+    #: `_render_document_answer` for what it is built from.
+    document_answer: str | None = None
+    #: The excerpts `document_answer` points at -- filename and page, no URL.
+    document_citations: tuple[DocumentCitationCard, ...] = ()
+
+
+class DocumentSummary(BaseModel):
+    """What a successful upload returns.
+
+    `expires_at` and `retention_notice` are the honest half of the anonymous
+    path: a cookie-keyed identity cannot reliably delete anything later, so an
+    anonymous upload is purged after `Settings.anonymous_upload_ttl_hours` and
+    the person is TOLD so, with the one action that changes it (signing in)
+    named in the same sentence. An authenticated upload carries
+    `expires_at=None` and a notice that says the file stays until they delete
+    it -- never an empty string, because a blank notice renders as no notice
+    at all and silence about retention is the thing this field exists to
+    prevent.
+
+    `quota_remaining` is here for the same reason it is on `AskResponse`: an
+    upload now costs more than one unit (see `openlaw.documents
+    .PAGES_PER_QUOTA_UNIT`), so a client that only ever learned the balance
+    from `/ask` would show a figure that silently jumped.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    filename: str
+    page_count: int
+    conversation_id: str
+    expires_at: str | None = None
+    retention_notice: str
+    quota_remaining: int
+
+
+class ConversationTurnCard(BaseModel):
+    """One past turn, as it is replayed after a page reload.
+
+    Built from `openlaw.answers.history.HistoryTurn` -- validated claims and
+    the person's own question. There is deliberately no field here that could
+    hold `unverified_summary`: `HistoryTurn` does not have one, nothing in
+    `openlaw.db.conversations` stores one, and this shape could not render one
+    if a future caller tried.
+
+    `answer` and `document_answer` are split exactly as they are on
+    `AskResponse`, for the identical reason -- a reloaded transcript must not
+    be the one place where a statement about someone's lease reads as law.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    turn_index: int
+    question: str
+    answer: str
+    document_answer: str | None = None
+    language: str
+
+
+class ConversationView(BaseModel):
+    """A conversation's turns, for rendering after a reload."""
+
+    model_config = ConfigDict(frozen=True)
+
+    conversation_id: str
+    turns: tuple[ConversationTurnCard, ...] = ()
 
 
 class QuotaExceeded(BaseModel):
@@ -272,8 +457,93 @@ def _render_answer(answer: ValidatedAnswer, language: str) -> str:
     return "\n\n".join(claim.text for claim in answer.claims)
 
 
+def render_document_claims(
+    claims: tuple[DocumentClaim, ...], language: str
+) -> str | None:
+    """Render what the reader's own document says, or `None`.
+
+    The ONE renderer for document claims, used both for a live turn
+    (`to_response`) and for a reloaded transcript
+    (`openlaw.api.artifacts.read_conversation`). One function rather than two,
+    because the rule it enforces -- document claims are visibly apart from
+    legal ones, under a heading that does not read as law -- is exactly the
+    kind of property this project has lost to a second code path before.
+
+    Built from claim text only, never from `unverified_summary`: a
+    `DocumentClaim` has no such field, and neither does `HistoryTurn`, so this
+    function could not reach one if it tried. Returns `None`, not an empty
+    string, when no document claim survived -- `None` is a field a client can
+    branch on, while `""` renders as a heading above nothing.
+
+    The heading (`_FROM_YOUR_DOCUMENT`) is part of the returned text rather
+    than a separate field so the distinction cannot be lost by a client that
+    renders this value alone, or concatenates it onto `answer`.
+    """
+    if not claims:
+        return None
+    heading = _static_text(_FROM_YOUR_DOCUMENT, language)
+    body = "\n\n".join(claim.text for claim in claims)
+    return f"{heading}\n\n{body}"
+
+
+def _document_citation_cards(
+    localised: LocalisedAnswer,
+) -> tuple[DocumentCitationCard, ...]:
+    """Map this turn's document citations onto their API shape."""
+    return tuple(
+        DocumentCitationCard(
+            excerpt_id=citation.excerpt_id,
+            document_id=citation.document_id,
+            filename=citation.filename,
+            page_number=citation.page_number,
+        )
+        for citation in localised.document_citations
+    )
+
+
+def _crisis_only_response(
+    localised: LocalisedAnswer,
+    corpus_version: str,
+    quota_remaining: int,
+    conversation_id: str,
+) -> AskResponse:
+    """Render a question-derived crisis short-circuit (Task 4 review, H3).
+
+    `answer` leads with `_HELP_IS_AVAILABLE` and then the helpline text, and
+    `is_answerable` is reported True -- see `to_response`'s docstring for why
+    this turn is complete and correct despite carrying no cited legal claim.
+
+    `document_answer` and `document_citations` are spelled out as empty rather
+    than left to their defaults: this short-circuit happens before generation,
+    so no document claim was ever produced even when a document was attached,
+    and this is the one branch where "the turn carries no legal answer" and
+    "the turn carries no document answer" have to be true together.
+    """
+    help_text = crisis_text(localised.crisis, localised.language)
+    lead_in = _static_text(_HELP_IS_AVAILABLE, localised.language)
+    return AskResponse(
+        answer=f"{lead_in}\n\n{help_text}",
+        sources=[],
+        language=localised.language,
+        corpus_version=corpus_version,
+        footer=localised.footer,
+        crisis_response=help_text,
+        helplines=localised.helplines,
+        is_answerable=True,
+        quota_remaining=quota_remaining,
+        conversation_id=conversation_id,
+        turn_index=localised.turn_index,
+        document_answer=None,
+        document_citations=(),
+    )
+
+
 def to_response(
-    localised: LocalisedAnswer, corpus_version: str, quota_remaining: int
+    localised: LocalisedAnswer,
+    corpus_version: str,
+    quota_remaining: int,
+    *,
+    conversation_id: str,
 ) -> AskResponse:
     """Map a localised answer onto the API response.
 
@@ -305,20 +575,23 @@ def to_response(
     the category's numbers to. Branching on `document_crisis` the way this
     function branches on `crisis` would throw away the answer that path
     exists to preserve.
+
+    **`document_claims` leave through their own field, never through
+    `answer`.** `openlaw.answers.validate.ValidatedAnswer` has required since
+    Task 7 that a statement about the reader's own paperwork be presented
+    "visibly apart from the legal claims, never under a heading that reads as
+    law" -- and until this task nothing on this API rendered them at all, so
+    the requirement was enforced by a docstring and no code. `document_answer`
+    and `document_citations` are that enforcement: `_render_answer` reads only
+    `answer.claims`, `_render_document_answer` reads only
+    `answer.document_claims`, and neither can reach the other's content. See
+    `tests/api/test_conversations.py::
+    test_document_claims_render_apart_from_legal_claims`, which fails if
+    either half of that leaks into the other.
     """
     if localised.crisis is not None:
-        help_text = crisis_text(localised.crisis, localised.language)
-        lead_in = _static_text(_HELP_IS_AVAILABLE, localised.language)
-        return AskResponse(
-            answer=f"{lead_in}\n\n{help_text}",
-            sources=[],
-            language=localised.language,
-            corpus_version=corpus_version,
-            footer=localised.footer,
-            crisis_response=help_text,
-            helplines=localised.helplines,
-            is_answerable=True,
-            quota_remaining=quota_remaining,
+        return _crisis_only_response(
+            localised, corpus_version, quota_remaining, conversation_id
         )
 
     document_help = (
@@ -349,4 +622,10 @@ def to_response(
         helplines=localised.helplines,
         is_answerable=localised.answer.is_answerable,
         quota_remaining=quota_remaining,
+        conversation_id=conversation_id,
+        turn_index=localised.turn_index,
+        document_answer=render_document_claims(
+            localised.document_claims, localised.language
+        ),
+        document_citations=_document_citation_cards(localised),
     )

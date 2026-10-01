@@ -22,6 +22,7 @@ from openlaw.api.deps import (
     _require_database_reachable,
     _require_proxy_acknowledgement,
     build_answer_fn,
+    build_conversation_answer_fn,
     build_expand_fn,
     production_app,
 )
@@ -361,7 +362,7 @@ def test_production_app_builds_a_working_app_without_touching_qdrant_or_neo4j(
     stores an API client; no network call, no local model load) so this test
     never touches the ~2.5s local `voyage-4-nano` model or a live datastore.
     Also exercises `answer_fn` and `session_factory` themselves (not just
-    their existence), with `answer_in_language` stubbed out so no real
+    their existence), with `answer_in_conversation` stubbed out so no real
     Anthropic/Qdrant/Neo4j call is ever made.
     """
     import openlaw.api.deps as deps_module
@@ -377,15 +378,27 @@ def test_production_app_builds_a_working_app_without_touching_qdrant_or_neo4j(
 
     seen: dict = {}
 
-    # `state`/`language` deliberately have NO default (Task 5 review, H1):
-    # the earlier stub's `state=None` default let `answer_fn` silently drop
-    # `language` without any test ever noticing. A stub that requires both
-    # keywords turns a dropped one back into an immediate `TypeError`.
-    def _fake_answer_in_language(question, retriever, adapter, registry, glossary, *, state, language):
-        seen.update(question=question, retriever=retriever, state=state, language=language)
+    # EVERY keyword deliberately has NO default (Task 5 review, H1, extended
+    # for Plan 6 Task 15): the earlier stub's `state=None` default let
+    # `answer_fn` silently drop `language` without any test ever noticing, and
+    # `history`/`document_context`/`document_crisis` are now three more
+    # arguments that could be dropped the same way -- the last of them
+    # silently hiding an attached FIR's crisis verdict. A stub that requires
+    # all of them turns a dropped one back into an immediate `TypeError`.
+    def _fake_answer_in_conversation(
+        question, retriever, adapter, registry, glossary, *,
+        history, document_context, document_crisis, state, language,
+    ):
+        seen.update(
+            question=question, retriever=retriever, state=state, language=language,
+            history=history, document_context=document_context,
+            document_crisis=document_crisis,
+        )
         return "sentinel-answer"
 
-    monkeypatch.setattr(deps_module, "answer_in_language", _fake_answer_in_language)
+    monkeypatch.setattr(
+        deps_module, "answer_in_conversation", _fake_answer_in_conversation
+    )
 
     try:
         app = production_app()
@@ -400,6 +413,8 @@ def test_production_app_builds_a_working_app_without_touching_qdrant_or_neo4j(
         assert seen["state"] == "KA"
         assert seen["language"] == "mr"
         assert isinstance(seen["retriever"], deps_module.QdrantGraphRetriever)
+        assert seen["history"] == ()
+        assert seen["document_crisis"] is None
 
         with app.state.session_factory() as session:
             assert session.is_active
@@ -544,3 +559,64 @@ def test_no_provider_client_is_constructed_for_an_unused_provider(monkeypatch) -
         "claude-haiku-4-5"
     )
     assert built == ["anthropic"]
+
+
+# --- multi-turn is reachable in production (Plan 6 Task 15) ---------------
+
+
+def test_the_retriever_refetches_carried_chunk_ids_rather_than_replaying_them() -> None:
+    """The `ConversationRetriever` contract. A carried chunk must be fetched
+    from the corpus again this turn, so one that has since left the corpus
+    stops being citable -- see `openlaw.retrieval.fetch`."""
+    fetched: list[tuple[str, ...]] = []
+
+    def fetch_fn(chunk_ids: tuple[str, ...]):
+        fetched.append(chunk_ids)
+        return (
+            RetrievedChunk(
+                chunk_id="carried-1",
+                text="carried provision",
+                source_url="https://www.indiacode.nic.in/handle/1",
+                score=0.0,
+                kind=ChunkKind.PROVISION,
+            ),
+        )
+
+    retriever = QdrantGraphRetriever(
+        embedder=_Embedder(),
+        search_fn=lambda vector: (),
+        expand_fn=lambda chunk_ids: (),
+        fetch_fn=fetch_fn,
+    )
+
+    context = retriever.retrieve("deposit refund", ("carried-1",))
+
+    assert fetched == [("carried-1",)]
+    assert [chunk.chunk_id for chunk in context.chunks] == ["carried-1"]
+
+
+def test_a_retriever_with_no_fetcher_refuses_to_silently_drop_carried_ids() -> None:
+    retriever = QdrantGraphRetriever(
+        embedder=_Embedder(),
+        search_fn=lambda vector: (),
+        expand_fn=lambda chunk_ids: (),
+    )
+
+    with pytest.raises(ValueError, match="carried chunk ids"):
+        retriever.retrieve("deposit refund", ("carried-1",))
+
+
+def test_a_single_turn_retrieve_still_works_with_no_carried_ids() -> None:
+    retriever = QdrantGraphRetriever(
+        embedder=_Embedder(),
+        search_fn=lambda vector: (),
+        expand_fn=lambda chunk_ids: (),
+    )
+
+    assert retriever.retrieve("deposit refund").chunks == ()
+
+
+def test_build_answer_fn_is_the_conversation_builder() -> None:
+    """`build_answer_fn` must not be a second implementation that could drift
+    from the conversation-aware one."""
+    assert build_answer_fn is build_conversation_answer_fn
