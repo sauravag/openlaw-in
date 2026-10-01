@@ -6,7 +6,10 @@ no dependency on an API key at all. But no practical regex set reaches every
 way a person in danger might phrase it — see that module's own docstring for
 why the regex is deliberately recall-biased even so. A reviewer ran the
 current patterns directly and measured concrete gaps: non-Latin scripts
-entirely (Devanagari, e.g. "मुझे मारता है", "मरना चाहता हूँ"), SMS-compressed
+entirely (Devanagari, e.g. "मुझे मारता है", "मरना चाहता हूँ" -- Plan 6 Task 10
+ruling 2 has since added a narrow, precision-tuned Devanagari set for
+exactly those two phrasings, which narrows this gap without closing it and
+leaves every other Indic script untouched), SMS-compressed
 and misspelled transliteration ("mera pati mujhe marta h"), euphemism ("I
 want to end it all", "he raises his hand at me"), third-person reports ("my
 sister is being beaten", "my sister was beaten by her husband"), and every

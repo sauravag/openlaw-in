@@ -18,12 +18,13 @@ three decisions that are easy to get wrong and expensive to get wrong:
     of a match.
   * **It runs once, at upload, over every page** -- not once per turn and
     not over page 1 only.
-  * **Its Devanagari blindness is a stated limit, not a hidden one.** The
-    regex layer matches English and transliterated Hinglish only (see
-    `openlaw.answers.escalation`'s module docstring). The compensating
-    control is that the question path still runs the paid classifier, which
-    does read Devanagari, on EVERY turn -- so a Hindi speaker is never left
-    with no crisis layer at all, only without the document one.
+  * **Its language coverage is a stated limit, not a hidden one.** English,
+    transliterated Hinglish, and (ruling 2) a narrow, precision-tuned
+    Devanagari set are covered; every other Indic script is not. The
+    compensating control is that the question path still runs the paid
+    classifier, which reads every script, on EVERY turn -- so a Tamil
+    speaker is never left with no crisis layer at all, only without the
+    document one.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from __future__ import annotations
 import inspect
 import re
 from pathlib import Path
+
+import pytest
 
 from openlaw.answers.escalation import CrisisKind, crisis_kind_from_value
 from openlaw.documents.extract import ExtractedPage, scan_for_crisis
@@ -197,23 +200,60 @@ def test_transliterated_hinglish_document_text_matches() -> None:
     assert scan_for_crisis(pages) is CrisisKind.DOMESTIC_VIOLENCE
 
 
-def test_devanagari_document_text_is_a_known_and_documented_blind_spot() -> None:
-    """A STATED limit, deliberately asserted so it cannot rot into a
-    surprise. The regex layer is Devanagari-blind (see
-    `openlaw.answers.escalation`'s module docstring), so a Hindi-script
-    protection order contributes no document verdict.
+def test_a_devanagari_protection_order_is_now_seen() -> None:
+    """Ruling 2. This is the case the first round of this task could not
+    answer: a Hindi-script protection order attached to an innocuous
+    question was invisible to every layer at once, because the paid
+    classifier never reads document text and the free layer had no
+    Devanagari patterns."""
+    assert (
+        scan_for_crisis(_pages("संरक्षण आदेश: पति मुझे मारता है।"))
+        is CrisisKind.DOMESTIC_VIOLENCE
+    )
+    assert (
+        scan_for_crisis(_pages("बयान: मैं अब जीना नहीं चाहती"))
+        is CrisisKind.SELF_HARM
+    )
+    assert (
+        scan_for_crisis(_pages("घरेलू हिंसा से महिलाओं का संरक्षण अधिनियम के तहत आदेश"))
+        is CrisisKind.DOMESTIC_VIOLENCE
+    )
 
-    Two things make that survivable, and both are tested in
-    `tests/language/test_pipeline.py`: the paid classifier still runs on the
-    QUESTION on every turn (it does read Devanagari), and a document verdict
-    found in any script renders its helplines in Hindi. What is NOT done
-    here is `openlaw.api.refusal`'s script hedge: firing on "this document
-    contains Devanagari" would short-circuit every Hindi document -- a Hindi
-    lease included -- and replace the legal answer with helplines for every
-    Hindi-speaking user. On a refusal path that hedge costs an extra
-    paragraph; here it would cost the answer itself.
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "किराया बकाया के बारे में क्या नियम है",
+        "मेरा मकान मालिक जमा राशि वापस नहीं कर रहा",
+        "किरायेदार परिसर खाली करेगा। किराया हर माह की 5 तारीख तक देय है।",
+        "मैंने पुलिस स्टेशन में शिकायत दर्ज कराई है",
+        "तलाक की प्रक्रिया क्या है",
+        "श्रम कानून के तहत मजदूरी का भुगतान",
+        "यह पट्टा विलेख दिनांक 5 मई 2024 को निष्पादित किया गया",
+    ],
+)
+def test_ordinary_hindi_legal_documents_do_not_trigger_a_verdict(text: str) -> None:
+    """Precision over recall, which is the whole constraint on ruling 2's
+    pattern set. A card that fires on every Hindi lease and rent notice is
+    a card people learn to ignore, and under ruling 1 it would be appended
+    to perfectly good legal answers all day."""
+    assert scan_for_crisis(_pages(text)) is None
+
+
+def test_other_indic_scripts_remain_a_documented_blind_spot() -> None:
+    """The limit that ruling 2 narrowed but did not close, asserted so it
+    cannot rot into a surprise. Devanagari is covered; Tamil, Bengali,
+    Telugu and the rest are not, and neither is a Devanagari phrasing
+    outside the deliberately narrow set (the Marathi line below is
+    Devanagari script but not a Hindi crisis phrase).
+
+    What is NOT done here is `openlaw.api.refusal`'s script hedge: firing on
+    "this document is in an Indic script" would attach a helpline card to
+    every document written in one, which is exactly the signal-destroying
+    outcome the precision constraint exists to prevent. That hedge stays
+    where it belongs, on the refusal path.
     """
-    pages = _pages("संरक्षण आदेश: पति मुझे मारता है।")
-
-    assert scan_for_crisis(pages) is None
-    assert "Devanagari" in (scan_for_crisis.__doc__ or "")
+    assert scan_for_crisis(_pages("என் கணவன் என்னை அடிக்கிறான்")) is None  # Tamil
+    assert scan_for_crisis(_pages("আমার স্বামী আমাকে মারে")) is None  # Bengali
+    assert scan_for_crisis(_pages("मला खूप भीती वाटते")) is None  # Marathi
+    assert "Indic script" in (scan_for_crisis.__doc__ or "")

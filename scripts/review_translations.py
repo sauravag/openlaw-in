@@ -96,6 +96,10 @@ from pathlib import Path
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
+from openlaw.answers.escalation import (
+    DEVANAGARI_CRISIS_PATTERNS,
+    DEVANAGARI_PATTERN_COUNT,
+)
 from openlaw.answers.generate import build_retrieval_context, persist_answer_events
 from openlaw.answers.models import LLMAdapter, ModelRegistry
 from openlaw.answers.validate import ValidatedAnswer
@@ -411,6 +415,49 @@ def _sheet_header(
             "fill them in."
         )
     lines.extend(["", ""])
+    lines.extend(_devanagari_crisis_section())
+    return lines
+
+
+def _devanagari_crisis_section() -> list[str]:
+    """Return the review section for the UNVERIFIED Devanagari crisis
+    patterns (Plan 6 Task 10, ruling 2).
+
+    These decide whether a Hindi speaker in danger is shown a helpline, and
+    they are in code rather than in prose -- which is exactly why they are
+    printed here. Being compiled by Python is not review. They carry the
+    same "pending native-speaker review" caveat as the static Hindi crisis
+    and refusal strings, and this section is how a reviewer is actually
+    asked about them rather than being expected to go reading
+    `openlaw.answers.escalation`.
+    """
+    lines = [
+        "## Hindi crisis patterns -- UNVERIFIED, please review",
+        "",
+        f"These {DEVANAGARI_PATTERN_COUNT} Devanagari patterns decide whether "
+        "a Hindi speaker is shown a crisis helpline. They are machine-written "
+        "and have had **no native-speaker review** -- the same caveat the "
+        "static Hindi crisis and refusal strings carry. For each one, judge:",
+        "",
+        "- Does it read as something a person in this situation would "
+        "actually write?",
+        "- Would it fire on ordinary Hindi legal text (a lease, a rent "
+        "notice, a divorce petition) where no one is in danger? Mark it "
+        "**TOO BROAD** if so.",
+        "- Is a common phrasing missing entirely? Write it in.",
+        "",
+        "They are tuned for precision rather than recall on purpose: a match "
+        "found only in an uploaded document adds a helpline card beside a "
+        "normal legal answer, and a card that appears on every Hindi "
+        "document is one people learn to ignore.",
+        "",
+    ]
+    for kind, patterns in DEVANAGARI_CRISIS_PATTERNS.items():
+        lines.append(f"### {kind.value}")
+        lines.append("")
+        lines.extend(f"- `{pattern}`  -- OK / TOO BROAD / WRONG" for pattern in patterns)
+        lines.append("")
+    lines.append("")
     return lines
 
 

@@ -1,4 +1,5 @@
 import json
+import re
 import stat
 from datetime import UTC, datetime, timedelta
 
@@ -6,6 +7,8 @@ import pytest
 
 from openlaw.answers.escalation import (
     CRISIS_PATTERNS,
+    DEVANAGARI_CRISIS_PATTERNS,
+    DEVANAGARI_PATTERN_COUNT,
     DEFAULT_HALLUCINATION_LOG_RETENTION_DAYS,
     NALSA_HELPLINE,
     CrisisKind,
@@ -19,6 +22,8 @@ from openlaw.answers.escalation import (
     most_urgent_crisis,
     purge_stale_events,
 )
+from openlaw.answers.escalation import _COMPILED_DEVANAGARI, _DEVANAGARI_CHAR
+from openlaw.language.detect import SCRIPT_RANGES
 from openlaw.answers.schema import Claim
 from openlaw.answers.validate import RejectedClaim
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
@@ -519,3 +524,106 @@ def test_every_crisis_kind_value_fits_the_stored_column() -> None:
     value did not fit would be truncated into an unrecognised verdict."""
     for kind in CrisisKind:
         assert len(kind.value) <= 32
+
+
+# --- Devanagari crisis patterns (Plan 6 Task 10, ruling 2) ----------------
+#
+# UNVERIFIED pending native-speaker review, and tuned for PRECISION rather
+# than recall -- unlike the Latin-script set. The routing is why: a
+# Latin-script match can short-circuit a turn, while a document-only match
+# appends a helpline card to an otherwise normal legal answer, and a card
+# that fires on every Hindi lease is one people learn to ignore.
+
+
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("मैं मरना चाहता हूँ", CrisisKind.SELF_HARM),
+        ("अब जीना नहीं चाहती", CrisisKind.SELF_HARM),
+        ("मैंने आत्महत्या करने की कोशिश की", CrisisKind.SELF_HARM),
+        ("मेरा पति मुझे रोज मारता है", CrisisKind.DOMESTIC_VIOLENCE),
+        ("मुझे मारता है", CrisisKind.DOMESTIC_VIOLENCE),
+        ("घरेलू हिंसा अधिनियम के तहत आदेश", CrisisKind.DOMESTIC_VIOLENCE),
+        ("ससुराल वाले मुझे मारते हैं", CrisisKind.DOMESTIC_VIOLENCE),
+        ("पुलिस ने मुझे थाने में पीटा", CrisisKind.CUSTODIAL_ABUSE),
+        ("हिरासत में मौत का मामला", CrisisKind.CUSTODIAL_ABUSE),
+        ("मानव तस्करी का शिकार", CrisisKind.TRAFFICKING),
+        ("बंधुआ मजदूर बनाकर रखा", CrisisKind.TRAFFICKING),
+        ("जबरन शादी करवाई गई", CrisisKind.TRAFFICKING),
+    ],
+)
+def test_devanagari_crisis_phrasings_are_detected(text: str, kind: CrisisKind) -> None:
+    assert detect_crisis(text) is kind
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "किराया बकाया के बारे में क्या नियम है",
+        "मेरा मकान मालिक जमा राशि वापस नहीं कर रहा",
+        "मैंने पुलिस स्टेशन में शिकायत दर्ज कराई है",
+        "तलाक की प्रक्रिया क्या है",
+        "संपत्ति का बंटवारा कैसे होगा",
+        "श्रम कानून के तहत मजदूरी का भुगतान",
+        "उपभोक्ता फोरम में शिकायत कैसे करें",
+        "कंपनी ने मेरा वेतन नहीं दिया, क्या करूं",
+    ],
+)
+def test_ordinary_hindi_legal_text_is_not_a_crisis(text: str) -> None:
+    """Precision is the constraint on this set, so it is tested as one."""
+    assert detect_crisis(text) is None
+
+
+def test_the_devanagari_gate_matches_the_projects_script_range() -> None:
+    """`_DEVANAGARI_CHAR` is a local copy of
+    `openlaw.language.detect.SCRIPT_RANGES`'s `"hi"` block, kept local so
+    this module does not depend on the language package. Pinned here so the
+    two cannot drift -- a narrowed gate would silently stop consulting the
+    Devanagari patterns."""
+    start, end = next(
+        (start, end) for language, start, end in SCRIPT_RANGES if language == "hi"
+    )
+
+    assert _DEVANAGARI_CHAR.pattern == f"[{chr(start)}-{chr(end)}]"
+    assert _DEVANAGARI_CHAR.search("मुझे") is not None
+    assert _DEVANAGARI_CHAR.search("my husband beats me") is None
+
+
+def test_latin_only_text_never_pays_for_the_devanagari_patterns() -> None:
+    """The gate is a cost control for the one input whose size a user
+    chooses -- a 10 MiB uploaded document. If it ever stopped gating, an
+    English document would start paying for a pattern set that cannot
+    match it."""
+    calls: list[str] = []
+
+    class _Counting:
+        def __init__(self, inner: object) -> None:
+            self._inner = inner
+
+        def search(self, text: str) -> object:
+            calls.append(text)
+            return self._inner.search(text)  # type: ignore[attr-defined]
+
+    patched = {
+        kind: tuple(_Counting(pattern) for pattern in patterns)
+        for kind, patterns in _COMPILED_DEVANAGARI.items()
+    }
+    original = dict(_COMPILED_DEVANAGARI)
+    _COMPILED_DEVANAGARI.update(patched)  # type: ignore[arg-type]
+    try:
+        assert detect_crisis("an ordinary question about rent arrears") is None
+        assert calls == []
+        assert detect_crisis("किराया बकाया") is None
+        assert calls  # the gate opened for Devanagari text
+    finally:
+        _COMPILED_DEVANAGARI.update(original)
+
+
+def test_every_devanagari_pattern_compiles_and_is_counted() -> None:
+    for patterns in DEVANAGARI_CRISIS_PATTERNS.values():
+        for pattern in patterns:
+            re.compile(pattern)
+    assert DEVANAGARI_PATTERN_COUNT == sum(
+        len(patterns) for patterns in DEVANAGARI_CRISIS_PATTERNS.values()
+    )
+    assert DEVANAGARI_PATTERN_COUNT > 0

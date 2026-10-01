@@ -19,6 +19,18 @@ user one extra paragraph of helpline numbers before their legal answer. A
 false negative can cost a life. When in doubt, this module is built to err
 toward showing help.
 
+A narrow, precision-tuned DEVANAGARI set sits beside the Latin-script one
+(`DEVANAGARI_CRISIS_PATTERNS`, Plan 6 Task 10 ruling 2). It exists because
+an uploaded document is scanned by this layer alone -- the paid classifier
+never reads document text -- so a Hindi-script protection order would
+otherwise be invisible to every layer at once. It is tuned the opposite way
+to the Latin set, for precision rather than recall, and that set's own
+comment explains why the routing difference justifies the opposite trade.
+It is UNVERIFIED pending native-speaker review, like every other piece of
+Hindi in this module, and it narrows the non-Latin gap rather than closing
+it: every other Indic script is still uncovered here, so
+`openlaw.api.refusal`'s script hedge stays exactly as it is.
+
 This regex is deliberately only half of crisis routing. A second,
 complementary layer using the CLASSIFIER-role model lives in
 `openlaw.answers.crisis_classifier` — it catches euphemism, third-person
@@ -214,10 +226,91 @@ _SEVERITY_ORDER: tuple[CrisisKind, ...] = (
     CrisisKind.DOMESTIC_VIOLENCE,
 )
 
+#: Devanagari-script crisis patterns (Plan 6 Task 10, ruling 2).
+#:
+#: **UNVERIFIED, pending native-speaker review** -- the same standing caveat
+#: `_CRISIS_RESPONSES_HI` and `openlaw.api.refusal._REFUSAL_DETAIL` carry,
+#: and it is not weakened by living in code rather than in prose.
+#: `scripts/review_translations.py` prints this set in its sheet so a
+#: reviewer is actually asked about it; see `DEVANAGARI_PATTERN_COUNT`.
+#:
+#: **Tuned for PRECISION, unlike the Latin-script set above.** The reason is
+#: a routing difference, not a change of heart about recall: a Latin-script
+#: match can short-circuit the whole turn, while a document-only match now
+#: appends a helpline card to an otherwise normal legal answer (see
+#: `openlaw.language.pipeline`). A card that appears on most Hindi documents
+#: is a card users learn to ignore, which is a worse outcome than a narrower
+#: one that still reaches the protection order it was written for. So these
+#: require a complete, unambiguous phrase ("घरेलू हिंसा", "मरना चाहता/चाहती")
+#: rather than a single evocative word, and were checked against ordinary
+#: Hindi legal prose -- rent, divorce, property, wage, consumer and lease
+#: text -- before landing.
+#:
+#: Known, accepted false positive: a Hindi judgment discussing abetment of
+#: suicide ("आत्महत्या के लिए उकसाना") matches SELF_HARM. That mirrors the
+#: Latin set's bare `\bsuicide\b` exactly, and under the ruling-1 routing it
+#: costs a helpline card beside a correct legal answer.
+#:
+#: This does NOT remove the need for `openlaw.api.refusal`'s script hedge:
+#: these patterns narrow the Devanagari gap, they do not close it, and every
+#: other Indic script is still entirely uncovered here.
+DEVANAGARI_CRISIS_PATTERNS: dict[CrisisKind, tuple[str, ...]] = {
+    CrisisKind.SELF_HARM: (
+        r"मरना चाहत[ाी]",
+        r"मर जाना चाहत[ाी]",
+        r"जीना नहीं चाहत[ाी]",
+        r"जीने का मन नहीं",
+        r"आत्म ?हत्या",
+        r"खुदकुशी",
+        r"अपनी जान ले",
+        r"ज़िंदगी खत्म|जिंदगी खत्म",
+    ),
+    CrisisKind.TRAFFICKING: (
+        r"(?:मानव|बच्चों की|लड़कियों की|महिलाओं की) ?तस्करी",
+        r"बंधुआ (?:मज़दूर|मजदूर)",
+        r"जबरन (?:वेश्यावृत्ति|मज़दूरी|मजदूरी|शादी)",
+    ),
+    CrisisKind.CUSTODIAL_ABUSE: (
+        r"पुलिस.{0,20}(?:पीटा|पीटती|पीटते|मारा|टॉर्चर|यातना)",
+        r"हिरासत में (?:मौत|यातना|हिंसा|मारपीट)",
+        r"लॉकअप में",
+        r"थर्ड डिग्री",
+    ),
+    CrisisKind.DOMESTIC_VIOLENCE: (
+        r"घरेलू हिंसा",
+        r"दहेज (?:उत्पीड़न|प्रताड़ना|के लिए परेशान)",
+        r"पति.{0,20}(?:मारता|मारते|पीटता|पीटते)",
+        r"मुझे.{0,15}(?:मारता|मारती|पीटता|पीटती)",
+        r"ससुराल वाले.{0,20}(?:मारते|पीटते)",
+        r"पति से डर",
+    ),
+}
+
+#: How many Devanagari patterns await native-speaker review. Printed by
+#: `scripts/review_translations.py` rather than recounted there.
+DEVANAGARI_PATTERN_COUNT = sum(
+    len(patterns) for patterns in DEVANAGARI_CRISIS_PATTERNS.values()
+)
+
 _COMPILED: dict[CrisisKind, tuple[re.Pattern[str], ...]] = {
     kind: tuple(re.compile(pattern, re.IGNORECASE) for pattern in patterns)
     for kind, patterns in CRISIS_PATTERNS.items()
 }
+
+_COMPILED_DEVANAGARI: dict[CrisisKind, tuple[re.Pattern[str], ...]] = {
+    kind: tuple(re.compile(pattern) for pattern in DEVANAGARI_CRISIS_PATTERNS[kind])
+    for kind in CrisisKind
+}
+
+#: One Devanagari character. The same block as
+#: `openlaw.language.detect.SCRIPT_RANGES`'s `"hi"` entry -- not imported,
+#: to keep this module from depending on the language package, but pinned to
+#: it by `tests/answers/test_escalation.py` so the two cannot drift. Used as
+#: a cheap gate: text with no Devanagari in it never pays for the Devanagari
+#: pattern set, which keeps the English/Hinglish scan cost exactly what it
+#: was before that set existed -- and that matters most on a 10 MiB uploaded
+#: document, the one input whose size the user chooses.
+_DEVANAGARI_CHAR = re.compile(r"[ऀ-ॿ]")
 
 
 def detect_crisis(text: str) -> CrisisKind | None:
@@ -226,11 +319,20 @@ def detect_crisis(text: str) -> CrisisKind | None:
     Fails safe: patterns are recall-biased (see module docstring) and, when a
     message matches more than one category, the most urgent one wins rather
     than the first or an arbitrary one.
+
+    Devanagari patterns are consulted only when `text` actually contains
+    Devanagari, so a purely Latin-script input costs exactly what it did
+    before that set was added.
     """
     if not text:
         return None
+    has_devanagari = _DEVANAGARI_CHAR.search(text) is not None
     for kind in _SEVERITY_ORDER:
         if any(pattern.search(text) for pattern in _COMPILED[kind]):
+            return kind
+        if has_devanagari and any(
+            pattern.search(text) for pattern in _COMPILED_DEVANAGARI[kind]
+        ):
             return kind
     return None
 

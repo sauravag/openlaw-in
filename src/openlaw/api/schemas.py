@@ -291,6 +291,20 @@ def to_response(
     help), and `is_answerable` is reported `True`: this IS the complete,
     correct response for this turn, even though it contains no cited legal
     claim.
+
+    **A DOCUMENT-derived crisis is the other shape, and takes the ordinary
+    branch on purpose (Plan 6 Task 10, ruling 1).**
+    `localised.document_crisis` means the question was clean and a crisis
+    phrase was found only in an attached file -- weaker evidence, possibly
+    historical or about someone else. That turn carries a real legal answer,
+    so `answer`, `sources` and `is_answerable` render exactly as any other
+    turn's, and the helpline card is attached beside them through the fields
+    that already exist for it: `crisis_response` (set below) plus
+    `helplines`/`footer`, which
+    `openlaw.language.pipeline._with_document_crisis` has already prepended
+    the category's numbers to. Branching on `document_crisis` the way this
+    function branches on `crisis` would throw away the answer that path
+    exists to preserve.
     """
     if localised.crisis is not None:
         help_text = crisis_text(localised.crisis, localised.language)
@@ -307,6 +321,11 @@ def to_response(
             quota_remaining=quota_remaining,
         )
 
+    document_help = (
+        crisis_text(localised.document_crisis, localised.language)
+        if localised.document_crisis is not None
+        else None
+    )
     return AskResponse(
         answer=_render_answer(localised.answer, localised.language),
         sources=[
@@ -326,7 +345,7 @@ def to_response(
         language=localised.language,
         corpus_version=corpus_version,
         footer=localised.footer,
-        crisis_response=None,
+        crisis_response=document_help,
         helplines=localised.helplines,
         is_answerable=localised.answer.is_answerable,
         quota_remaining=quota_remaining,

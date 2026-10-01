@@ -3,15 +3,16 @@
 Order is load-bearing::
 
     detect language
-    -> crisis-check the ORIGINAL text (regex, then classifier)
-    -> crisis-check the STORED verdict of every attached document
-       (regex-only, computed once at upload, re-read every turn)
+    -> crisis-check the ORIGINAL text (regex, then classifier)  [short-circuits]
     -> translate the query to English
-    -> crisis-check the TRANSLATED text (regex ONLY -- no second classifier call)
+    -> crisis-check the TRANSLATED text (regex ONLY)            [short-circuits]
     -> retrieve
     -> generate
     -> VALIDATE
     -> translate the answer
+    -> attach the STORED crisis verdict of every attached document
+       (regex-only, computed once at upload, re-read every turn)
+       ALONGSIDE the answer -- never instead of it
 
 **This whole order runs on EVERY turn, not only the first.** This function
 is one turn; a conversation is many calls to it, and there is no "already
@@ -46,10 +47,35 @@ translation can never suppress a helpline either way: `translate_query`
 degrades to the original text on any failure, which the first check has
 already cleared.
 
-**The second check reads a STORED document verdict, and that is a cost
-decision, not a shortcut.** A document can reveal what the question never
-says: a protection order attached to a question about rent arrears. Its
-text is scanned ONCE, at upload, by
+**A document-derived crisis rides ALONGSIDE the answer; a question-derived
+one replaces it.** The asymmetry is in the strength of the evidence, and it
+is the whole design (Plan 6 Task 10, ruling 1). A question saying "my
+husband beats me" is the person telling us, now, that they are in danger:
+short-circuiting to helplines is right, and it is free. A crisis phrase
+inside an uploaded document is much weaker -- it may be historical (an FIR
+from two years ago, attached for context), incidental (a tenancy agreement
+with a harassment clause), or about someone else entirely. Replacing the
+question she actually asked with a helpline card would be unhelpful, and
+for someone attaching an old document as background, close to insulting.
+Suppressing the helplines would be equally wrong. So when, and only when,
+the question and its translation are both clean, the legal question is
+answered normally AND `_with_document_crisis` prepends the crisis response
+and its helplines to the footer, setting `LocalisedAnswer.document_crisis`
+rather than `crisis`.
+
+That means a document-derived crisis costs a generation call. It is not a
+regression: the question was going to be answered anyway. The FREE
+short-circuit is preserved exactly where it matters -- the question-derived
+path, the one that must keep working with a broken API key. A
+question-derived crisis still returns before `translate_query`, before
+`retriever.retrieve`, and before any generation, and a document attached to
+that same turn changes none of that: the question's verdict is the stronger
+evidence and it alone selects the response.
+
+**The document verdict is STORED, and that is a cost decision, not a
+shortcut.** A document can reveal what the question never says: a
+protection order attached to a question about rent arrears. Its text is
+scanned ONCE, at upload, by
 `openlaw.documents.extract.scan_for_crisis` -- the free regex layer, never
 the paid classifier -- and the verdict is written to
 `openlaw.db.models.Document.crisis_kind`. Every later turn reads that
@@ -59,22 +85,23 @@ of a turn proportional to a length the uploader chooses, metered by a quota
 that counts questions rather than bytes, and would hand attacker-controlled
 text an argument with the one decision that routes a person in danger;
 `scan_for_crisis`'s docstring sets both out, along with the limit that
-comes with the choice -- the regex layer is Devanagari-blind, so a
-Hindi-script document contributes no verdict and the question's own
-classifier call is what covers that user. Nothing in this module ever
+comes with the choice -- the regex layer's Devanagari coverage is a narrow,
+precision-tuned set (ruling 2) and every other Indic script is uncovered,
+so a document in Tamil or Bengali contributes no verdict and the question's
+own classifier call is what covers that user. Nothing in this module ever
 re-derives a verdict from text, so a turn with ten attached documents costs
 exactly what a turn with none costs.
 
-The question's verdict and the documents' verdicts are combined by
+Several attached documents resolve among THEMSELVES by
 `openlaw.answers.escalation.most_urgent_crisis` -- the same severity order
-`detect_crisis` applies within one message -- so a document revealing
-self-harm is never answered with the domestic-violence helpline merely
-because the question matched first. The crisis response is rendered in the
-user's own language whichever layer found it (Task 6 fix round, H3), so a
-verdict produced by an English-reading regex still reaches a Hindi speaker
-in Hindi.
+`detect_crisis` applies within one message -- so two documents never
+produce an arbitrary winner. They are never weighed against the question's
+verdict, which short-circuits on its own and never reaches this step. The
+crisis response is rendered in the user's own language whichever layer
+found it (Task 6 fix round, H3), so a verdict produced by an
+English-reading regex still reaches a Hindi speaker in Hindi.
 
-Once every check passes, generation is handed to
+Once both question-side checks pass, generation is handed to
 `openlaw.answers.generate._generate_from_context` rather than the public
 `generate_answer` -- the same trick `answer_question` uses in that module,
 and for the same reason (see its own docstring): `english_query` has
@@ -224,6 +251,16 @@ class LocalisedAnswer(BaseModel):
     language: str
     english_query: str
     crisis: CrisisKind | None = None
+    #: Set when a crisis was found ONLY in an attached document, never in
+    #: the question (Plan 6 Task 10, ruling 1). Distinct from `crisis`,
+    #: which means "this turn was short-circuited and carries no legal
+    #: answer": a `document_crisis` turn carries a complete, ordinary legal
+    #: answer AND the helpline card, because a crisis phrase inside an
+    #: uploaded file is weaker evidence than a person saying it -- it may be
+    #: historical, incidental, or about someone else. Suppressing the
+    #: helplines would be wrong; so would replacing the question she
+    #: actually asked. `openlaw.api.schemas.to_response` renders both.
+    document_crisis: CrisisKind | None = None
     footer: str = ""
     #: Structured, tap-to-call numbers for `footer` (Task 6 fix round, C2) --
     #: at minimum the NALSA number every footer cites, plus the
@@ -294,25 +331,52 @@ def _document_crisis(crisis_kinds: tuple[str | None, ...]) -> CrisisKind | None:
     return most_urgent_crisis(crisis_kind_from_value(value) for value in crisis_kinds)
 
 
+def _with_document_crisis(
+    answer: LocalisedAnswer, crisis: CrisisKind | None
+) -> LocalisedAnswer:
+    """Return `answer` with a document-derived crisis riding ALONGSIDE it.
+
+    The question was clean and has been answered normally; a document
+    attached to this turn was not. The helpline card is prepended to the
+    footer and its numbers are prepended to `helplines`, and the legal
+    answer is left completely untouched -- see the module docstring for why
+    a document verdict adds to the answer instead of replacing it.
+
+    `document_crisis` is set, NOT `crisis`: `crisis` means "this turn was
+    short-circuited and carries no legal answer", and
+    `openlaw.api.schemas.to_response` branches on exactly that to decide
+    whether to render claims and sources at all. Setting it here would
+    throw away the answer this path exists to preserve.
+    """
+    if crisis is None:
+        return answer
+    footer = f"{crisis_response(crisis, answer.language)}\n\n{answer.footer}"
+    helplines = crisis_helplines(crisis, answer.language) + answer.helplines
+    return answer.model_copy(
+        update={"footer": footer, "helplines": helplines, "document_crisis": crisis}
+    )
+
+
 def _clear_crisis_and_translate(
     question: str,
     language: str,
     adapter: LLMAdapter,
     registry: ModelRegistry,
     state: str | None,
-    document_crisis_kinds: tuple[str | None, ...],
 ) -> LocalisedAnswer | tuple[str, tuple[ClassifierFailureEvent, ...]]:
-    """Run every crisis check and, if none fires, translate the query.
+    """Run both question-side crisis checks and, if neither fires, translate.
 
     The first check is the full two-layer `detect_crisis_with_classifier` on
-    `question` itself. It is joined by the stored, regex-only verdict of
-    each attached document, and the two are resolved by severity
-    (`most_urgent_crisis`), not by which came first. The third check, on the
-    translated `english_query`, is the bare regex `detect_crisis` -- see the
-    module docstring for why the classifier is not asked a second time, and
-    why the document contributes a stored verdict rather than a fresh call.
+    `question` itself. The second, on the translated `english_query`, is the
+    bare regex `detect_crisis` -- see the module docstring for why the
+    classifier is not asked a second time.
 
-    Returns a crisis `LocalisedAnswer` the moment any check fires --
+    Both of these are QUESTION-side: the person telling us, now, that they
+    are in danger. Either one short-circuits the turn. A document's stored
+    verdict is weaker evidence and is handled by the caller instead, after
+    the answer is generated (`_with_document_crisis`).
+
+    Returns a crisis `LocalisedAnswer` the moment either check fires --
     before `translate_query` is even called for the first, and before the
     caller may touch `retriever.retrieve` for either. Otherwise returns
     `(english_query, classifier_failures)`, where `classifier_failures` is
@@ -324,11 +388,8 @@ def _clear_crisis_and_translate(
         question, adapter, registry
     )
     failures = _failures_of(original_detection)
-    turn_crisis = most_urgent_crisis(
-        (original_detection.crisis, _document_crisis(document_crisis_kinds))
-    )
-    if turn_crisis is not None:
-        return _crisis_answer(turn_crisis, language, "", state, failures)
+    if original_detection.crisis is not None:
+        return _crisis_answer(original_detection.crisis, language, "", state, failures)
 
     english_query = translate_query(question, language, adapter, registry)
 
@@ -386,12 +447,11 @@ def answer_in_language(
     """
     target = language or detect_language(question)
 
-    cleared = _clear_crisis_and_translate(
-        question, target, adapter, registry, state, document_crisis_kinds
-    )
+    cleared = _clear_crisis_and_translate(question, target, adapter, registry, state)
     if isinstance(cleared, LocalisedAnswer):
         return cleared
     english_query, classifier_failures = cleared
+    document_crisis = _document_crisis(document_crisis_kinds)
 
     context = retriever.retrieve(english_query)
     footer = escalation_footer(state, target)
@@ -400,7 +460,7 @@ def answer_in_language(
     )
     localised = translate_answer(result.answer, target, adapter, registry, glossary)
 
-    return LocalisedAnswer(
+    answered = LocalisedAnswer(
         answer=localised,
         english_answer=result.answer,
         language=target,
@@ -414,3 +474,4 @@ def answer_in_language(
         events=result.events,
         classifier_failures=result.classifier_failures,
     )
+    return _with_document_crisis(answered, document_crisis)

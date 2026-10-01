@@ -31,6 +31,7 @@ from openlaw.answers.escalation import CrisisKind, HallucinationEvent
 from openlaw.answers.schema import Claim
 from openlaw.answers.validate import Source, ValidatedAnswer
 from openlaw.api.app import create_app
+from openlaw.api.refusal import GENERIC_SAFETY_NOTE
 from openlaw.config import Settings
 from openlaw.db.models import Base
 from openlaw.language.pipeline import LocalisedAnswer
@@ -900,18 +901,31 @@ def test_client_key_does_not_warn_when_no_forwarded_header_is_present(caplog) ->
 # to Devanagari and other Indic scripts --------------------------------------
 
 
-def test_quota_refusal_gives_a_safety_note_for_devanagari_the_regex_cannot_match() -> (
-    None
-):
-    """The regex layer (`detect_crisis`) only matches English/Hinglish
-    Latin-script phrasing -- it cannot fire on Devanagari at all. The
-    refusal path must still surface something rather than silence."""
+def test_quota_refusal_categorises_a_devanagari_phrase_the_regex_now_matches() -> None:
+    """Plan 6 Task 10 (ruling 2) added a narrow Devanagari pattern set, so
+    this phrasing is now matched by the free regex itself and gets the
+    CATEGORISED domestic-violence response rather than the un-triaged
+    hedge -- a strictly better refusal, still with no model call."""
     client = _client(settings=_settings(anonymous_quota=0))
     blocked = client.post("/ask", json={"question": "मेरे पति मुझे पीटते हैं"})
 
     assert blocked.status_code == 429
-    assert blocked.json()["crisis_response"] is not None
-    assert "112" in blocked.json()["crisis_response"]
+    crisis_response = blocked.json()["crisis_response"]
+    assert crisis_response is not None
+    assert "181" in crisis_response  # the women's helpline, i.e. categorised
+    assert crisis_response != GENERIC_SAFETY_NOTE
+
+
+def test_quota_refusal_still_hedges_for_a_script_the_regex_cannot_match() -> None:
+    """The hedge must stay intact: ruling 2 narrowed the non-Latin gap for
+    Devanagari, it did not close it. Tamil (and every other Indic script)
+    reaches `crisis_extras` with the regex silent, and the caller must get
+    the un-triaged helpline set rather than silence."""
+    client = _client(settings=_settings(anonymous_quota=0))
+    blocked = client.post("/ask", json={"question": "என் கணவன் என்னை அடிக்கிறான்"})
+
+    assert blocked.status_code == 429
+    assert blocked.json()["crisis_response"] == GENERIC_SAFETY_NOTE
 
 
 def test_quota_refusal_crisis_response_is_none_for_an_ordinary_latin_question() -> None:

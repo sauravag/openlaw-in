@@ -19,8 +19,12 @@ calling a paid model on every subsequent request from that same caller would
 let them spend money indefinitely simply by continuing to POST after being
 refused, with no quota gate in front of it (the gate is what just refused
 them). What IS adopted from M3 is the actual gap it identified: the free
-regex layer (`openlaw.answers.escalation.detect_crisis`) is blind to
-Devanagari and other Indic scripts. `_looks_non_latin` closes that gap
+regex layer (`openlaw.answers.escalation.detect_crisis`) cannot match most
+non-Latin script. Plan 6 Task 10 (ruling 2) narrowed that for Devanagari
+with a deliberately narrow, precision-tuned pattern set, and narrowing is
+all it did: a Hindi phrasing outside those patterns, and every other Indic
+script entirely, still reaches this module with the regex silent. The hedge
+below therefore stays exactly as it is. `_looks_non_latin` closes the gap
 cheaply, with no model call: when the regex is silent AND the question
 contains non-Latin-script characters (a proxy for "this matcher is known not
 to fire here"), the caller still gets `GENERIC_SAFETY_NOTE` -- the full set

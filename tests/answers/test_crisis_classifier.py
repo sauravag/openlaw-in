@@ -260,8 +260,12 @@ def test_append_classifier_failure_events_with_empty_tuple_writes_nothing(
 @pytest.mark.parametrize(
     "text,kind",
     [
-        ("मुझे मारता है", CrisisKind.DOMESTIC_VIOLENCE),
-        ("मरना चाहता हूँ", CrisisKind.SELF_HARM),
+        # NB: "मुझे मारता है" and "मरना चाहता हूँ" used to live here. Plan 6
+        # Task 10 (ruling 2) added a narrow Devanagari pattern set, so the
+        # free regex now catches both and they moved to
+        # `test_the_devanagari_patterns_catch_what_the_classifier_used_to_
+        # carry_alone` below. Everything still listed here remains a
+        # measured miss.
         ("mera pati mujhe marta h", CrisisKind.DOMESTIC_VIOLENCE),
         ("I want to end it all", CrisisKind.SELF_HARM),
         ("he raises his hand at me", CrisisKind.DOMESTIC_VIOLENCE),
@@ -271,6 +275,7 @@ def test_append_classifier_failure_events_with_empty_tuple_writes_nothing(
         ("amar husband amake mare", CrisisKind.DOMESTIC_VIOLENCE),  # Bengali translit.
         ("naa mogudu nannu kottadu", CrisisKind.DOMESTIC_VIOLENCE),  # Telugu translit.
         ("mazha navra mala marto", CrisisKind.DOMESTIC_VIOLENCE),  # Marathi translit.
+        ("मला खूप भीती वाटते", CrisisKind.DOMESTIC_VIOLENCE),  # Marathi, Devanagari
     ],
 )
 def test_classifier_catches_phrasing_the_regex_measurably_misses(
@@ -291,6 +296,34 @@ def test_classifier_catches_phrasing_the_regex_measurably_misses(
     assert result.crisis is kind
     assert result.failure is None
     assert len(adapter.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("मुझे मारता है", CrisisKind.DOMESTIC_VIOLENCE),
+        ("मरना चाहता हूँ", CrisisKind.SELF_HARM),
+    ],
+)
+def test_the_devanagari_patterns_catch_what_the_classifier_used_to_carry_alone(
+    text: str, kind: CrisisKind
+) -> None:
+    """Plan 6 Task 10, ruling 2. These two phrasings are the ones this
+    module's own docstring cites as the measured Devanagari gap, and the
+    free layer now reaches them -- so no model call is made at all, which
+    is the point: an uploaded document is read by the free layer ALONE.
+
+    The classifier is still needed for everything in the parametrisation
+    above, and for Devanagari phrasings outside this deliberately narrow
+    set (note the Marathi-in-Devanagari case, which the patterns do not and
+    should not try to cover)."""
+    assert detect_crisis(text) is kind
+
+    adapter = StubAdapter([])
+    result = detect_crisis_with_classifier(text, adapter, ModelRegistry())
+
+    assert result.crisis is kind
+    assert len(adapter.calls) == 0
 
 
 # --- integration: the real model actually makes these calls correctly -----

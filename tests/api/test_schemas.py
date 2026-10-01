@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from openlaw.answers.escalation import CrisisKind, crisis_helplines
+from openlaw.answers.escalation import crisis_response as crisis_text
 from openlaw.answers.schema import Claim, DocumentClaim
 from openlaw.answers.validate import DocumentCitation, Source, ValidatedAnswer
 from openlaw.api.schemas import (
@@ -230,3 +232,64 @@ def test_document_claims_cannot_make_a_response_answerable() -> None:
     assert response.answer.startswith("We could not find a verifiable answer")
     assert response.sources == []
     assert "4 March" not in response.model_dump_json()
+
+
+# --- a document-derived crisis is rendered ALONGSIDE the answer -----------
+#
+# Plan 6 Task 10, ruling 1. `to_response` branches on `localised.crisis` to
+# decide whether a turn carries a legal answer at all, so the document path
+# deliberately sets `document_crisis` instead. These tests are the boundary:
+# if that distinction were ever collapsed, the woman who attached an old FIR
+# to a question about rent would lose her rent answer.
+
+
+def _localised_with_document_crisis(crisis: CrisisKind | None) -> LocalisedAnswer:
+    source = Source(
+        chunk_id="IND_central_2385_s12_p0",
+        source_url="https://www.indiacode.nic.in/handle/123456789/1",
+        kind=ChunkKind.PROVISION,
+        title="Section 12",
+    )
+    answer = ValidatedAnswer(
+        unverified_summary="unverified model prose -- must never render",
+        claims=(Claim(text="Notice is required.", chunk_ids=(source.chunk_id,)),),
+        sources=(source,),
+        is_answerable=True,
+    )
+    footer = "NALSA: 15100" if crisis is None else f"{crisis_text(crisis, 'en')}\n\n15100"
+    return LocalisedAnswer(
+        answer=answer,
+        english_answer=answer,
+        language="en",
+        english_query="q",
+        crisis=None,
+        document_crisis=crisis,
+        footer=footer,
+        helplines=crisis_helplines(crisis, "en") if crisis else (),
+    )
+
+
+def test_a_document_crisis_turn_still_renders_its_legal_answer() -> None:
+    response = to_response(
+        _localised_with_document_crisis(CrisisKind.DOMESTIC_VIOLENCE), "v1", 5
+    )
+
+    assert response.answer == "Notice is required."
+    assert response.sources[0].chunk_id == "IND_central_2385_s12_p0"
+    assert response.is_answerable is True
+
+
+def test_a_document_crisis_turn_also_carries_the_helpline_card() -> None:
+    response = to_response(
+        _localised_with_document_crisis(CrisisKind.DOMESTIC_VIOLENCE), "v1", 5
+    )
+
+    assert response.crisis_response is not None
+    assert "181" in response.crisis_response
+    assert "181" in {helpline.number for helpline in response.helplines}
+
+
+def test_an_ordinary_turn_carries_no_crisis_response() -> None:
+    response = to_response(_localised_with_document_crisis(None), "v1", 5)
+
+    assert response.crisis_response is None

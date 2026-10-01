@@ -39,7 +39,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from openlaw.answers.escalation import CrisisKind
+from openlaw.answers.escalation import CrisisKind, nalsa_helpline
+from openlaw.documents.extract import ExtractedPage, scan_for_crisis
 from openlaw.answers.generate import persist_answer_events
 from openlaw.answers.models import Completion, ModelRegistry, ModelRole, StubAdapter
 from openlaw.config import Settings
@@ -690,26 +691,17 @@ STORED_DV = CrisisKind.DOMESTIC_VIOLENCE.value
 NO_DOCUMENT_VERDICT: tuple[str | None, ...] = (None,)
 
 
-def _answered_turn(adapter: StubAdapter, retriever: _Retriever) -> None:
-    """Run one ordinary, non-crisis English turn against `adapter`."""
-    answer_in_language(
-        "my landlord kept my deposit",
-        retriever,
-        adapter,
-        ModelRegistry(),
-        _glossary(),
+def test_a_document_verdict_rides_alongside_the_answer_on_turn_five() -> None:
+    """The headline case, as ruling 1 settles it: the question is about
+    rent, the attached FIR is about violence, and it is the fifth turn. She
+    gets her legal answer AND the helpline card -- not one instead of the
+    other. A crisis phrase inside an uploaded file is weaker evidence than a
+    person saying it: it may be historical, incidental, or about someone
+    else, so it must not replace the question she actually asked."""
+    retriever = _Retriever()
+    adapter = StubAdapter(
+        [_SAFE_CLASSIFIER_RESPONSE, "my landlord kept my deposit", _generation()] * 5
     )
-
-
-def test_a_document_verdict_fires_on_turn_five_with_an_innocuous_question() -> None:
-    """The headline case: the question is about rent, the attached FIR is
-    about violence, and it is the fifth turn. The DV helpline wins, and
-    neither the retriever nor the generator is ever reached -- the StubAdapter
-    is queued with exactly one classifier response per turn and nothing
-    else, so any generation call would pop an empty queue and raise."""
-    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE] * 5)
-    retriever = _RaisingRetriever()
-
     for _ in range(5):
         result = answer_in_language(
             "my landlord kept my deposit",
@@ -720,59 +712,68 @@ def test_a_document_verdict_fires_on_turn_five_with_an_innocuous_question() -> N
             document_crisis_kinds=(STORED_DV,),
         )
 
-    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    # The legal answer survives intact...
+    assert result.answer.claims[0].text == "A refund is required."
+    assert result.answer.is_answerable is True
+    # ...and the helpline rides alongside it.
+    assert result.document_crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert "181" in result.footer
-    assert result.answer.is_answerable is False
-    # One classifier call per turn -- never two, never a generation call.
-    assert len(adapter.calls) == 5
+    assert "181" in {helpline.number for helpline in result.helplines}
+    # `crisis` stays None: the turn was NOT short-circuited, and
+    # `to_response` branches on that to decide whether to render the answer.
+    assert result.crisis is None
 
 
-def test_a_document_verdict_persists_across_turns_with_no_new_upload() -> None:
-    """Turn 1 has no document and is answered normally; the upload happens
-    between turns; turns 2-4 carry only the STORED verdict and every one of
-    them surfaces the helpline. Crisis routing is not a first-turn gate."""
-    answering = StubAdapter(
-        [_SAFE_CLASSIFIER_RESPONSE, "my landlord kept my deposit", _generation()]
+def test_a_document_verdict_never_suppresses_the_legal_answer_on_any_turn() -> None:
+    """Every turn, not only the first and not only the fifth: the verdict is
+    re-read from the stored column and re-attached, and the answer is
+    returned every time."""
+    retriever = _Retriever()
+    adapter = StubAdapter(
+        [_SAFE_CLASSIFIER_RESPONSE, "my landlord kept my deposit", _generation()] * 4
     )
-    _answered_turn(answering, _Retriever())
-
-    crisis_adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE] * 3)
-    crises = [
+    results = [
         answer_in_language(
             "my landlord kept my deposit",
-            _RaisingRetriever(),
-            crisis_adapter,
+            retriever,
+            adapter,
             ModelRegistry(),
             _glossary(),
             document_crisis_kinds=(STORED_DV,),
-        ).crisis
-        for _ in range(3)
+        )
+        for _ in range(4)
     ]
 
-    assert crises == [CrisisKind.DOMESTIC_VIOLENCE] * 3
+    assert [r.document_crisis for r in results] == [CrisisKind.DOMESTIC_VIOLENCE] * 4
+    assert all(r.answer.claims[0].text == "A refund is required." for r in results)
+    assert len(retriever.queries) == 4
 
 
-def test_a_document_crisis_turn_makes_no_retrieval_or_generation_call() -> None:
-    """Requirement in its own right: the crisis short-circuit stays free of
-    retrieval and generation, which is why it works with a broken API key."""
-    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE])
+def test_the_escalation_footer_still_follows_the_document_helpline() -> None:
+    """Footer order matches the short-circuit's: the category-specific
+    helpline leads, the standard free-legal-aid routing follows. Never the
+    standard footer alone."""
+    adapter = StubAdapter(
+        [_SAFE_CLASSIFIER_RESPONSE, "my landlord kept my deposit", _generation()]
+    )
     result = answer_in_language(
-        "how do I get my deposit back",
-        _RaisingRetriever(),
+        "my landlord kept my deposit",
+        _Retriever(),
         adapter,
         ModelRegistry(),
         _glossary(),
         document_crisis_kinds=(STORED_DV,),
     )
 
-    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
-    assert result.english_query == ""  # translate_query was never reached
-    assert len(adapter.calls) == 1  # the one classifier call the turn already paid for
+    assert result.footer.index("181") < result.footer.index("15100")
+    assert result.helplines[-1].number == "15100"
 
 
-def test_a_regex_crisis_with_a_document_attached_still_costs_nothing() -> None:
-    """The free layers come first: when the question's own regex fires there
-    is no classifier call at all, document attached or not."""
+def test_a_question_crisis_short_circuits_even_with_a_document_attached() -> None:
+    """Ruling 1's other half: when the question itself signals crisis, the
+    short-circuit is exactly what it always was -- free, no retrieval, no
+    generation, which is why it survives a broken API key. A document
+    attached to that same turn changes nothing about it."""
     adapter = StubAdapter([])
     result = answer_in_language(
         "my husband beats me",
@@ -784,12 +785,19 @@ def test_a_regex_crisis_with_a_document_attached_still_costs_nothing() -> None:
     )
 
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.answer.is_answerable is False
     assert len(adapter.calls) == 0
 
 
-def test_the_most_urgent_verdict_wins_between_question_and_document() -> None:
-    """A document revealing self-harm must not be answered with the
-    domestic-violence helpline merely because the question matched first."""
+def test_the_questions_verdict_outranks_a_documents_on_a_short_circuit() -> None:
+    """Evidence strength, not severity order, decides here. The person is
+    telling us NOW that her husband beats her; a self-harm phrase in an
+    attached file may be two years old or about someone else. The question
+    selects the response, and the turn stays free.
+
+    (Deliberate consequence, flagged in the task report: the document's
+    different category is not separately surfaced on a short-circuit turn.)
+    """
     adapter = StubAdapter([])
     result = answer_in_language(
         "my husband beats me",
@@ -800,34 +808,40 @@ def test_the_most_urgent_verdict_wins_between_question_and_document() -> None:
         document_crisis_kinds=(CrisisKind.SELF_HARM.value,),
     )
 
-    assert result.crisis is CrisisKind.SELF_HARM
-    assert "14416" in result.footer
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert "181" in result.footer
+    assert len(adapter.calls) == 0
 
 
 def test_several_attached_documents_resolve_to_the_most_urgent_verdict() -> None:
-    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE])
+    """Documents are weighed against EACH OTHER by severity, so two
+    documents never produce an arbitrary winner."""
+    adapter = StubAdapter(
+        [_SAFE_CLASSIFIER_RESPONSE, "my landlord kept my deposit", _generation()]
+    )
     result = answer_in_language(
         "my landlord kept my deposit",
-        _RaisingRetriever(),
+        _Retriever(),
         adapter,
         ModelRegistry(),
         _glossary(),
         document_crisis_kinds=(None, STORED_DV, CrisisKind.TRAFFICKING.value),
     )
 
-    assert result.crisis is CrisisKind.TRAFFICKING
+    assert result.document_crisis is CrisisKind.TRAFFICKING
+    assert result.answer.claims[0].text == "A refund is required."
 
 
 def test_a_cleared_document_does_not_suppress_an_ordinary_answer() -> None:
     """The ordinary case must stay ordinary: an attached document whose
-    stored verdict is NULL changes nothing about the turn."""
-    retriever = _Retriever()
+    stored verdict is NULL changes nothing about the turn -- no helpline
+    card, no extra numbers, no extra model call."""
     adapter = StubAdapter(
         [_SAFE_CLASSIFIER_RESPONSE, "my landlord kept my deposit", _generation()]
     )
     result = answer_in_language(
         "my landlord kept my deposit",
-        retriever,
+        _Retriever(),
         adapter,
         ModelRegistry(),
         _glossary(),
@@ -835,7 +849,9 @@ def test_a_cleared_document_does_not_suppress_an_ordinary_answer() -> None:
     )
 
     assert result.crisis is None
+    assert result.document_crisis is None
     assert result.answer.claims[0].text == "A refund is required."
+    assert result.helplines == (nalsa_helpline("en"),)
     assert len(adapter.calls) == 3
 
 
@@ -857,6 +873,7 @@ def test_an_unrecognised_stored_verdict_never_breaks_the_turn(caplog) -> None:
         )
 
     assert result.crisis is None
+    assert result.document_crisis is None
     assert result.answer.is_answerable is True
     assert "not_a_crisis_kind" in caplog.text
 
@@ -914,13 +931,12 @@ def test_hindi_crisis_question_on_turn_four_with_a_document_attached() -> None:
 
 def test_a_hindi_question_about_rent_with_a_protection_order_attached() -> None:
     """The self-review case, exactly: a woman uploads a protection order and
-    asks only about rent arrears, in Hindi, on turn three. The document's
-    stored verdict fires, and she gets the Hindi helpline prose -- the
-    document layer must not be an English-only capability just because the
-    layer that produced the verdict reads English text."""
+    asks only about rent arrears, in Hindi, on turn three. Under ruling 1
+    she gets BOTH -- her rent answer in Hindi and the Hindi helpline card.
+    The document layer must not be an English-only capability just because
+    the layer that produced the verdict reads English text."""
     adapter = StubAdapter(
-        [_SAFE_CLASSIFIER_RESPONSE, "english query", _generation(), TRANSLATED] * 2
-        + [_SAFE_CLASSIFIER_RESPONSE]
+        [_SAFE_CLASSIFIER_RESPONSE, "english query", _generation(), TRANSLATED] * 3
     )
     retriever = _Retriever()
     for _ in range(2):
@@ -934,7 +950,7 @@ def test_a_hindi_question_about_rent_with_a_protection_order_attached() -> None:
 
     result = answer_in_language(
         "किराया बकाया के बारे में क्या नियम है",
-        _RaisingRetriever(),
+        retriever,
         adapter,
         ModelRegistry(),
         _glossary(),
@@ -942,17 +958,22 @@ def test_a_hindi_question_about_rent_with_a_protection_order_attached() -> None:
     )
 
     assert result.language == "hi"
-    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.document_crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert "महिला हेल्पलाइन" in result.footer
     assert "181" in result.footer
-    assert result.answer.claims == ()
+    # Her actual question is still answered, in Hindi.
+    assert result.answer.claims[0].text == "वापसी आवश्यक है।"
+    labels = {helpline.number: helpline.label for helpline in result.helplines}
+    assert labels["181"] == "महिला हेल्पलाइन"
 
 
-def test_an_explicit_language_still_wins_on_a_document_crisis_turn() -> None:
-    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE])
+def test_an_explicit_language_still_localises_the_document_helpline() -> None:
+    adapter = StubAdapter(
+        [_SAFE_CLASSIFIER_RESPONSE, "english query", _generation(), TRANSLATED]
+    )
     result = answer_in_language(
         "what are the rules on rent arrears",
-        _RaisingRetriever(),
+        _Retriever(),
         adapter,
         ModelRegistry(),
         _glossary(),
@@ -964,24 +985,51 @@ def test_an_explicit_language_still_wins_on_a_document_crisis_turn() -> None:
     assert "महिला हेल्पलाइन" in result.footer
 
 
+def test_a_devanagari_document_verdict_now_reaches_the_pipeline() -> None:
+    """Ruling 2, end to end from the scan: a Hindi-script protection order
+    produces a stored verdict that the free layer used to miss entirely,
+    and it rides alongside the Hindi answer."""
+    verdict = scan_for_crisis(
+        (ExtractedPage(page_number=1, text="संरक्षण आदेश: पति मुझे मारता है।"),)
+    )
+    assert verdict is CrisisKind.DOMESTIC_VIOLENCE
+
+    adapter = StubAdapter(
+        [_SAFE_CLASSIFIER_RESPONSE, "english query", _generation(), TRANSLATED]
+    )
+    result = answer_in_language(
+        "किराया बकाया के बारे में क्या नियम है",
+        _Retriever(),
+        adapter,
+        ModelRegistry(),
+        _glossary(),
+        document_crisis_kinds=(verdict.value,),
+    )
+
+    assert result.document_crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.answer.claims[0].text == "वापसी आवश्यक है।"
+
+
 # --- a classifier outage stays countable, even on a document crisis turn --
 
 
 def test_classifier_failure_during_a_document_crisis_turn_is_still_recorded() -> None:
     """Plan 3's ruling, re-asserted on the new path: the classifier outage
-    happened, so it must stay countable -- a document verdict arriving in the
-    same turn must not swallow the `ClassifierFailureEvent`."""
-    adapter = _ClassifierFailsAdapter([])
+    happened, so it must stay countable -- a document verdict arriving in
+    the same turn must not swallow the `ClassifierFailureEvent`."""
+    adapter = _ClassifierFailsAdapter(
+        ["my landlord kept my deposit", _generation()]
+    )
     result = answer_in_language(
         "my landlord kept my deposit",
-        _RaisingRetriever(),
+        _Retriever(),
         adapter,
         ModelRegistry(),
         _glossary(),
         document_crisis_kinds=(STORED_DV,),
     )
 
-    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.document_crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert len(result.classifier_failures) == 1
     assert result.classifier_failures[0].question == "my landlord kept my deposit"
 
@@ -990,8 +1038,8 @@ def test_a_classifier_outage_across_four_turns_records_one_event_per_turn(
     tmp_path: Path,
 ) -> None:
     """A sustained outage must be countable turn by turn, not collapsed into
-    one record -- and the document verdict keeps every one of those turns
-    safely routed while the paid layer is down."""
+    one record -- and the document verdict keeps attaching its helpline on
+    every one of those turns while the paid layer is down."""
     settings = Settings(
         vaquill_root="/tmp/v",
         kanoongpt_root="/tmp/k",
@@ -1001,13 +1049,13 @@ def test_a_classifier_outage_across_four_turns_records_one_event_per_turn(
     for turn in range(4):
         result = answer_in_language(
             f"question number {turn}",
-            _RaisingRetriever(),
-            _ClassifierFailsAdapter([]),
+            _Retriever(),
+            _ClassifierFailsAdapter([f"question number {turn}", _generation()]),
             ModelRegistry(),
             _glossary(),
             document_crisis_kinds=(STORED_DV,),
         )
-        assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+        assert result.document_crisis is CrisisKind.DOMESTIC_VIOLENCE
         persist_answer_events(result, settings)
 
     lines = (

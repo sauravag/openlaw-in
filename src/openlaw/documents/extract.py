@@ -199,18 +199,20 @@ def scan_for_crisis(pages: tuple[ExtractedPage, ...]) -> CrisisKind | None:
       decision that routes a person in danger. A regex cannot be talked out
       of a match.
 
-    **Known limit, stated rather than hidden:** the regex layer matches
-    English and transliterated Hinglish and is blind to Devanagari and
-    every other Indic script (see `openlaw.answers.escalation`'s module
-    docstring), so a Hindi-script document contributes no verdict. The
+    **Known limit, stated rather than hidden:** the regex layer covers
+    English, transliterated Hinglish, and a narrow, precision-tuned
+    Devanagari set (`DEVANAGARI_CRISIS_PATTERNS`, ruling 2, UNVERIFIED
+    pending native-speaker review). Every OTHER Indic script -- Bengali,
+    Tamil, Telugu, Gujarati, Kannada, Malayalam, Gurmukhi, Odia -- is
+    uncovered, so a document in one of those contributes no verdict. The
     compensating control is that the question path still runs the paid
-    classifier -- which does read Devanagari -- on every turn, and that a
-    verdict found here renders its helplines in the user's own language.
+    classifier, which reads every script, on every turn, and that a verdict
+    found here renders its helplines in the user's own language.
     `openlaw.api.refusal`'s "looks non-Latin, so hedge" trick is
     deliberately NOT copied here: on a refusal path it costs one extra
-    paragraph, but a crisis verdict REPLACES the legal answer, so hedging on
-    script would leave every Hindi document -- a Hindi lease included --
-    unanswerable.
+    paragraph, but a document verdict attaches a helpline card to a real
+    legal answer, and a card that fires on every document written in an
+    Indic script is one people learn to ignore.
 
     Scanning is linear in the text: whitespace is normalised once (see
     `_WHITESPACE_RUN`) and every crisis pattern uses bounded quantifiers
