@@ -175,6 +175,15 @@ class SourceCard(BaseModel):
     payload carries `case_id`), and a renderer must fall back honestly
     rather than print a placeholder.
 
+    `judges` and `headnote` are on the wire but are not rendered by
+    `web/components/SourceList.tsx` today, and that is a decision rather
+    than an oversight (security review LOW-2): a corpus headnote is English
+    prose, so printing it unconditionally would put English text inside a
+    Hindi answer -- the same defect class as the translated-path bypass this
+    task's review found. Rendering either one belongs to the task that
+    designs the citation display, together with how it handles a
+    non-English reader.
+
     There is deliberately no shape on this API for a citation of the user's
     own uploaded document. `openlaw.answers.validate.DocumentCitation` has
     no `source_url` and no counterpart here: the source list a reader treats

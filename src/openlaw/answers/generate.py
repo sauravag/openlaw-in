@@ -126,6 +126,7 @@ from openlaw.answers.schema import ANSWER_JSON_SCHEMA, DraftAnswer
 from openlaw.answers.validate import (
     ValidatedAnswer,
     rejected_claims,
+    rejected_document_claims,
     validate_answer,
 )
 from openlaw.config import Settings
@@ -294,7 +295,17 @@ def _generate_from_context(
         answer=validate_answer(draft, bounded),
         footer=footer,
         events=build_hallucination_events(
-            question, rejected_claims(draft, bounded), bounded
+            question,
+            # Both namespaces (security review MEDIUM-1). This module shows
+            # the model no document context yet, so `rejected_document_
+            # claims` is called against the empty default -- which means
+            # every document claim a draft contains right now is a
+            # fabrication, and is logged as one. The task that wires a real
+            # `DocumentContext` into generation must pass it here too, or
+            # the check silently inverts into "log every legitimate
+            # document claim".
+            rejected_claims(draft, bounded) + rejected_document_claims(draft),
+            bounded,
         ),
         classifier_failures=classifier_failures,
     )

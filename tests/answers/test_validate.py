@@ -1,9 +1,12 @@
 import pytest
 from pydantic import ValidationError
 
+from openlaw.answers.escalation import build_hallucination_events
 from openlaw.answers.schema import Claim, DocumentClaim, DraftAnswer
 from openlaw.answers.validate import (
     DocumentCitation,
+    DroppedClaim,
+    RejectedClaim,
     Source,
     ValidatedAnswer,
     rejected_claims,
@@ -976,3 +979,97 @@ def test_source_still_requires_a_government_url() -> None:
     that makes a citation checkable."""
     with pytest.raises(ValidationError):
         Source(chunk_id="a", kind=ChunkKind.PROVISION)  # type: ignore[call-arg]
+
+
+# --- the refusal record's namespace invariant is structural ----------------
+#
+# Security review MEDIUM-3. "Exactly one of the two id tuples is populated"
+# was documented and left to the one function that builds these records. Every
+# other invariant in this module is enforced by the type (`extra="forbid"` on
+# `DocumentCitation`, the absent `source_url`, whole-claim rejection), so this
+# one is too: a refusal record that claimed both namespaces, or neither, would
+# be a refusal nobody could file.
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({}, id="neither-namespace"),
+        pytest.param(
+            {"unresolvable_chunk_ids": ("a",), "unresolvable_excerpt_ids": (_SHOWN,)},
+            id="both-namespaces",
+        ),
+    ],
+)
+def test_a_dropped_claim_must_name_exactly_one_namespace(
+    kwargs: dict[str, tuple[str, ...]],
+) -> None:
+    with pytest.raises(ValidationError):
+        DroppedClaim(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({}, id="neither-namespace"),
+        pytest.param(
+            {"unresolvable_chunk_ids": ("a",), "unresolvable_excerpt_ids": (_SHOWN,)},
+            id="both-namespaces",
+        ),
+    ],
+)
+def test_a_rejected_claim_must_name_exactly_one_namespace(
+    kwargs: dict[str, tuple[str, ...]],
+) -> None:
+    with pytest.raises(ValidationError):
+        RejectedClaim(text="t", **kwargs)
+
+
+def test_a_refusal_record_in_one_namespace_is_accepted() -> None:
+    assert DroppedClaim(unresolvable_chunk_ids=("a",)).unresolvable_excerpt_ids == ()
+    assert DroppedClaim(unresolvable_excerpt_ids=(_SHOWN,)).unresolvable_chunk_ids == ()
+    assert RejectedClaim(text="t", unresolvable_chunk_ids=("a",)).text == "t"
+
+
+# --- a refused document claim leaves an auditable trace --------------------
+#
+# Security review MEDIUM-1. A document inducing claims that cite excerpts
+# nobody showed the model is the clearest signal of an injection attempt, and
+# a `logger.warning` is not a retained, auditable event.
+
+
+def test_refused_document_claims_become_hallucination_events() -> None:
+    draft = DraftAnswer(
+        summary="s",
+        claims=(Claim(text="bad law", chunk_ids=("ghost",)),),
+        document_claims=(DocumentClaim(text="bad doc", excerpt_ids=(_UNSHOWN,)),),
+        sufficient=True,
+    )
+    context = _context("a")
+
+    events = build_hallucination_events(
+        "q",
+        rejected_claims(draft, context) + rejected_document_claims(draft),
+        context,
+    )
+
+    assert [event.claim_text for event in events] == ["bad law", "bad doc"]
+    assert events[0].dropped_chunk_ids == ("ghost",)
+    assert events[0].dropped_excerpt_ids == ()
+    # The namespaces stay apart all the way into the log: an excerpt id never
+    # lands in a field named for chunk ids, which is also the column name on
+    # `openlaw.db.models.HallucinationLog`.
+    assert events[1].dropped_chunk_ids == ()
+    assert events[1].dropped_excerpt_ids == (_UNSHOWN,)
+
+
+def test_a_rejected_claim_cannot_be_attached_to_a_validated_answer() -> None:
+    """The two refusal records share a base class now, which would be a
+    quiet way to reopen the third unverified-prose route: if `RejectedClaim`
+    were a *subclass* of `DroppedClaim` rather than a sibling, its verbatim
+    text would validate straight onto `ValidatedAnswer.dropped`. They are
+    siblings, so it does not."""
+    rejected = RejectedClaim(text="invented prose", unresolvable_chunk_ids=("ghost",))
+
+    with pytest.raises(ValidationError):
+        ValidatedAnswer(unverified_summary=None, dropped=(rejected,))  # type: ignore[arg-type]

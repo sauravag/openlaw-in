@@ -811,3 +811,54 @@ def test_nothing_is_written_when_a_turn_produces_no_events(tmp_path: Path) -> No
 
     assert not hallucinations.exists()
     assert not failures.exists()
+
+
+# --- a refused document claim is auditable, not just logged ---------------
+#
+# Security review MEDIUM-1. `rejected_document_claims` existed with no
+# caller, so a document inducing claims that cite excerpts nobody showed the
+# model left no retained trace -- the one telemetry that would show an
+# injection attempt at all.
+
+
+def _document_claim_response() -> str:
+    """A generator reply claiming something about an uploaded document.
+
+    This module renders no document context into the prompt yet, so a draft
+    like this is a pure fabrication today — and that is exactly what the
+    event log should record.
+    """
+    return json.dumps(
+        {
+            "summary": "s",
+            "claims": [{"text": "A refund is required.", "chunk_ids": ["a"]}],
+            "document_claims": [
+                {"text": "Your lease waives notice.", "excerpt_ids": ["doc:x:p1:0"]}
+            ],
+            "sufficient": True,
+        }
+    )
+
+
+def test_a_fabricated_document_claim_is_dropped_and_logged() -> None:
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _document_claim_response()])
+
+    result = generate_answer("q", _context("a"), adapter, ModelRegistry())
+
+    assert result.answer.document_claims == ()
+    assert [event.claim_text for event in result.events] == [
+        "Your lease waives notice."
+    ]
+    assert result.events[0].dropped_excerpt_ids == ("doc:x:p1:0",)
+    # The legal claim was fine, so it survives and the turn is still
+    # answerable: logging a refused document claim must not poison the
+    # answer around it.
+    assert result.answer.is_answerable is True
+
+
+def test_a_legitimate_turn_logs_no_document_event() -> None:
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
+
+    result = generate_answer("q", _context("a"), adapter, ModelRegistry())
+
+    assert result.events == ()

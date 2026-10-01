@@ -98,12 +98,32 @@ whatever renders this object** that `document_claims` be presented as "what
 your document says", visibly apart from `claims`, and never under a
 heading that reads as law. A renderer that merges the two lists reopens
 exactly the hole this type split closes.
+
+**The fifth route, named here so it is inherited rather than
+rediscovered.** Four barriers above defend the *citation*; none defends the
+*prose of a legal claim*. Once a document's text is rendered into the
+generator's prompt, attacker-controlled words are in the model's context
+and can steer `Claim.text` — a false, legal-sounding sentence attached to a
+`chunk_id` that really was retrieved this turn. Every check in this module
+passes it, `is_answerable` is True, and it renders above a genuine
+government URL. This is strictly worse than the `document_claim.text`
+residue above, because that one carries no URL and cannot make a turn
+answerable. The mechanism is the old, documented one (this module checks
+retrieval, never entailment); what Plan 6 changes is its *reachability* —
+before documents, no attacker controlled any input to the prompt.
+
+Nothing in this module can close it, and it is deliberately not patched
+here. The standing ruling is that **legal claims must be generated in a
+pass that never sees document text, with document analysis as a separate
+pass able to emit only document claims** — structural containment, owned by
+the task that assembles the pipeline (Task 13). Until then, treat any turn
+carrying a document as one whose legal claims had an untrusted co-author.
 """
 
 import logging
 from typing import TypeVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from openlaw.answers.schema import Claim, DocumentClaim, DraftAnswer
 from openlaw.documents import DOCUMENT_EXCERPT_PREFIX
@@ -176,7 +196,38 @@ class DocumentCitation(BaseModel):
     page_number: int
 
 
-class DroppedClaim(BaseModel):
+class _NamespacedRefusal(BaseModel):
+    """Base of the two refusal records: the ids, in exactly one namespace.
+
+    A refused legal claim populates `unresolvable_chunk_ids`; a refused
+    document claim populates `unresolvable_excerpt_ids`. Exactly one is
+    non-empty, and that is **enforced**, not merely documented (security
+    review MEDIUM-3): every other invariant in this module is structural --
+    `DocumentCitation`'s `extra="forbid"`, its absent `source_url`,
+    whole-claim rejection -- and a record claiming both namespaces, or
+    neither, would be a refusal nobody could file or act on.
+
+    Both subclasses are frozen (inherited) and both share this validator, so
+    the two views of a refusal cannot drift apart.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    unresolvable_chunk_ids: tuple[str, ...] = ()
+    unresolvable_excerpt_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _exactly_one_namespace(self) -> "_NamespacedRefusal":
+        if bool(self.unresolvable_chunk_ids) == bool(self.unresolvable_excerpt_ids):
+            raise ValueError(
+                "a refusal names exactly one namespace: either "
+                "unresolvable_chunk_ids or unresolvable_excerpt_ids, never "
+                "both and never neither"
+            )
+        return self
+
+
+class DroppedClaim(_NamespacedRefusal):
     """The citation-only record of a claim validation refused.
 
     Carries the unresolvable ids and *nothing else* — in particular, not the
@@ -188,19 +239,12 @@ class DroppedClaim(BaseModel):
     `unverified_summary`). The verbatim text now lives only on
     `RejectedClaim`.
 
-    The two id namespaces stay apart even in the refusal record: a refused
-    legal claim populates `unresolvable_chunk_ids`, a refused document claim
-    populates `unresolvable_excerpt_ids`, and neither ever holds the other's
-    ids. Exactly one is non-empty on any record this module builds.
+    The two id namespaces stay apart even in the refusal record — see
+    `_NamespacedRefusal`.
     """
 
-    model_config = ConfigDict(frozen=True)
 
-    unresolvable_chunk_ids: tuple[str, ...] = ()
-    unresolvable_excerpt_ids: tuple[str, ...] = ()
-
-
-class RejectedClaim(BaseModel):
+class RejectedClaim(_NamespacedRefusal):
     """A refused claim *with* its verbatim model-written text — log-only.
 
     Produced by `rejected_claims`/`rejected_document_claims` and consumed
@@ -209,16 +253,9 @@ class RejectedClaim(BaseModel):
     retention-bounded. Deliberately not reachable from `ValidatedAnswer`: a
     diagnosis log is the one place this text belongs, and anything holding
     it must be as hard to render by accident as that log is.
-
-    Same namespace rule as `DroppedClaim`: exactly one of the two id tuples
-    is populated, according to which kind of claim was refused.
     """
 
-    model_config = ConfigDict(frozen=True)
-
     text: str
-    unresolvable_chunk_ids: tuple[str, ...] = ()
-    unresolvable_excerpt_ids: tuple[str, ...] = ()
 
 
 class ValidatedAnswer(BaseModel):

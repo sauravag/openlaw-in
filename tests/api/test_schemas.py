@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from openlaw.answers.schema import Claim
-from openlaw.answers.validate import Source, ValidatedAnswer
+from openlaw.answers.schema import Claim, DocumentClaim
+from openlaw.answers.validate import DocumentCitation, Source, ValidatedAnswer
 from openlaw.api.schemas import (
     LAUNCH_LANGUAGES,
     AskRequest,
@@ -191,3 +191,42 @@ def test_the_kind_reaches_the_browser_as_a_plain_string() -> None:
     payload = to_response(_localised_with(source), "v1", 5).model_dump(mode="json")
 
     assert payload["sources"][0]["kind"] == "judgment"
+
+
+def test_document_claims_cannot_make_a_response_answerable() -> None:
+    """Security review gap: `is_answerable` is computed in exactly two
+    places -- `validate_answer` (legal claims only) and here, where it is
+    copied -- and nothing pinned the second. A turn whose only surviving
+    content is the user's own paperwork must render the fixed refusal, not
+    an answer, and must not leak the document prose into `answer`.
+    """
+    answer = ValidatedAnswer(
+        unverified_summary=None,
+        document_claims=(
+            DocumentClaim(text="Your notice is dated 4 March.", excerpt_ids=("doc:a:p1:0",)),
+        ),
+        document_citations=(
+            DocumentCitation(
+                excerpt_id="doc:a:p1:0",
+                document_id="a",
+                filename="notice.pdf",
+                page_number=1,
+            ),
+        ),
+        is_answerable=False,
+    )
+    localised = LocalisedAnswer(
+        answer=answer,
+        english_answer=answer,
+        language="en",
+        english_query="q",
+        crisis=None,
+        footer="NALSA: 15100",
+    )
+
+    response = to_response(localised, "v1", 5)
+
+    assert response.is_answerable is False
+    assert response.answer.startswith("We could not find a verifiable answer")
+    assert response.sources == []
+    assert "4 March" not in response.model_dump_json()

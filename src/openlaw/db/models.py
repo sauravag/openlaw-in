@@ -346,6 +346,16 @@ class HallucinationLog(Base):
       permissions. A maintainer wiring a writer to this table for the first
       time must set that role up first — this is a hard precondition, not a
       follow-up.
+    - Schema: `openlaw.answers.escalation.HallucinationEvent` carries a
+      second id namespace, `dropped_excerpt_ids` (the excerpt ids of a
+      refused claim about a user's uploaded document, Plan 6 Task 7).
+      This table has no column for it, deliberately -- adding one to a
+      table nothing writes would be a migration with no reader. The same
+      maintainer who wires the writer must add that sibling column in the
+      same change: excerpt ids must never be folded into
+      `dropped_chunk_ids`, which names the corpus namespace, and dropping
+      them would discard the one signal that shows a prompt-injection
+      attempt inside an uploaded file.
     """
 
     __tablename__ = "hallucination_log"

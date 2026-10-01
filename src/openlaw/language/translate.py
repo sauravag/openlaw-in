@@ -182,6 +182,31 @@ def _parse_translation(
     return summary, text_by_id
 
 
+def _without_document_claims(answer: ValidatedAnswer) -> ValidatedAnswer:
+    """Return `answer` with its document addendum removed.
+
+    `ANSWER_SYSTEM_PROMPT` asks the translator for `claims` only, so a
+    document claim has no translated form to reassemble. Carrying the
+    English text onto a non-English answer would put an English sentence
+    about the person's own lease inside an otherwise-Hindi reply -- the
+    defect the final review's H1 fixed on the crisis path. The citations go
+    with the claims: a citation with no claim to support is a pointer to
+    nothing.
+
+    This exists as a function because `translate_answer` has four returns
+    and the drop must happen on all of them that produce a non-English
+    answer -- including the two error returns. The first version of this
+    change applied it on the success path only, which left every
+    document-only turn (zero legal claims by `validate_answer`'s rule 5, so
+    the short-circuit fires) returning English document claims to a Hindi
+    speaker. Returns `answer` itself when there is nothing to drop, so the
+    common case allocates nothing.
+    """
+    if not answer.document_claims and not answer.document_citations:
+        return answer
+    return answer.model_copy(update={"document_claims": (), "document_citations": ()})
+
+
 def translate_answer(
     answer: ValidatedAnswer,
     language: str,
@@ -206,12 +231,18 @@ def translate_answer(
     exactly match the ids sent (missing, invented, or duplicated) -- returns
     the English `answer` unchanged: a mangled translation is worse than none.
 
-    A no-op when `language` is English or the answer has no claims (an
-    unanswerable result carries no claims and a `None` summary, so there is
-    nothing to translate).
+    A no-op when `language` is English. When the answer has no claims there
+    is nothing to translate either (an unanswerable result carries no claims
+    and a `None` summary) -- but that return, and the failure return below,
+    still strip the document addendum, because a non-English answer must
+    never carry untranslated English prose out of this function. See
+    `_without_document_claims`; an English answer keeps its addendum, since
+    nothing about it needed translating.
     """
-    if language == "en" or not answer.claims:
+    if language == "en":
         return answer
+    if not answer.claims:
+        return _without_document_claims(answer)
 
     system = ANSWER_SYSTEM_PROMPT.format(
         language=SUPPORTED_LANGUAGES.get(language, language),
@@ -239,7 +270,12 @@ def translate_answer(
     expected_ids = frozenset(range(len(answer.claims)))
     parsed = _parse_translation(completion.text, expected_ids)
     if parsed is None:
-        return answer
+        # The English claims DO ride along here, deliberately -- "every
+        # failure path degrades to English", see the module docstring. The
+        # document addendum does not: an English legal answer is useful to a
+        # Hindi reader, an English sentence quoting their own lease back at
+        # them is the H1 defect.
+        return _without_document_claims(answer)
     summary, text_by_id = parsed
 
     return ValidatedAnswer(
@@ -259,17 +295,14 @@ def translate_answer(
             for index, claim in enumerate(answer.claims)
         ),
         sources=answer.sources,
-        # Document claims are dropped, explicitly, not by default (Plan 6
-        # Task 7). `ANSWER_SYSTEM_PROMPT` asks the translator for `claims`
-        # only, so a document claim has no translated form to reassemble;
-        # carrying the English text through would put an English sentence
-        # about the person's own lease inside an otherwise-Hindi answer --
-        # the defect the final review's H1 fixed on the crisis path. Their
-        # citations go with them: a citation with no claim to support is a
-        # pointer to nothing. Unreachable today (generation is not yet
-        # wired to a `DocumentContext`); extending the translator contract
-        # to both lists is a prerequisite for documents on the non-English
-        # path, not something to paper over here.
+        # Dropped here as on every other non-English return -- see
+        # `_without_document_claims` for why. The test named
+        # "no return path leaves english document claims in a hindi answer"
+        # is parametrised over all four returns, so removing this line
+        # fails on its own. Extending the translator contract to carry both
+        # lists is a prerequisite for documents on the non-English path,
+        # and belongs with the task that wires generation to a
+        # `DocumentContext`.
         document_claims=(),
         document_citations=(),
         dropped=answer.dropped,

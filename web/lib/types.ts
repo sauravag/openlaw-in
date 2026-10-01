@@ -27,6 +27,12 @@ export type ChunkKind = 'provision' | 'judgment'
  * payload has a `title`, no provision payload has a `case_id`), so a
  * renderer must fall back honestly rather than print a placeholder.
  *
+ * `judges` and `headnote` arrive but are not rendered (security review
+ * LOW-2). That is deliberate, not unfinished: a corpus headnote is English
+ * prose, and printing it unconditionally would put English text inside a
+ * Hindi answer. Rendering either belongs to the task that designs the
+ * citation display, along with how it serves a non-English reader.
+ *
  * There is deliberately no shape here for a citation of the user's own
  * uploaded document. `openlaw.answers.validate.DocumentCitation` has no
  * `source_url` and no counterpart on this API: the list a reader treats as

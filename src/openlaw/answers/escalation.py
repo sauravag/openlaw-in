@@ -394,6 +394,17 @@ class HallucinationEvent(BaseModel):
 
     question: str
     dropped_chunk_ids: tuple[str, ...]
+    #: The excerpt ids of a refused DOCUMENT claim, kept in their own field
+    #: (security review MEDIUM-1). A refused document claim is the clearest
+    #: signal of a prompt-injection attempt in an uploaded file, so it must
+    #: leave a retained trace and not just a log line -- but its ids are a
+    #: different namespace from the corpus's and must never be written into
+    #: `dropped_chunk_ids`, whose name is also the column name on
+    #: `openlaw.db.models.HallucinationLog`. Exactly one of the two is
+    #: non-empty on any event this module builds, because exactly one is
+    #: non-empty on the `RejectedClaim` it is built from
+    #: (`openlaw.answers.validate._NamespacedRefusal`).
+    dropped_excerpt_ids: tuple[str, ...] = ()
     retrieved_chunk_ids: tuple[str, ...]
     claim_text: str
     timestamp: str
@@ -408,6 +419,13 @@ def build_hallucination_events(
     than the `ValidatedAnswer`: the verbatim text of a refused claim is
     deliberately absent from `ValidatedAnswer` (see `DroppedClaim`), so this
     log-only path is the only thing that ever holds it.
+
+    Accepts refusals from either namespace -- concatenate
+    `rejected_document_claims(draft, document_context)` onto the corpus
+    refusals to log both. Each refusal's ids are copied into the field for
+    its own namespace and never the other's; `retrieved_chunk_ids` is the
+    corpus set either way, which is context rather than a claim about what
+    the document claim cited.
     """
     if not rejected:
         return ()
@@ -417,6 +435,7 @@ def build_hallucination_events(
         HallucinationEvent(
             question=question,
             dropped_chunk_ids=claim.unresolvable_chunk_ids,
+            dropped_excerpt_ids=claim.unresolvable_excerpt_ids,
             retrieved_chunk_ids=retrieved,
             claim_text=claim.text,
             timestamp=now,
