@@ -79,7 +79,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from openlaw.answers.escalation import CrisisKind, append_jsonl_records, detect_crisis
+from openlaw.answers.escalation import (
+    CRISIS_KIND_BY_VALUE,
+    CrisisKind,
+    append_jsonl_records,
+    detect_crisis,
+)
 from openlaw.answers.models import LLMAdapter, ModelRegistry, ModelRole
 
 logger = logging.getLogger(__name__)
@@ -115,8 +120,6 @@ Use "none" only when the message shows no sign of any of the above. When \
 genuinely uncertain, prefer naming the closest category over "none": missing \
 a real crisis is far worse than one unnecessary helpline."""
 
-_CRISIS_BY_VALUE: dict[str, CrisisKind] = {kind.value: kind for kind in CrisisKind}
-
 #: The classifier only ever emits one short JSON object, but 32 tokens (the
 #: previous value) sat below the documented ~256 guidance for a
 #: classification call and left no headroom: a truncated response is
@@ -130,7 +133,7 @@ CRISIS_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "properties": {
         "crisis": {
             "type": "string",
-            "enum": [*sorted(_CRISIS_BY_VALUE), "none"],
+            "enum": [*sorted(CRISIS_KIND_BY_VALUE), "none"],
             "description": (
                 "The crisis category signalled by the message, or 'none' if "
                 "it shows no sign of one."
@@ -160,8 +163,8 @@ def _parse_classification(payload: str) -> CrisisKind | None:
     raw = data.get("crisis")
     if raw == "none":
         return None
-    if isinstance(raw, str) and raw in _CRISIS_BY_VALUE:
-        return _CRISIS_BY_VALUE[raw]
+    if isinstance(raw, str) and raw in CRISIS_KIND_BY_VALUE:
+        return CRISIS_KIND_BY_VALUE[raw]
     raise ValueError(f"classifier returned an unrecognised crisis value: {raw!r}")
 
 

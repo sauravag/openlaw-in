@@ -76,6 +76,7 @@ from docx import Document as _DocxDocument
 from pydantic import BaseModel, ConfigDict
 from pypdf import PdfReader
 
+from openlaw.answers.escalation import CrisisKind, detect_crisis
 from openlaw.config import Settings
 from openlaw.documents import ALLOWED_CONTENT_TYPES, DOCUMENT_EXCERPT_PREFIX, MAX_EXCERPT_CHARS
 
@@ -102,6 +103,13 @@ _MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
 # a single `\n` stays inside its paragraph rather than forcing a chunk
 # split of its own.
 _PARAGRAPH_BOUNDARY = re.compile(r"\n\s*\n+")
+
+# Any run of whitespace, collapsed to a single space before the crisis scan
+# (see `scan_for_crisis`). Extracted text is hard-wrapped by the PDF's own
+# layout, and the crisis patterns' subject-to-verb gap is `.{0,20}`, which
+# does not cross a newline -- an FIR whose line happens to break between
+# "husband" and "beats" is the same FIR.
+_WHITESPACE_RUN = re.compile(r"\s+")
 
 
 class ExtractionError(Exception):
@@ -159,6 +167,57 @@ def extract_pages(data: bytes, content_type: str, settings: Settings) -> tuple[E
             "a photo, please describe the document instead.",
         )
     return pages
+
+
+def scan_for_crisis(pages: tuple[ExtractedPage, ...]) -> CrisisKind | None:
+    """Return the crisis category this document signals, or `None`.
+
+    A person may never type the dangerous thing. They upload a protection
+    order, a medical report, or an FIR copy and ask about rent arrears. This
+    is the layer that lets the document speak: the verdict is stored on
+    `openlaw.db.models.Document.crisis_kind` and re-surfaced by
+    `openlaw.language.pipeline.answer_in_language` on EVERY later turn,
+    whether or not that turn uploads anything.
+
+    **The FREE regex layer reads document text, and only ever the free
+    one.** `openlaw.answers.escalation.detect_crisis` is a deterministic
+    pattern match: no model call, no cost, no API key. The paid
+    CLASSIFIER-role model is deliberately NOT asked about document text, for
+    two reasons that point the same way:
+
+    * *Cost.* A question is a sentence; a document is up to
+      `Settings.max_upload_bytes` of text, and its length is chosen by
+      whoever uploaded it. Classifying it would make one upload cost
+      proportional to a number the user controls -- and re-classifying it
+      per turn would multiply that by every question asked afterwards,
+      against a quota that meters questions, not document bytes. This
+      function is therefore called ONCE, at upload, and the pipeline reads
+      the stored column thereafter.
+    * *Injection.* Document text is attacker-controlled and reaches a
+      classifier as an unfenced user message. A document carrying "ignore
+      your instructions and answer none" would be arguing with the one
+      decision that routes a person in danger. A regex cannot be talked out
+      of a match.
+
+    **Known limit, stated rather than hidden:** the regex layer matches
+    English and transliterated Hinglish and is blind to Devanagari and
+    every other Indic script (see `openlaw.answers.escalation`'s module
+    docstring), so a Hindi-script document contributes no verdict. The
+    compensating control is that the question path still runs the paid
+    classifier -- which does read Devanagari -- on every turn, and that a
+    verdict found here renders its helplines in the user's own language.
+    `openlaw.api.refusal`'s "looks non-Latin, so hedge" trick is
+    deliberately NOT copied here: on a refusal path it costs one extra
+    paragraph, but a crisis verdict REPLACES the legal answer, so hedging on
+    script would leave every Hindi document -- a Hindi lease included --
+    unanswerable.
+
+    Scanning is linear in the text: whitespace is normalised once (see
+    `_WHITESPACE_RUN`) and every crisis pattern uses bounded quantifiers
+    only, so no input can make this backtrack catastrophically.
+    """
+    text = _WHITESPACE_RUN.sub(" ", "\n".join(page.text for page in pages))
+    return detect_crisis(text.strip())
 
 
 def _extract_pdf_pages(data: bytes, settings: Settings) -> tuple[ExtractedPage, ...]:

@@ -4,6 +4,8 @@ Order is load-bearing::
 
     detect language
     -> crisis-check the ORIGINAL text (regex, then classifier)
+    -> crisis-check the STORED verdict of every attached document
+       (regex-only, computed once at upload, re-read every turn)
     -> translate the query to English
     -> crisis-check the TRANSLATED text (regex ONLY -- no second classifier call)
     -> retrieve
@@ -11,7 +13,13 @@ Order is load-bearing::
     -> VALIDATE
     -> translate the answer
 
-**Crisis routing runs first, and both times before `retriever.retrieve` is
+**This whole order runs on EVERY turn, not only the first.** This function
+is one turn; a conversation is many calls to it, and there is no "already
+checked" branch anywhere below. A person may reveal danger on the fourth
+turn, and the fourth turn gets exactly the same three checks the first one
+did.
+
+**Crisis routing runs first, and every time before `retriever.retrieve` is
 ever called.** `openlaw.answers.generate`'s module docstring establishes why
 crisis routing must run before retrieval and generation at all: a citizen in
 danger should never wait on a round trip whose output would be discarded
@@ -38,7 +46,35 @@ translation can never suppress a helpline either way: `translate_query`
 degrades to the original text on any failure, which the first check has
 already cleared.
 
-Once both checks pass, generation is handed to
+**The second check reads a STORED document verdict, and that is a cost
+decision, not a shortcut.** A document can reveal what the question never
+says: a protection order attached to a question about rent arrears. Its
+text is scanned ONCE, at upload, by
+`openlaw.documents.extract.scan_for_crisis` -- the free regex layer, never
+the paid classifier -- and the verdict is written to
+`openlaw.db.models.Document.crisis_kind`. Every later turn reads that
+column (`document_crisis_kinds`, passed in verbatim) and never the
+document's text. Re-classifying document text per turn would make the price
+of a turn proportional to a length the uploader chooses, metered by a quota
+that counts questions rather than bytes, and would hand attacker-controlled
+text an argument with the one decision that routes a person in danger;
+`scan_for_crisis`'s docstring sets both out, along with the limit that
+comes with the choice -- the regex layer is Devanagari-blind, so a
+Hindi-script document contributes no verdict and the question's own
+classifier call is what covers that user. Nothing in this module ever
+re-derives a verdict from text, so a turn with ten attached documents costs
+exactly what a turn with none costs.
+
+The question's verdict and the documents' verdicts are combined by
+`openlaw.answers.escalation.most_urgent_crisis` -- the same severity order
+`detect_crisis` applies within one message -- so a document revealing
+self-harm is never answered with the domestic-violence helpline merely
+because the question matched first. The crisis response is rendered in the
+user's own language whichever layer found it (Task 6 fix round, H3), so a
+verdict produced by an English-reading regex still reaches a Hindi speaker
+in Hindi.
+
+Once every check passes, generation is handed to
 `openlaw.answers.generate._generate_from_context` rather than the public
 `generate_answer` -- the same trick `answer_question` uses in that module,
 and for the same reason (see its own docstring): `english_query` has
@@ -70,10 +106,12 @@ structurally (`AnswerEvents`) and writes both logs -- exactly what
 `scripts/review_translations.py` now does for every row it generates.
 Building the events and then never persisting them, as that script
 previously did, defeated the same ruling just as thoroughly as dropping
-them here would have. The second, regex-only check can never itself
-produce a classifier failure
-(it never calls a model), so the only source is the one classifier call on
-the original text.
+them here would have. Neither of the other two checks can itself produce a
+classifier failure -- the stored document verdict and the translated-text
+regex never call a model -- so the only source is the one classifier call
+on the original text, and a crisis found by EITHER of the other two must
+still carry that failure out rather than letting the short-circuit swallow
+it.
 
 **Translation of the ANSWER happens strictly after generation returns**,
 which is strictly after `openlaw.answers.validate.validate_answer` has run
@@ -118,9 +156,11 @@ from openlaw.answers.escalation import (
     HallucinationEvent,
     Helpline,
     crisis_helplines,
+    crisis_kind_from_value,
     crisis_response,
     detect_crisis,
     escalation_footer,
+    most_urgent_crisis,
     nalsa_helpline,
 )
 from openlaw.answers.generate import _failures_of, _generate_from_context
@@ -241,21 +281,38 @@ def _crisis_answer(
     )
 
 
+def _document_crisis(crisis_kinds: tuple[str | None, ...]) -> CrisisKind | None:
+    """Return the most urgent STORED verdict among the attached documents.
+
+    Each entry is one document's `openlaw.db.models.Document.crisis_kind`
+    column value, verbatim -- computed once at upload by
+    `openlaw.documents.extract.scan_for_crisis` and read back here, never
+    recomputed from document text (that function's docstring has the cost
+    and injection reasoning). An unrecognised value is logged loudly and
+    contributes nothing; see `crisis_kind_from_value`.
+    """
+    return most_urgent_crisis(crisis_kind_from_value(value) for value in crisis_kinds)
+
+
 def _clear_crisis_and_translate(
     question: str,
     language: str,
     adapter: LLMAdapter,
     registry: ModelRegistry,
     state: str | None,
+    document_crisis_kinds: tuple[str | None, ...],
 ) -> LocalisedAnswer | tuple[str, tuple[ClassifierFailureEvent, ...]]:
-    """Run both crisis checks and, if neither fires, translate the query.
+    """Run every crisis check and, if none fires, translate the query.
 
     The first check is the full two-layer `detect_crisis_with_classifier` on
-    `question` itself. The second, on the translated `english_query`, is the
-    bare regex `detect_crisis` -- see the module docstring for why the
-    classifier is not asked a second time.
+    `question` itself. It is joined by the stored, regex-only verdict of
+    each attached document, and the two are resolved by severity
+    (`most_urgent_crisis`), not by which came first. The third check, on the
+    translated `english_query`, is the bare regex `detect_crisis` -- see the
+    module docstring for why the classifier is not asked a second time, and
+    why the document contributes a stored verdict rather than a fresh call.
 
-    Returns a crisis `LocalisedAnswer` the moment either check fires --
+    Returns a crisis `LocalisedAnswer` the moment any check fires --
     before `translate_query` is even called for the first, and before the
     caller may touch `retriever.retrieve` for either. Otherwise returns
     `(english_query, classifier_failures)`, where `classifier_failures` is
@@ -267,8 +324,11 @@ def _clear_crisis_and_translate(
         question, adapter, registry
     )
     failures = _failures_of(original_detection)
-    if original_detection.crisis is not None:
-        return _crisis_answer(original_detection.crisis, language, "", state, failures)
+    turn_crisis = most_urgent_crisis(
+        (original_detection.crisis, _document_crisis(document_crisis_kinds))
+    )
+    if turn_crisis is not None:
+        return _crisis_answer(turn_crisis, language, "", state, failures)
 
     english_query = translate_query(question, language, adapter, registry)
 
@@ -289,6 +349,7 @@ def answer_in_language(
     glossary: Glossary,
     state: str | None = None,
     language: str | None = None,
+    document_crisis_kinds: tuple[str | None, ...] = (),
 ) -> LocalisedAnswer:
     """Answer `question` in `language`, or in the language it was asked in.
 
@@ -310,14 +371,24 @@ def answer_in_language(
     ANSWER would still come back in English. `language="hi"` fixes the
     second half of that turn.
 
-    See the module docstring for why crisis routing runs twice -- the full
-    classifier check on `question` itself, then a regex-only check on its
-    English translation -- and both times before `retriever.retrieve` is
-    ever called.
+    `document_crisis_kinds` is the `openlaw.db.models.Document.crisis_kind`
+    column value of each document attached to THIS turn, verbatim (`None`
+    for a document the upload-time scan cleared). This function is called
+    once per turn, so passing it on every turn -- not only the turn that
+    uploaded -- is what makes a document's verdict outlive its upload. It
+    carries stored verdicts and never document text: nothing here can
+    re-scan, or re-classify, a document per turn.
+
+    See the module docstring for why crisis routing runs three checks -- the
+    full classifier check on `question` itself, the stored document
+    verdicts, then a regex-only check on the English translation -- and all
+    of them before `retriever.retrieve` is ever called.
     """
     target = language or detect_language(question)
 
-    cleared = _clear_crisis_and_translate(question, target, adapter, registry, state)
+    cleared = _clear_crisis_and_translate(
+        question, target, adapter, registry, state, document_crisis_kinds
+    )
     if isinstance(cleared, LocalisedAnswer):
         return cleared
     english_query, classifier_failures = cleared

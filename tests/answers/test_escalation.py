@@ -12,9 +12,11 @@ from openlaw.answers.escalation import (
     HallucinationEvent,
     append_events,
     build_hallucination_events,
+    crisis_kind_from_value,
     crisis_response,
     detect_crisis,
     escalation_footer,
+    most_urgent_crisis,
     purge_stale_events,
 )
 from openlaw.answers.schema import Claim
@@ -449,3 +451,71 @@ def test_escalation_footer_cites_the_statutory_basis_for_eligibility() -> None:
 
 def test_escalation_footer_tells_people_how_to_check_eligibility() -> None:
     assert "whether you qualify" in escalation_footer()
+
+
+# --- shared crisis-verdict helpers (Plan 6 Task 10) ------------------------
+#
+# Crisis routing now combines more than one verdict per turn: the question's
+# own (regex, then classifier) and the stored, regex-only verdict of each
+# attached document. Both the severity resolution and the stored-value
+# parsing live here so neither is reimplemented per call site.
+
+
+def test_most_urgent_crisis_returns_none_for_no_verdicts() -> None:
+    assert most_urgent_crisis(()) is None
+    assert most_urgent_crisis((None, None)) is None
+
+
+def test_most_urgent_crisis_prefers_the_more_urgent_verdict() -> None:
+    """Severity order, not argument order: a document revealing self-harm
+    must not be answered with the domestic-violence helpline just because
+    the question matched first."""
+    assert (
+        most_urgent_crisis((CrisisKind.DOMESTIC_VIOLENCE, CrisisKind.SELF_HARM))
+        is CrisisKind.SELF_HARM
+    )
+    assert (
+        most_urgent_crisis((CrisisKind.SELF_HARM, CrisisKind.DOMESTIC_VIOLENCE))
+        is CrisisKind.SELF_HARM
+    )
+
+
+def test_most_urgent_crisis_agrees_with_detect_crisis_on_severity() -> None:
+    """The two must not carry independent severity tables -- a question
+    matching several categories and a turn carrying several verdicts have
+    to resolve the same way."""
+    multi = "my husband beats me and I want to kill myself"
+    assert detect_crisis(multi) is most_urgent_crisis(
+        (CrisisKind.DOMESTIC_VIOLENCE, CrisisKind.SELF_HARM)
+    )
+
+
+def test_crisis_kind_from_value_round_trips_every_kind() -> None:
+    for kind in CrisisKind:
+        assert crisis_kind_from_value(kind.value) is kind
+
+
+def test_crisis_kind_from_value_treats_absent_and_blank_as_no_verdict() -> None:
+    """`Document.crisis_kind` is NULL for a document the scan cleared, and a
+    blank string is the same statement -- neither is an error."""
+    assert crisis_kind_from_value(None) is None
+    assert crisis_kind_from_value("") is None
+
+
+def test_crisis_kind_from_value_logs_loudly_on_an_unrecognised_value(caplog) -> None:
+    """An unrecognised stored verdict is a bug or a corrupted row on a
+    SAFETY field. It must never crash the turn, and must never pass
+    silently either: routing proceeds without it (no category can be
+    fabricated from an unknown string) and an operator watching ordinary
+    logs sees it."""
+    with caplog.at_level("ERROR"):
+        assert crisis_kind_from_value("not_a_crisis_kind") is None
+
+    assert "not_a_crisis_kind" in caplog.text
+
+
+def test_every_crisis_kind_value_fits_the_stored_column() -> None:
+    """`openlaw.db.models.Document.crisis_kind` is `String(32)`; a kind whose
+    value did not fit would be truncated into an unrecognised verdict."""
+    for kind in CrisisKind:
+        assert len(kind.value) <= 32

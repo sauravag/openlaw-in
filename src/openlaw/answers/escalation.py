@@ -35,9 +35,10 @@ and a labelled evaluation dataset produced free by production traffic. See
 """
 
 import json
+import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -46,6 +47,8 @@ from pydantic import BaseModel, ConfigDict
 
 from openlaw.answers.validate import RejectedClaim
 from openlaw.retrieval.context import RetrievalContext
+
+logger = logging.getLogger(__name__)
 
 NALSA_HELPLINE = "15100"
 
@@ -230,6 +233,60 @@ def detect_crisis(text: str) -> CrisisKind | None:
         if any(pattern.search(text) for pattern in _COMPILED[kind]):
             return kind
     return None
+
+
+def most_urgent_crisis(kinds: Iterable[CrisisKind | None]) -> CrisisKind | None:
+    """Return the most urgent of `kinds`, ignoring `None`s; `None` if empty.
+
+    One turn can now produce several verdicts at once -- the question's own
+    (regex, then classifier) and the stored, regex-only verdict of each
+    attached document (Plan 6 Task 10). They are resolved by the SAME
+    `_SEVERITY_ORDER` `detect_crisis` uses, not by argument order, so a
+    document revealing self-harm is never answered with the
+    domestic-violence helpline merely because the question matched first.
+    Kept here, next to that order, so there is only one severity table.
+    """
+    present = {kind for kind in kinds if kind is not None}
+    for kind in _SEVERITY_ORDER:
+        if kind in present:
+            return kind
+    return None
+
+
+#: Every `CrisisKind` by its stored/wire value. Derived from the enum, so it
+#: cannot drift from it. Shared by `crisis_kind_from_value` below and by
+#: `openlaw.answers.crisis_classifier`'s response parsing -- one mapping, not
+#: two that could disagree about what a value means.
+CRISIS_KIND_BY_VALUE: dict[str, CrisisKind] = {kind.value: kind for kind in CrisisKind}
+
+
+def crisis_kind_from_value(value: str | None) -> CrisisKind | None:
+    """Return the `CrisisKind` a stored column value names, or `None`.
+
+    `openlaw.db.models.Document.crisis_kind` holds one of these values, or
+    NULL for a document the upload-time scan cleared; NULL and `""` both
+    mean "no verdict" and are not errors.
+
+    An UNRECOGNISED value is a bug or a corrupted row on a safety field, and
+    is handled the way `openlaw.answers.crisis_classifier` handles a
+    classifier it could not consult: routing proceeds without the verdict --
+    no category can honestly be fabricated from an unknown string, and a
+    guessed one would route a person to the wrong helpline -- but the
+    failure is logged at `ERROR`, never swallowed. Every answer still
+    carries the standard `escalation_footer` regardless.
+    """
+    if not value:
+        return None
+    kind = CRISIS_KIND_BY_VALUE.get(value)
+    if kind is None:
+        logger.error(
+            "unrecognised stored crisis verdict %r; proceeding without it "
+            "(a category cannot be fabricated from an unknown value). "
+            "known values=%s",
+            value,
+            sorted(CRISIS_KIND_BY_VALUE),
+        )
+    return kind
 
 
 class Helpline(BaseModel):
