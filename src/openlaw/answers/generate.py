@@ -67,7 +67,7 @@ decisions** (see task-8-report.md for the full accounting):
   measured case against expansion as a request-path default.
 
 **The context sent to the generator is bounded, by count AND by size.**
-`build_context_message` performs no truncation of its own, so an unbounded
+`build_turn_messages` performs no truncation of its own, so an unbounded
 retrieved set (primary hits plus any graph expansion) combined with a long
 question could exceed the model's context window at runtime.
 `generate_answer` caps the chunks it renders to `MAX_CONTEXT_CHUNKS` *and*
@@ -120,8 +120,9 @@ from openlaw.answers.escalation import (
     crisis_response,
     escalation_footer,
 )
+from openlaw.answers.history import HistoryTurn
 from openlaw.answers.models import LLMAdapter, ModelRegistry, ModelRole
-from openlaw.answers.prompts import SYSTEM_PROMPT, build_context_message
+from openlaw.answers.prompts import SYSTEM_PROMPT, build_turn_messages
 from openlaw.answers.schema import ANSWER_JSON_SCHEMA, DraftAnswer
 from openlaw.answers.validate import (
     ValidatedAnswer,
@@ -131,6 +132,7 @@ from openlaw.answers.validate import (
 )
 from openlaw.config import Settings
 from openlaw.documents import MAX_CARRIED_CHUNKS
+from openlaw.documents.context import EMPTY_DOCUMENT_CONTEXT, DocumentContext
 from openlaw.retrieval.context import RetrievalContext, RetrievedChunk
 from openlaw.retrieval.factory import build_query_embedder
 from openlaw.retrieval.fetch import fetch_chunks_by_id
@@ -252,6 +254,8 @@ def _generate_from_context(
     registry: ModelRegistry,
     footer: str,
     classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
+    document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+    history: tuple[HistoryTurn, ...] = (),
 ) -> AnswerResult:
     """Generate, validate and package one answer, assuming crisis routing has
     already cleared `question`.
@@ -267,12 +271,22 @@ def _generate_from_context(
     `openlaw.answers.crisis_classifier`'s module docstring), but the record
     of it must still reach the caller regardless of how generation itself
     turns out.
+
+    `document_context` and `history` both default to empty, so a caller that
+    does not yet have either (today, both current callers -- `generate_answer`
+    and `openlaw.language.pipeline.answer_in_language`) gets exactly the
+    pre-Task-11 behaviour: no document excerpts, no carried turns. Messages
+    are built with `openlaw.answers.prompts.build_turn_messages`, which
+    orders them stable-oldest-first and the question last for cache
+    stability (see that module's docstring) -- the per-turn SAFETY contract
+    (fencing, claims-only history, exact-id citation checking) is unchanged
+    by that reordering.
     """
     bounded = _bounded_context(question, context)
     completion = adapter.complete(
         model=registry.for_role(ModelRole.GENERATOR),
         system=SYSTEM_PROMPT,
-        messages=[build_context_message(bounded)],
+        messages=build_turn_messages(bounded, document_context, history),
         output_schema=ANSWER_JSON_SCHEMA,
         max_tokens=MAX_ANSWER_TOKENS,
     )
@@ -294,19 +308,18 @@ def _generate_from_context(
         )
 
     return AnswerResult(
-        answer=validate_answer(draft, bounded),
+        answer=validate_answer(draft, bounded, document_context),
         footer=footer,
         events=build_hallucination_events(
             question,
-            # Both namespaces (security review MEDIUM-1). This module shows
-            # the model no document context yet, so `rejected_document_
-            # claims` is called against the empty default -- which means
-            # every document claim a draft contains right now is a
-            # fabrication, and is logged as one. The task that wires a real
-            # `DocumentContext` into generation must pass it here too, or
-            # the check silently inverts into "log every legitimate
-            # document claim".
-            rejected_claims(draft, bounded) + rejected_document_claims(draft),
+            # Both namespaces (security review MEDIUM-1), now against the
+            # real `document_context` this turn actually showed the model --
+            # see the parameter note above. With the default empty context
+            # this is unchanged from before: every document claim a draft
+            # carries is still logged as a fabrication, because nothing was
+            # shown for it to cite.
+            rejected_claims(draft, bounded)
+            + rejected_document_claims(draft, document_context),
             bounded,
         ),
         classifier_failures=classifier_failures,

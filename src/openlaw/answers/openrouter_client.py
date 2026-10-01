@@ -71,13 +71,27 @@ not worth a per-model compatibility cliff on a code path whose failure mode
 is silent. A deployment that wants to spend differently passes `reasoning=`
 to the constructor; nothing else in the pipeline needs to know.
 
-**Prompt caching does not transfer.** The Anthropic path marks the system
-prompt with `cache_control`, so the long system prompt is billed at
-cache-read rates on every question after the first. OpenRouter's
-OpenAI-compatible surface has no equivalent this adapter can set, and faking
-one would be worse than not having it. The cost consequence is real and
-should be budgeted for: the full system prompt is billed at the normal input
-rate on every call, for all three roles.
+**Prompt caching is automatic here, not something this adapter builds.**
+Caching on the Z.AI/GLM route is automatic and needs no `cache_control`;
+cached input bills at roughly 0.2x with no write cost. What the
+OpenAI-compatible surface lacks is a way to place a breakpoint -- so the
+cache is earned by prefix stability (`openlaw.answers.prompts.
+build_turn_messages`) rather than declared. The figure is read back from
+`usage.prompt_tokens_details.cached_tokens` and `usage.cache_discount`, so
+it is measured, not assumed -- see `_cached_prompt_tokens` and the
+`logger.info` line in `parse_response` below, which is how a deployment
+answers "is the cache hitting?" with a number rather than a guess.
+
+An earlier version of this docstring asserted that OpenRouter caching "does
+not transfer" and told operators to budget the full system prompt at the
+normal input rate on every call. That was wrong for the model this
+deployment actually routes to, and has been removed rather than softened:
+a true fact belongs here, not a hedge on a false one. What remains true
+and worth repeating is that retrieved corpus excerpts and document
+excerpts are NOT cacheable -- they differ every turn by construction (see
+`openlaw.answers.prompts`'s module docstring) -- so the achievable hit rate
+rises with conversation length (more stable history) and never reaches
+100% (the question and the fresh retrieval never cache).
 
 **Failure direction: closed, never open.** Nothing here ever invents text. A
 refusal (`message.refusal`, or `finish_reason == "content_filter"`) returns
@@ -121,12 +135,16 @@ DEFAULT_REASONING: dict[str, Any] = {"effort": "low"}
 
 #: `usage` fields worth carrying into `Completion.raw` for downstream cost
 #: metering. `cost` is OpenRouter's own computed figure for the call, and the
-#: cheapest available source of truth for spend.
+#: cheapest available source of truth for spend. `cache_discount` is the
+#: amount the cache hit saved on this call -- present only when OpenRouter
+#: actually applied a cache discount, so its mere presence is itself a
+#: cache-hit signal independent of `cached_prompt_tokens` below.
 _USAGE_FIELDS: tuple[str, ...] = (
     "prompt_tokens",
     "completion_tokens",
     "total_tokens",
     "cost",
+    "cache_discount",
 )
 
 #: OpenAI-compatible `finish_reason` values mapped onto the vocabulary the
@@ -215,6 +233,26 @@ def build_request(
     return request
 
 
+def _cached_prompt_tokens(usage: dict[str, Any]) -> int | None:
+    """Return `usage["prompt_tokens_details"]["cached_tokens"]` when present,
+    else `None`.
+
+    Absent is NOT zero: a provider that does not report caching for this
+    call omits the field entirely, and reporting that as a measured 0% hit
+    rate would be a lie about a measurement we did not make -- the exact
+    error the old "caching does not transfer" docstring made, just moved
+    from prose into data. Defensive against a malformed `usage` (not a
+    dict), a malformed `prompt_tokens_details` (not a dict), or a
+    non-integer `cached_tokens`: any of those degrade to `None`, never a
+    raise.
+    """
+    details = usage.get("prompt_tokens_details")
+    if not isinstance(details, dict):
+        return None
+    cached = details.get("cached_tokens")
+    return cached if isinstance(cached, int) else None
+
+
 def _usage_raw(payload: dict[str, Any], requested_model: str) -> dict[str, Any]:
     """Return per-call token usage plus the model that actually served the
     request, for `Completion.raw` -- the field quota metering reads.
@@ -223,6 +261,11 @@ def _usage_raw(payload: dict[str, Any], requested_model: str) -> dict[str, Any]:
     actually used in `model`, which can differ from what was requested (a
     `:nitro`/`:floor` variant, or a fallback route). Cost tracking must key
     off what ran.
+
+    `cached_prompt_tokens` (from `_cached_prompt_tokens`) is added alongside
+    the `_USAGE_FIELDS` values only when the provider actually reported it --
+    an absent `prompt_tokens_details` never fabricates a `0`, for the same
+    reason `_cached_prompt_tokens` itself never does.
     """
     raw: dict[str, Any] = {"model": payload.get("model") or requested_model}
     usage = payload.get("usage")
@@ -230,9 +273,30 @@ def _usage_raw(payload: dict[str, Any], requested_model: str) -> dict[str, Any]:
         values = {
             field: usage[field] for field in _USAGE_FIELDS if usage.get(field) is not None
         }
+        cached = _cached_prompt_tokens(usage)
+        if cached is not None:
+            values["cached_prompt_tokens"] = cached
         if values:
             raw["usage"] = values
     return raw
+
+
+def _log_usage(raw: dict[str, Any]) -> None:
+    """Log one line of measured per-call usage, so a deployment can answer
+    "is the cache hitting?" from logs, with a number -- see the module
+    docstring. `usage` may be entirely absent (a malformed payload); every
+    field read here degrades to `None` rather than raising.
+    """
+    usage = raw.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    logger.info(
+        "openrouter usage model=%s prompt=%s cached=%s completion=%s cost=%s",
+        raw.get("model"),
+        usage.get("prompt_tokens"),
+        usage.get("cached_prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("cost"),
+    )
 
 
 def _error_text(error: Any) -> str:
@@ -279,8 +343,13 @@ def parse_response(payload: dict[str, Any], requested_model: str) -> Completion:
     unanswerable. Model output that is merely *wrong* (malformed or
     schema-violating JSON) is passed through verbatim, so the existing
     `DraftAnswer.from_json` rejection still does that job.
+
+    Logs one usage line (`_log_usage`) on every call, regardless of which
+    path below the call takes -- a refusal or an error still consumed
+    prompt tokens, and still belongs in the cache-hit-rate record.
     """
     raw = _usage_raw(payload, requested_model)
+    _log_usage(raw)
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         logger.error(

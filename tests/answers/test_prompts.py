@@ -1,8 +1,14 @@
+import json
+
 from openlaw.answers.history import (
     HISTORY_QUESTION_FENCE_CLOSE,
     HISTORY_QUESTION_FENCE_OPEN,
+    HistoryTurn,
 )
-from openlaw.answers.prompts import SYSTEM_PROMPT, build_context_message
+from openlaw.answers.prompts import SYSTEM_PROMPT, build_context_message, build_turn_messages
+from openlaw.answers.schema import Claim
+from openlaw.documents.context import DocumentContext, DocumentExcerpt
+from openlaw.documents.fence import DOCUMENT_FENCE_OPEN
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
 
 
@@ -20,6 +26,39 @@ def _context() -> RetrievalContext:
             ),
         ),
     )
+
+
+def _document_context() -> DocumentContext:
+    return DocumentContext(
+        excerpts=(
+            DocumentExcerpt(
+                excerpt_id="doc:lease:1",
+                document_id="lease",
+                filename="lease.pdf",
+                page_number=1,
+                text="Rent is due on the 1st of each month.",
+            ),
+        )
+    )
+
+
+def _history() -> tuple[HistoryTurn, ...]:
+    return (
+        HistoryTurn(
+            question="what does the tenancy act say about deposits",
+            claims=(
+                Claim(
+                    text="A deposit must be refunded within one month.",
+                    chunk_ids=("IND_central_1_12",),
+                ),
+            ),
+            language="en",
+        ),
+    )
+
+
+def _text_of(message: dict) -> str:
+    return message["content"][0]["text"]
 
 
 def test_system_prompt_requires_chunk_ids_and_a_sufficiency_flag() -> None:
@@ -88,24 +127,33 @@ def test_system_prompt_contains_no_per_turn_content() -> None:
     assert "landlord" not in SYSTEM_PROMPT.lower()
 
 
+# --- build_context_message: the excerpt-rendering half only ----------------
+#
+# The question moved out of this message in Task 11 (see
+# `test_question_is_the_last_message` below): rendering it here put the most
+# variable bytes of the whole request first, ahead of every excerpt.
+
+
 def test_context_message_is_a_user_turn() -> None:
     assert build_context_message(_context())["role"] == "user"
 
 
 def test_context_message_labels_each_chunk_with_its_id() -> None:
     """The model can only cite ids it can see."""
-    text = build_context_message(_context())["content"][0]["text"]
+    text = _text_of(build_context_message(_context()))
     assert "IND_central_1_12" in text
 
 
 def test_context_message_includes_the_chunk_text() -> None:
-    text = build_context_message(_context())["content"][0]["text"]
+    text = _text_of(build_context_message(_context()))
     assert "refund the deposit within one month" in text
 
 
-def test_context_message_includes_the_question() -> None:
-    text = build_context_message(_context())["content"][0]["text"]
-    assert "my landlord kept my deposit" in text
+def test_context_message_does_not_include_the_question() -> None:
+    """The question is rendered separately and LAST by `build_turn_messages`
+    -- see the module docstring's cache-ordering rationale."""
+    text = _text_of(build_context_message(_context()))
+    assert "my landlord kept my deposit" not in text
 
 
 def test_context_message_carries_no_cache_control() -> None:
@@ -117,4 +165,76 @@ def test_context_message_carries_no_cache_control() -> None:
 def test_context_message_handles_an_empty_context() -> None:
     message = build_context_message(RetrievalContext(query="q", chunks=()))
     assert message["role"] == "user"
-    assert "no source excerpts" in message["content"][0]["text"]
+    assert "no source excerpts" in _text_of(message)
+
+
+# --- build_turn_messages: cache-friendly ordering ---------------------------
+
+
+def test_excerpt_rendering_is_unchanged_for_a_single_turn_english_question() -> None:
+    """Regression against the pre-Task-11 excerpt block itself: only its
+    position in the message list changed, not its content."""
+    messages = build_turn_messages(_context())
+    excerpt_text = _text_of(messages[0])
+
+    assert "Source excerpts:" in excerpt_text
+    assert "IND_central_1_12" in excerpt_text
+    assert "refund the deposit within one month" in excerpt_text
+    assert "Question:" not in excerpt_text
+
+
+def test_question_is_the_last_message() -> None:
+    messages = build_turn_messages(_context(), _document_context(), _history())
+
+    last = messages[-1]
+    assert last["role"] == "user"
+    assert _text_of(last) == "Question: my landlord kept my deposit"
+    for message in messages[:-1]:
+        assert "my landlord kept my deposit" not in _text_of(message)
+
+
+def test_document_excerpts_are_fenced_and_follow_the_corpus_excerpts() -> None:
+    messages = build_turn_messages(_context(), _document_context())
+
+    # No history in this call, so index 0 is the corpus-excerpt message and
+    # index 1 is the document-excerpt message, with the question last.
+    assert "Source excerpts:" in _text_of(messages[0])
+    document_text = _text_of(messages[1])
+    assert DOCUMENT_FENCE_OPEN.format(excerpt_id="doc:lease:1", page=1) in document_text
+    assert "Rent is due on the 1st of each month." in document_text
+    assert messages[-1] is messages[2]
+
+
+def test_history_comes_before_excerpts_and_the_question() -> None:
+    messages = build_turn_messages(_context(), history=_history())
+
+    # One history turn renders as a (user, assistant) pair, then the corpus
+    # excerpts, then the question -- four messages in total.
+    assert len(messages) == 4
+    assert messages[0]["role"] == "user"
+    assert HISTORY_QUESTION_FENCE_OPEN in _text_of(messages[0])
+    assert messages[1]["role"] == "assistant"
+    assert "Source excerpts:" in _text_of(messages[2])
+    assert _text_of(messages[3]) == "Question: my landlord kept my deposit"
+
+
+def test_prefix_is_byte_stable_across_two_questions_in_one_conversation() -> None:
+    """Turn 2 and turn 3 of one conversation, same history and retrieved
+    chunks, different questions: everything but the final message must be
+    byte-identical -- that stable run is what an automatic cache can match."""
+    history = _history()
+    chunks = _context().chunks
+
+    turn_two = build_turn_messages(
+        RetrievalContext(query="can my landlord keep the whole deposit", chunks=chunks),
+        _document_context(),
+        history,
+    )
+    turn_three = build_turn_messages(
+        RetrievalContext(query="how long does the landlord have to pay it back", chunks=chunks),
+        _document_context(),
+        history,
+    )
+
+    assert json.dumps(turn_two[:-1]) == json.dumps(turn_three[:-1])
+    assert turn_two[-1] != turn_three[-1]

@@ -30,6 +30,7 @@ from openlaw.answers.openrouter_client import (
     OpenRouterError,
     build_request,
 )
+from openlaw.answers.prompts import SYSTEM_PROMPT
 from openlaw.answers.schema import ANSWER_JSON_SCHEMA
 from openlaw.config import get_settings
 from openlaw.language.translate import translate_query
@@ -232,6 +233,120 @@ def test_completion_carries_usage_and_the_serving_model_in_raw() -> None:
         "total_tokens": 150,
         "cost": 0.000033,
     }
+
+
+# --- Task 12: measured cache-hit metrics, never assumed ---------------------
+
+
+def test_cached_prompt_tokens_surfaces_when_the_provider_reports_it() -> None:
+    """A real cache hit is reported under `prompt_tokens_details.cached_tokens`
+    (the OpenRouter equivalent of Anthropic's `cache_read_input_tokens`,
+    per spec #8.4) and must reach `Completion.raw` so it is observable."""
+    adapter, _ = _adapter(
+        [
+            _chat(
+                "ok",
+                usage={
+                    "prompt_tokens": 1200,
+                    "completion_tokens": 30,
+                    "total_tokens": 1230,
+                    "cost": 0.0003,
+                    "prompt_tokens_details": {"cached_tokens": 900},
+                },
+            )
+        ]
+    )
+
+    completion = adapter.complete(MODEL, "sys", [], None, 64)
+
+    assert completion.raw["usage"]["cached_prompt_tokens"] == 900
+
+
+def test_cached_prompt_tokens_is_absent_not_zero_when_the_provider_omits_it() -> None:
+    """Absent is NOT zero: a response with no `prompt_tokens_details` at all
+    made no claim about caching one way or the other, so reporting a 0% hit
+    rate for it would be a measurement we did not make."""
+    adapter, _ = _adapter(
+        [_chat("ok", usage={"prompt_tokens": 1200, "completion_tokens": 30})]
+    )
+
+    completion = adapter.complete(MODEL, "sys", [], None, 64)
+
+    assert "cached_prompt_tokens" not in completion.raw["usage"]
+
+
+def test_cache_discount_is_carried_when_present() -> None:
+    adapter, _ = _adapter(
+        [
+            _chat(
+                "ok",
+                usage={
+                    "prompt_tokens": 1200,
+                    "completion_tokens": 30,
+                    "cache_discount": 0.00018,
+                },
+            )
+        ]
+    )
+
+    completion = adapter.complete(MODEL, "sys", [], None, 64)
+
+    assert completion.raw["usage"]["cache_discount"] == 0.00018
+
+
+@pytest.mark.parametrize("malformed_usage", ["not-a-dict", None])
+def test_a_malformed_usage_degrades_to_no_usage_data_without_raising(
+    malformed_usage: Any,
+) -> None:
+    adapter, _ = _adapter([_chat("ok", usage=malformed_usage)])
+
+    completion = adapter.complete(MODEL, "sys", [], None, 64)
+
+    assert completion.text == "ok"
+    assert "usage" not in completion.raw
+
+
+def test_a_malformed_prompt_tokens_details_degrades_to_no_cached_count() -> None:
+    adapter, _ = _adapter(
+        [
+            _chat(
+                "ok",
+                usage={"prompt_tokens": 1200, "prompt_tokens_details": "not-a-dict"},
+            )
+        ]
+    )
+
+    completion = adapter.complete(MODEL, "sys", [], None, 64)
+
+    assert "cached_prompt_tokens" not in completion.raw["usage"]
+
+
+def test_each_call_logs_one_usage_line_with_the_cache_figure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """How a deployment answers "is the cache hitting?" from logs, with a
+    number, without reading `Completion.raw` directly."""
+    adapter, _ = _adapter(
+        [
+            _chat(
+                "ok",
+                usage={
+                    "prompt_tokens": 1200,
+                    "completion_tokens": 30,
+                    "prompt_tokens_details": {"cached_tokens": 900},
+                },
+            )
+        ]
+    )
+
+    with caplog.at_level("INFO", logger="openlaw.answers.openrouter_client"):
+        adapter.complete(MODEL, "sys", [], None, 64)
+
+    [record] = [r for r in caplog.records if "openrouter usage" in r.message]
+    assert f"model={MODEL}" in record.message
+    assert "prompt=1200" in record.message
+    assert "cached=900" in record.message
+    assert "completion=30" in record.message
 
 
 def test_raw_falls_back_to_the_requested_model_when_the_payload_omits_one() -> None:
@@ -479,6 +594,44 @@ def test_the_translator_works_through_this_adapter() -> None:
 
 
 # --- live service -----------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_a_second_identical_prefix_call_hits_the_automatic_cache() -> None:
+    """Prompt caching on the Z.AI/GLM route is automatic -- there is no
+    `cache_control` breakpoint to set -- so the only way to verify it exists
+    at all is to call twice with byte-identical content and read back the
+    SECOND call's usage. Run manually (not in CI, per this module's existing
+    `@pytest.mark.integration` convention): cache engagement depends on
+    OpenRouter's own infrastructure and timing, which this project does not
+    control and must not assert on every push. Skips cleanly with no key
+    configured.
+
+    Uses the real, long `SYSTEM_PROMPT` as the stable prefix precisely
+    because it is the thing `openlaw.answers.prompts`'s module docstring
+    says genuinely caches -- a short, synthetic string might fall under
+    whatever minimum-size threshold the provider applies before caching
+    engages at all, and silently prove nothing.
+    """
+    settings = get_settings()
+    if not settings.openrouter_api_key:
+        pytest.skip("OPENROUTER_API_KEY is not configured")
+
+    adapter = OpenRouterAdapter(api_key=settings.openrouter_api_key)
+    messages = [{"role": "user", "content": "Question: how do I register a company in India?"}]
+
+    first = adapter.complete(
+        model=MODEL, system=SYSTEM_PROMPT, messages=messages, output_schema=None, max_tokens=16
+    )
+    second = adapter.complete(
+        model=MODEL, system=SYSTEM_PROMPT, messages=messages, output_schema=None, max_tokens=16
+    )
+
+    assert first.text
+    assert second.text
+    cached = second.raw.get("usage", {}).get("cached_prompt_tokens")
+    assert cached is not None
+    assert cached > 0
 
 
 @pytest.mark.integration

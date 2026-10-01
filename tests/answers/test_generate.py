@@ -516,13 +516,22 @@ def test_rendered_question_uses_the_argument_not_a_divergent_context_query() -> 
     calls `generate_answer` with a different `question` ("q") -- the message
     rendered to the generator must reflect the actual `question` argument,
     since that is also what crisis detection and hallucination logging see
-    for the same turn."""
+    for the same turn.
+
+    The question is now `build_turn_messages`'s final message (Task 11:
+    everything stable precedes it, for cache stability), so it is read from
+    the LAST message, not the first -- see `tests/answers/test_prompts.py`'s
+    `test_question_is_the_last_message` for the ordering itself."""
     adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"])])
     generate_answer("q", _context("a"), adapter, ModelRegistry())
 
-    rendered_text = adapter.calls[-1]["messages"][0]["content"][0]["text"]
+    rendered_messages = adapter.calls[-1]["messages"]
+    rendered_text = rendered_messages[-1]["content"][0]["text"]
     assert "Question: q" in rendered_text
     assert "my landlord kept my deposit" not in rendered_text
+    # And the excerpt block -- the stable part -- still carries no question.
+    excerpt_text = rendered_messages[0]["content"][0]["text"]
+    assert "Question:" not in excerpt_text
 
 
 # --- Requirement 1: the query embedder always comes from the factory ------
