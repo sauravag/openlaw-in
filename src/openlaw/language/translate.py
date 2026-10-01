@@ -61,12 +61,34 @@ English answer to a query that was nonetheless translated for retrieval.
 
 Every failure path degrades to English (or to the original text, for
 queries). An English answer is useful; a mangled one is worse than none.
+
+**Both claim lists are translated, in two separate calls** (Plan 6 Task 13,
+ruling B). `document_claims` -- statements about the person's own uploaded
+paperwork -- used to be DROPPED on every non-English return, so a Hindi
+speaker who attached a lease was told nothing at all about it. They are now
+translated by `DOCUMENT_ANSWER_SYSTEM_PROMPT` and, on any failure of that
+call, degrade to the English document claim rather than to nothing. Every
+one of `translate_answer`'s four returns carries the addendum out --
+including the document-only short-circuit (which is every document-only
+turn, since such a turn is unanswerable by the validator's rule 5) and the
+error fallback; `tests/language/test_translate.py` and
+`tests/language/test_conversation.py` are parametrised over all of them,
+because this project has produced five defects where a property held in
+English and failed in translation.
+
+The two lists go in two separate requests on purpose. A document claim's
+text is the one piece of model prose an injected document can influence
+(`openlaw.answers.validate`'s named residue); putting it in the same prompt
+as the legal claims would let it co-author their translation, which is the
+same co-authorship Task 13's ruling A removes at the generation edge. Legal
+prose and document prose never share a prompt, in either pass or either
+direction.
 """
 
 import json
 
 from openlaw.answers.models import LLMAdapter, ModelRegistry, ModelRole
-from openlaw.answers.schema import Claim
+from openlaw.answers.schema import Claim, DocumentClaim
 from openlaw.answers.validate import ValidatedAnswer
 from openlaw.language.detect import SUPPORTED_LANGUAGES
 from openlaw.language.glossary import Glossary
@@ -109,6 +131,34 @@ Return only a JSON object of the form:
 {{"summary": "...", "claims": [{{"id": 0, "text": "..."}}, ...]}}"""
 
 
+DOCUMENT_ANSWER_SYSTEM_PROMPT = """\
+You translate statements about a person's own uploaded document from English \
+into {language} for an ordinary person with no legal training.
+
+These statements describe what the person's own paperwork says -- a lease, a \
+notice, an FIR copy. They are NOT statements of law, and you must not turn \
+them into any.
+
+Rules:
+- Translate the meaning, not word by word. The reader must be able to act on it.
+- Keep statute names, section numbers, case citations, dates, amounts and \
+names exactly as given.
+- If a statement quotes the document's own words, keep that quoted text in \
+English, exactly as given. You may add your own {language} rendering after \
+the quote, in brackets, clearly as an explanation -- never in place of it.
+- Never invent, add, or remove any content, and never add a statement about \
+what the law is.
+- Each statement you are given carries an "id". Return every statement, each \
+paired with its exact original "id" and its translated "text". Do not add, \
+drop, duplicate, renumber, or invent an "id" -- copy each one exactly as \
+given. You may return them in any order.
+
+{glossary}
+
+Return only a JSON object of the form:
+{{"claims": [{{"id": 0, "text": "..."}}, ...]}}"""
+
+
 def translate_query(
     text: str, language: str, adapter: LLMAdapter, registry: ModelRegistry
 ) -> str:
@@ -137,11 +187,8 @@ def translate_query(
     return completion.text.strip() or text
 
 
-def _parse_translation(
-    payload: str, expected_ids: frozenset[int]
-) -> tuple[str, dict[int, str]] | None:
-    """Return `(summary, text_by_id)` parsed from `payload`, or None on any
-    failure.
+def _text_by_id(items: object, expected_ids: frozenset[int]) -> dict[int, str] | None:
+    """Return `{id: text}` for one translated claim list, or None on failure.
 
     Every claim in the response must carry an `id` from `expected_ids`, and
     every id in `expected_ids` must appear exactly once -- a missing id, an
@@ -156,15 +203,18 @@ def _parse_translation(
     would be text nobody wrote or validated, bound to real `chunk_ids` and
     displayed wearing a real citation.
     This is what lets the caller reassemble translated text by identity
-    rather than by position: `text_by_id` can be looked up by each original
-    claim's own id regardless of what order the response listed claims in.
+    rather than by position: the result can be looked up by each original
+    claim's own id regardless of what order the response listed them in.
+
+    Shared by both claim lists (Task 13, ruling B) so the legal claims and
+    the document addendum are reassembled by exactly the same rules -- the
+    "it held in English and failed in translation" defect class this
+    project has produced five times does not get a sixth door here.
     """
+    seen_ids: list[int] = []
+    text_by_id: dict[int, str] = {}
     try:
-        translated = json.loads(payload)
-        summary = str(translated["summary"])
-        seen_ids: list[int] = []
-        text_by_id: dict[int, str] = {}
-        for item in translated["claims"]:
+        for item in items:  # type: ignore[union-attr]
             claim_id = int(item["id"])
             text = item["text"]
             if not isinstance(text, str) or not text.strip():
@@ -179,70 +229,133 @@ def _parse_translation(
     if set(seen_ids) != expected_ids:
         return None  # a missing or invented id -- cannot fully reassemble
 
-    return summary, text_by_id
+    return text_by_id
 
 
-def _without_document_claims(answer: ValidatedAnswer) -> ValidatedAnswer:
-    """Return `answer` with its document addendum removed.
+def _parse_translation(
+    payload: str, expected_ids: frozenset[int]
+) -> tuple[str, dict[int, str]] | None:
+    """Return `(summary, text_by_id)` for the LEGAL claim list, or None."""
+    try:
+        translated = json.loads(payload)
+        summary = str(translated["summary"])
+        items = translated["claims"]
+    except (TypeError, KeyError, ValueError):
+        return None
+    text_by_id = _text_by_id(items, expected_ids)
+    return None if text_by_id is None else (summary, text_by_id)
 
-    `ANSWER_SYSTEM_PROMPT` asks the translator for `claims` only, so a
-    document claim has no translated form to reassemble. Carrying the
-    English text onto a non-English answer would put an English sentence
-    about the person's own lease inside an otherwise-Hindi reply -- the
-    defect the final review's H1 fixed on the crisis path. The citations go
-    with the claims: a citation with no claim to support is a pointer to
-    nothing.
 
-    This exists as a function because `translate_answer` has four returns
-    and the drop must happen on all of them that produce a non-English
-    answer -- including the two error returns. The first version of this
-    change applied it on the success path only, which left every
-    document-only turn (zero legal claims by `validate_answer`'s rule 5, so
-    the short-circuit fires) returning English document claims to a Hindi
-    speaker. Returns `answer` itself when there is nothing to drop, so the
-    common case allocates nothing.
+def _parse_document_translation(
+    payload: str, expected_ids: frozenset[int]
+) -> dict[int, str] | None:
+    """Return `{id: text}` for the DOCUMENT claim list, or None.
+
+    The document addendum has no summary -- there is deliberately no
+    document-flavoured equivalent of `unverified_summary` anywhere in the
+    pipeline -- so this parse requires only the `claims` array and never
+    rejects a reply for omitting prose nobody may render.
     """
-    if not answer.document_claims and not answer.document_citations:
-        return answer
-    return answer.model_copy(update={"document_claims": (), "document_citations": ()})
+    try:
+        items = json.loads(payload)["claims"]
+    except (TypeError, KeyError, ValueError):
+        return None
+    return _text_by_id(items, expected_ids)
 
 
-def translate_answer(
+def _claim_payload(claims: tuple[DocumentClaim, ...]) -> str:
+    """Render the document claims as the id-tagged request body."""
+    return json.dumps(
+        {
+            "claims": [
+                {"id": index, "text": claim.text} for index, claim in enumerate(claims)
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def _translated_document_claims(
     answer: ValidatedAnswer,
     language: str,
     adapter: LLMAdapter,
     registry: ModelRegistry,
     glossary: Glossary,
-) -> ValidatedAnswer:
-    """Translate a validated answer into `language`.
+) -> tuple[DocumentClaim, ...]:
+    """Return `answer.document_claims`, translated into `language`.
 
-    Only `unverified_summary` and each claim's `text` are ever sent to the
-    model as translatable prose. `claims[].chunk_ids`, `sources` (including
-    every `source_url`), `dropped` and `is_answerable` are copied onto the
-    result verbatim -- translation runs strictly after validation
-    (`openlaw.answers.validate.validate_answer`) and has no path to alter
-    which sources an answer cites.
+    **This never returns fewer claims than it was given** (Task 13, ruling
+    B). A failure -- a refusal, malformed JSON, or ids that do not match the
+    ids sent -- degrades to the ENGLISH document claim, never to nothing.
+    Dropping them was the previous behaviour and it meant a Hindi speaker
+    with an uploaded lease was told nothing at all about their own
+    paperwork; an English sentence they can have transliterated or read
+    with help is strictly better than silence about a document only they
+    hold.
 
-    Each claim is tagged with a stable `id` (its index into `answer.claims`)
-    and reassembled by that id, not by its position in the response -- see
-    the module docstring for why binding by position alone would let a
-    reordering translator attach translated text to the wrong `chunk_ids`.
-    Any failure -- a refusal, malformed JSON, or a response whose ids don't
-    exactly match the ids sent (missing, invented, or duplicated) -- returns
-    the English `answer` unchanged: a mangled translation is worse than none.
+    Its own call, separate from the legal claims', and that separation is
+    structural rather than tidy: a document claim's text is the one piece
+    of model prose an injected document can influence
+    (`openlaw.answers.validate`'s named residue). Sending it in the same
+    request as the legal claims would put attacker-influenced words back
+    beside the law's -- re-opening, at the translation edge, exactly the
+    co-authorship ruling A closes at the generation edge. The two never
+    share a prompt in either pass or either direction.
 
-    A no-op when `language` is English. When the answer has no claims there
-    is nothing to translate either (an unanswerable result carries no claims
-    and a `None` summary) -- but that return, and the failure return below,
-    still strip the document addendum, because a non-English answer must
-    never carry untranslated English prose out of this function. See
-    `_without_document_claims`; an English answer keeps its addendum, since
-    nothing about it needed translating.
+    `excerpt_ids` are copied verbatim and never sent as translatable prose,
+    exactly as `chunk_ids` are on the legal path.
     """
-    if language == "en":
-        return answer
+    if not answer.document_claims:
+        return ()
+
+    system = DOCUMENT_ANSWER_SYSTEM_PROMPT.format(
+        language=SUPPORTED_LANGUAGES.get(language, language),
+        glossary=glossary.instruction_for(language),
+    )
+    completion = adapter.complete(
+        model=registry.for_role(ModelRole.TRANSLATOR, language=language),
+        system=system,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _claim_payload(answer.document_claims)}
+                ],
+            }
+        ],
+        output_schema=None,
+        max_tokens=MAX_TRANSLATION_TOKENS,
+    )
+    text_by_id = _parse_document_translation(
+        completion.text, frozenset(range(len(answer.document_claims)))
+    )
+    if text_by_id is None:
+        return answer.document_claims
+    return tuple(
+        DocumentClaim(text=text_by_id[index], excerpt_ids=claim.excerpt_ids)
+        for index, claim in enumerate(answer.document_claims)
+    )
+
+
+def _translated_legal_claims(
+    answer: ValidatedAnswer,
+    language: str,
+    adapter: LLMAdapter,
+    registry: ModelRegistry,
+    glossary: Glossary,
+) -> tuple[str, tuple[Claim, ...]] | None:
+    """Return `(summary, claims)` translated into `language`, or None.
+
+    None means "keep the English legal half": either there was nothing to
+    translate (an answer with no claims -- which is every document-only
+    turn, since surviving document claims never make an answer answerable)
+    or the translation failed and a mangled one is worse than none. The
+    caller distinguishes neither, because the outcome is the same.
+
+    `chunk_ids` are copied verbatim and never sent as translatable prose.
+    """
     if not answer.claims:
-        return _without_document_claims(answer)
+        return None
 
     system = ANSWER_SYSTEM_PROMPT.format(
         language=SUPPORTED_LANGUAGES.get(language, language),
@@ -258,7 +371,6 @@ def translate_answer(
         },
         ensure_ascii=False,
     )
-
     completion = adapter.complete(
         model=registry.for_role(ModelRole.TRANSLATOR, language=language),
         system=system,
@@ -267,16 +379,66 @@ def translate_answer(
         max_tokens=MAX_TRANSLATION_TOKENS,
     )
 
-    expected_ids = frozenset(range(len(answer.claims)))
-    parsed = _parse_translation(completion.text, expected_ids)
+    parsed = _parse_translation(completion.text, frozenset(range(len(answer.claims))))
     if parsed is None:
-        # The English claims DO ride along here, deliberately -- "every
-        # failure path degrades to English", see the module docstring. The
-        # document addendum does not: an English legal answer is useful to a
-        # Hindi reader, an English sentence quoting their own lease back at
-        # them is the H1 defect.
-        return _without_document_claims(answer)
+        return None
     summary, text_by_id = parsed
+    return summary, tuple(
+        Claim(text=text_by_id[index], chunk_ids=claim.chunk_ids)
+        for index, claim in enumerate(answer.claims)
+    )
+
+
+def translate_answer(
+    answer: ValidatedAnswer,
+    language: str,
+    adapter: LLMAdapter,
+    registry: ModelRegistry,
+    glossary: Glossary,
+) -> ValidatedAnswer:
+    """Translate a validated answer -- BOTH claim lists -- into `language`.
+
+    Only `unverified_summary` and each claim's `text` are ever sent to the
+    model as translatable prose. `claims[].chunk_ids`,
+    `document_claims[].excerpt_ids`, `sources` (including every
+    `source_url`), `document_citations`, `dropped` and `is_answerable` are
+    copied onto the result verbatim -- translation runs strictly after
+    validation (`openlaw.answers.validate.validate_answer`) and has no path
+    to alter which sources an answer cites.
+
+    Each claim is tagged with a stable `id` (its index into its own list)
+    and reassembled by that id, not by its position in the response -- see
+    the module docstring for why binding by position alone would let a
+    reordering translator attach translated text to the wrong ids.
+
+    **Both lists survive every return path** (Plan 6 Task 13, ruling B).
+    The two halves are translated by two independent calls -- legal first,
+    then the document addendum -- and each degrades on its own: a failure
+    on either side keeps that side's ENGLISH text and never discards it.
+    Three returns leave this function (the English no-op, the
+    keep-English-claims path, and the success path) and every one of them
+    carries the document addendum out. The earlier behaviour, dropping the
+    addendum on every non-English path, left a Hindi speaker with an
+    uploaded lease hearing nothing at all about their own paperwork; the H1
+    concern it came from -- an English sentence inside a Hindi reply -- is
+    now handled by translating that sentence rather than deleting it.
+
+    Two calls rather than one is also structural, not incidental: a
+    document claim's text is the one piece of model prose an injected
+    document can influence, and it must not share a prompt with the legal
+    claims whose translation it could otherwise steer. See
+    `_translated_document_claims`.
+    """
+    if language == "en":
+        return answer
+
+    legal = _translated_legal_claims(answer, language, adapter, registry, glossary)
+    documents = _translated_document_claims(
+        answer, language, adapter, registry, glossary
+    )
+    if legal is None:
+        return answer.model_copy(update={"document_claims": documents})
+    summary, claims = legal
 
     return ValidatedAnswer(
         # Final review, H2: `unverified_summary` must stay `None` whenever
@@ -284,27 +446,15 @@ def translate_answer(
         # why a careless render depends on that invariant holding. A draft
         # with surviving claims but `sufficient=false` (`validate_answer`)
         # produces exactly that combination: `is_answerable=False` with a
-        # non-empty `claims`, which does NOT hit the `not answer.claims`
-        # short-circuit above, so `summary` would otherwise reach this
-        # constructor unconditionally and reintroduce unchecked model prose
-        # on a not-answerable answer -- but only on the Hindi path, since the
-        # English `answer` returned by `validate_answer` already enforces it.
+        # non-empty `claims`, so `summary` would otherwise reach this
+        # constructor and reintroduce unchecked model prose on a
+        # not-answerable answer -- but only on the non-English path, since
+        # the English `answer` from `validate_answer` already enforces it.
         unverified_summary=summary if answer.is_answerable else None,
-        claims=tuple(
-            Claim(text=text_by_id[index], chunk_ids=claim.chunk_ids)
-            for index, claim in enumerate(answer.claims)
-        ),
+        claims=claims,
         sources=answer.sources,
-        # Dropped here as on every other non-English return -- see
-        # `_without_document_claims` for why. The test named
-        # "no return path leaves english document claims in a hindi answer"
-        # is parametrised over all four returns, so removing this line
-        # fails on its own. Extending the translator contract to carry both
-        # lists is a prerequisite for documents on the non-English path,
-        # and belongs with the task that wires generation to a
-        # `DocumentContext`.
-        document_claims=(),
-        document_citations=(),
+        document_claims=documents,
+        document_citations=answer.document_citations,
         dropped=answer.dropped,
         is_answerable=answer.is_answerable,
     )

@@ -37,9 +37,12 @@ from openlaw.answers.generate import (
     build_retrieval_context,
     generate_answer,
 )
+from openlaw.answers.history import HistoryTurn
 from openlaw.answers.models import Completion, ModelRegistry, ModelRole, StubAdapter
+from openlaw.answers.schema import Claim
 from openlaw.config import Settings
 from openlaw.documents import MAX_CARRIED_CHUNKS
+from openlaw.documents.context import DocumentContext, DocumentExcerpt
 from openlaw.index.upsert import point_id
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
 from openlaw.retrieval.query import StubQueryEmbedder
@@ -1122,3 +1125,157 @@ def test_a_legitimate_turn_logs_no_document_event() -> None:
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
 
     assert result.events == ()
+
+
+# --- answer_question threads history and documents (Plan 6 Task 13) --------
+#
+# Task 11 added `document_context`/`history` to the private
+# `_generate_from_context` without threading them through the public entry
+# points, so neither was reachable in production. These pin the wiring: the
+# carried ids a conversation produces reach the re-fetch, and an attached
+# document reaches the SECOND pass and only the second pass.
+
+
+def _document_context() -> DocumentContext:
+    return DocumentContext(
+        excerpts=(
+            DocumentExcerpt(
+                excerpt_id="doc:lease:p1:0",
+                document_id="lease",
+                filename="lease.pdf",
+                page_number=1,
+                text="The tenancy runs for eleven months.",
+            ),
+        )
+    )
+
+
+def _history() -> tuple[HistoryTurn, ...]:
+    return (
+        HistoryTurn(
+            question="can my landlord keep my deposit",
+            claims=(Claim(text="A refund is required.", chunk_ids=("carried1",)),),
+            language="en",
+        ),
+    )
+
+
+def test_answer_question_refetches_the_history_s_carried_chunks(tmp_path: Path) -> None:
+    client = _FakeCorpusClient(
+        search_points_by_collection={
+            "acts_india_v1": [_point("fresh1")],
+            "sc_judgments_v1": [],
+        },
+        corpus_points_by_collection={
+            "acts_india_v1": [
+                _point("fresh1"),
+                _point("carried1", text="an earlier citation"),
+            ],
+            "sc_judgments_v1": [],
+        },
+    )
+    settings = _settings(
+        qdrant_url=_QDRANT_URL, hallucination_log_path=tmp_path / "h.jsonl"
+    )
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["carried1"])])
+
+    result = answer_question(
+        "q",
+        settings,
+        client,
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+        history=_history(),
+    )
+
+    assert result.answer.claims[0].chunk_ids == ("carried1",)
+    rendered = "\n".join(
+        block["text"]
+        for message in adapter.calls[-1]["messages"]
+        for block in message["content"]
+    )
+    assert "[chunk_id: carried1]" in rendered
+    assert "A refund is required. [supported by: carried1]" in rendered
+
+
+def test_answer_question_runs_the_document_pass_without_showing_it_the_law(
+    tmp_path: Path,
+) -> None:
+    client = _FakeCorpusClient(
+        search_points_by_collection={
+            "acts_india_v1": [_point("fresh1")],
+            "sc_judgments_v1": [],
+        },
+        corpus_points_by_collection={
+            "acts_india_v1": [_point("fresh1")],
+            "sc_judgments_v1": [],
+        },
+    )
+    settings = _settings(
+        qdrant_url=_QDRANT_URL, hallucination_log_path=tmp_path / "h.jsonl"
+    )
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            _response(["fresh1"]),
+            json.dumps(
+                {
+                    "document_claims": [
+                        {
+                            "text": "Your lease runs eleven months.",
+                            "excerpt_ids": ["doc:lease:p1:0"],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    result = answer_question(
+        "q",
+        settings,
+        client,
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+        document_context=_document_context(),
+    )
+
+    assert result.answer.claims[0].chunk_ids == ("fresh1",)
+    assert result.answer.document_claims[0].text == "Your lease runs eleven months."
+    legal_pass, document_pass = adapter.calls[1], adapter.calls[2]
+    assert "eleven months" not in json.dumps(legal_pass["messages"])
+    assert "A landlord shall refund the deposit." not in json.dumps(
+        document_pass["messages"]
+    )
+
+
+def test_generate_answer_threads_a_document_through_the_second_pass() -> None:
+    adapter = StubAdapter(
+        [
+            _SAFE_CLASSIFIER_RESPONSE,
+            _response(["a"]),
+            json.dumps(
+                {
+                    "document_claims": [
+                        {
+                            "text": "Your lease runs eleven months.",
+                            "excerpt_ids": ["doc:lease:p1:0"],
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+
+    result = generate_answer(
+        "q",
+        _context("a"),
+        adapter,
+        ModelRegistry(),
+        document_context=_document_context(),
+    )
+
+    assert result.answer.claims[0].chunk_ids == ("a",)
+    assert result.answer.document_claims[0].excerpt_ids == ("doc:lease:p1:0",)

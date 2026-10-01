@@ -112,12 +112,21 @@ answerable. The mechanism is the old, documented one (this module checks
 retrieval, never entailment); what Plan 6 changes is its *reachability* —
 before documents, no attacker controlled any input to the prompt.
 
-Nothing in this module can close it, and it is deliberately not patched
-here. The standing ruling is that **legal claims must be generated in a
-pass that never sees document text, with document analysis as a separate
-pass able to emit only document claims** — structural containment, owned by
-the task that assembles the pipeline (Task 13). Until then, treat any turn
-carrying a document as one whose legal claims had an untrusted co-author.
+Nothing in this module can close it, and it is not patched here. It is
+closed one layer up instead, structurally, by Task 13: **legal claims are
+generated in a pass that never sees document text, and document analysis is
+a second pass able to emit only document claims.**
+`openlaw.answers.generate._generate_from_context` — the only function that
+produces `claims` — has no parameter that can carry a document, and
+`openlaw.answers.schema.DocumentDraftAnswer` — the only thing the document
+pass can return — has no field that can carry a legal claim. The two halves
+meet exactly once, in `with_document_answer` below, which copies the
+document pass's addendum onto the legal pass's answer and copies nothing
+else: `claims`, `sources`, `unverified_summary` and `is_answerable` all come
+from the pass that never read the document. The residue named in the
+paragraph above — legal-sounding prose inside a `document_claim`'s own
+`text` — is unchanged and still contained by the four barriers, since no
+check here can read entailment.
 """
 
 import logging
@@ -125,7 +134,12 @@ from typing import TypeVar
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from openlaw.answers.schema import Claim, DocumentClaim, DraftAnswer
+from openlaw.answers.schema import (
+    Claim,
+    DocumentClaim,
+    DocumentDraftAnswer,
+    DraftAnswer,
+)
 from openlaw.documents import DOCUMENT_EXCERPT_PREFIX
 from openlaw.documents.context import EMPTY_DOCUMENT_CONTEXT, DocumentContext
 from openlaw.retrieval.context import ChunkKind, RetrievalContext
@@ -534,7 +548,8 @@ def rejected_claims(
 
 
 def rejected_document_claims(
-    draft: DraftAnswer, document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT
+    draft: DraftAnswer | DocumentDraftAnswer,
+    document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
 ) -> tuple[RejectedClaim, ...]:
     """Return the DOCUMENT claims `validate_answer` refuses, with their text.
 
@@ -543,6 +558,12 @@ def rejected_document_claims(
     a refused legal one — it cited an excerpt nobody showed it — and is
     worth the same diagnosis. Log-only: never give the result to anything
     that renders.
+
+    Accepts either draft, because both passes can produce one: the DOCUMENT
+    pass legitimately (it is the only list it has), and the LEGAL pass only
+    by fabrication — that pass is shown no excerpt at all, so every document
+    claim in its draft cites something nobody showed it and is logged as
+    exactly that.
     """
     _, rejected = _partition_claims(
         draft.document_claims,
@@ -550,3 +571,79 @@ def rejected_document_claims(
         document_namespace=True,
     )
     return rejected
+
+
+class ValidatedDocumentAnswer(BaseModel):
+    """What the DOCUMENT pass produces, after validation (Task 13, ruling A).
+
+    The document half of `ValidatedAnswer`, and deliberately a separate,
+    narrower type rather than a `ValidatedAnswer` with its legal half left
+    empty. It has no `claims`, no `sources`, no `is_answerable` and no
+    `unverified_summary`: the pass that produces it is not allowed to
+    contribute any of them, and a type that could hold them would be a type
+    somebody could later be tempted to fill.
+
+    `dropped` carries ids only, exactly as on `ValidatedAnswer` -- the
+    verbatim text of a refused document claim lives only on the log-only
+    `RejectedClaim`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    document_claims: tuple[DocumentClaim, ...] = ()
+    document_citations: tuple[DocumentCitation, ...] = ()
+    dropped: tuple[DroppedClaim, ...] = ()
+
+
+EMPTY_VALIDATED_DOCUMENT_ANSWER = ValidatedDocumentAnswer()
+
+
+def validate_document_answer(
+    draft: DocumentDraftAnswer, document_context: DocumentContext
+) -> ValidatedDocumentAnswer:
+    """Drop every document claim citing an excerpt absent from this turn.
+
+    Rules 3, 4 and 6 of the module docstring, applied to the document pass's
+    own draft, through the same `_partition_claims` the legal path uses --
+    so there is no second, divergent idea of what a grounded document claim
+    is. Rules 1, 2 and 5 have nothing to check here: this draft type has no
+    `claims` field at all, and `is_answerable` is not this pass's to decide.
+    """
+    kept, _ = _partition_claims(
+        draft.document_claims, document_context.excerpt_ids, document_namespace=True
+    )
+    return ValidatedDocumentAnswer(
+        document_claims=kept,
+        document_citations=_build_document_citations(kept, document_context),
+        dropped=tuple(
+            DroppedClaim(unresolvable_excerpt_ids=claim.unresolvable_excerpt_ids)
+            for claim in rejected_document_claims(draft, document_context)
+        ),
+    )
+
+
+def with_document_answer(
+    answer: ValidatedAnswer, document: ValidatedDocumentAnswer
+) -> ValidatedAnswer:
+    """Return `answer` carrying `document`'s addendum alongside it.
+
+    The one place the two passes' outputs meet, and it is deliberately
+    one-directional: the document pass contributes `document_claims`,
+    `document_citations` and its refusal records, and contributes nothing
+    else. `claims`, `sources`, `unverified_summary` and `is_answerable` are
+    copied off `answer` untouched, so no document-derived content can make a
+    turn answerable, become a `Source`, or acquire a government URL (rule 5,
+    and the "fifth route" the module docstring closes).
+
+    Never mutates either argument; `answer` is returned unchanged when the
+    document pass produced nothing at all.
+    """
+    if document == EMPTY_VALIDATED_DOCUMENT_ANSWER:
+        return answer
+    return answer.model_copy(
+        update={
+            "document_claims": document.document_claims,
+            "document_citations": document.document_citations,
+            "dropped": answer.dropped + document.dropped,
+        }
+    )

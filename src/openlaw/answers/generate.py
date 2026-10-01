@@ -77,6 +77,43 @@ validates the answer against that same bounded set -- a claim cannot be
 credited for citing a chunk that was retrieved but never actually shown to
 the model this turn.
 
+**What gets trimmed first when a turn is saturated**, stated once so nobody
+has to re-derive it from four modules. A full turn carries conversation
+history, chunks carried forward from earlier turns, this turn's own fresh
+retrieval, and document excerpts. They are bounded independently and they
+give way in this order:
+
+1. CARRIED CHUNKS, first and entirely if need be. `build_retrieval_context`
+   merges them in AFTER the fresh hits and caps them at
+   `MAX_CARRIED_CHUNKS`; `_bounded_chunks` then keeps a PREFIX, so the tail
+   -- which is where the carried chunks are -- is what falls off. A claim
+   whose chunk was trimmed is simply not replayed into the prompt
+   (`openlaw.answers.history.build_history_messages` narrows to the ids
+   actually shown), never shown with a dangling id.
+2. HISTORY, oldest turn first, by `MAX_HISTORY_TURNS` then
+   `MAX_HISTORY_CHARS`. Whole turns go, so a question never loses its
+   answer; the newest turn is always kept.
+3. FRESH RETRIEVAL, last, and only once every carried chunk is already
+   gone: the person's new question keeps its own evidence.
+
+DOCUMENT EXCERPTS are not in that contest at all. They are bounded by
+`MAX_DOCUMENT_EXCERPTS`/`MAX_DOCUMENT_CONTEXT_CHARS` at selection time and
+rendered into the OTHER pass's prompt (see below), so they can neither
+crowd out a statute nor be crowded out by one.
+
+**Generation is two passes when a document is attached** (Plan 6 Task 13,
+ruling A). `_generate_from_context` produces `claims` and has no parameter
+able to carry a document; `openlaw.answers.document_analysis
+.analyse_document` produces `document_claims` and has no parameter able to
+carry a chunk. `generate_turn` runs both and merges them through
+`openlaw.answers.validate.with_document_answer`, which contributes the
+document addendum and nothing else -- never a `Source`, never
+`is_answerable`. That structure, not the prompt's instructions, is what
+makes it impossible for text inside an uploaded file to steer a statement
+about the law; `openlaw.answers.validate`'s "fifth route" paragraph records
+the finding this closes. A turn with no document still costs exactly one
+generation call.
+
 **Both event logs a turn can produce are actually written.**
 `answer_question` calls `persist_answer_events`, which appends
 `HallucinationEvent`s and `ClassifierFailureEvent`s to their configured,
@@ -120,7 +157,8 @@ from openlaw.answers.escalation import (
     crisis_response,
     escalation_footer,
 )
-from openlaw.answers.history import HistoryTurn
+from openlaw.answers.document_analysis import analyse_document
+from openlaw.answers.history import HistoryTurn, carried_chunk_ids
 from openlaw.answers.models import LLMAdapter, ModelRegistry, ModelRole
 from openlaw.answers.prompts import SYSTEM_PROMPT, build_turn_messages
 from openlaw.answers.schema import ANSWER_JSON_SCHEMA, DraftAnswer
@@ -129,6 +167,7 @@ from openlaw.answers.validate import (
     rejected_claims,
     rejected_document_claims,
     validate_answer,
+    with_document_answer,
 )
 from openlaw.config import Settings
 from openlaw.documents import MAX_CARRIED_CHUNKS
@@ -254,7 +293,6 @@ def _generate_from_context(
     registry: ModelRegistry,
     footer: str,
     classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
-    document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
     history: tuple[HistoryTurn, ...] = (),
 ) -> AnswerResult:
     """Generate, validate and package one answer, assuming crisis routing has
@@ -272,21 +310,36 @@ def _generate_from_context(
     of it must still reach the caller regardless of how generation itself
     turns out.
 
-    `document_context` and `history` both default to empty, so a caller that
-    does not yet have either (today, both current callers -- `generate_answer`
-    and `openlaw.language.pipeline.answer_in_language`) gets exactly the
-    pre-Task-11 behaviour: no document excerpts, no carried turns. Messages
-    are built with `openlaw.answers.prompts.build_turn_messages`, which
-    orders them stable-oldest-first and the question last for cache
-    stability (see that module's docstring) -- the per-turn SAFETY contract
-    (fencing, claims-only history, exact-id citation checking) is unchanged
-    by that reordering.
+    **This function has no `document_context` parameter, and that absence is
+    the containment for a HIGH security finding** (Plan 6 Task 13, ruling
+    A). It is the only function in the codebase that produces `claims`, and
+    it cannot be handed a document: uploaded text therefore cannot reach the
+    prompt that writes legal assertions, so it cannot steer one under a real,
+    retrieved `chunk_id` -- the route `openlaw.answers.validate`'s "fifth
+    route" paragraph names and cannot itself close. A `document_context`
+    parameter was added here by Task 11 and is deliberately removed again;
+    document analysis is a separate pass
+    (`openlaw.answers.document_analysis.analyse_document`), and the two are
+    assembled by `generate_turn` below. `validate_answer` and
+    `rejected_document_claims` are consequently called with their empty
+    defaults: this pass is shown no excerpt, so any `document_claims` in its
+    draft are fabrications, and they are dropped and logged as exactly that.
+
+    `history` defaults to empty, so a caller without a conversation gets
+    exactly the single-shot behaviour. Messages are built with
+    `openlaw.answers.prompts.build_turn_messages`, which orders them
+    stable-oldest-first and the question last for cache stability (see that
+    module's docstring) -- the per-turn SAFETY contract (fencing,
+    claims-only history, exact-id citation checking) is unchanged by that
+    reordering. Because the document context it passes is empty, history is
+    narrowed to legal claims only: no earlier document claim is replayed
+    into this prompt either.
     """
     bounded = _bounded_context(question, context)
     completion = adapter.complete(
         model=registry.for_role(ModelRole.GENERATOR),
         system=SYSTEM_PROMPT,
-        messages=build_turn_messages(bounded, document_context, history),
+        messages=build_turn_messages(bounded, EMPTY_DOCUMENT_CONTEXT, history),
         output_schema=ANSWER_JSON_SCHEMA,
         max_tokens=MAX_ANSWER_TOKENS,
     )
@@ -308,21 +361,63 @@ def _generate_from_context(
         )
 
     return AnswerResult(
-        answer=validate_answer(draft, bounded, document_context),
+        answer=validate_answer(draft, bounded),
         footer=footer,
         events=build_hallucination_events(
             question,
-            # Both namespaces (security review MEDIUM-1), now against the
-            # real `document_context` this turn actually showed the model --
-            # see the parameter note above. With the default empty context
-            # this is unchanged from before: every document claim a draft
-            # carries is still logged as a fabrication, because nothing was
-            # shown for it to cite.
-            rejected_claims(draft, bounded)
-            + rejected_document_claims(draft, document_context),
+            # Both namespaces (security review MEDIUM-1). The document
+            # namespace is checked against the EMPTY context on purpose --
+            # see the docstring: this pass is shown no excerpt, so a
+            # document claim here cites something nobody showed it and is a
+            # fabrication worth logging, never a claim worth keeping.
+            rejected_claims(draft, bounded) + rejected_document_claims(draft),
             bounded,
         ),
         classifier_failures=classifier_failures,
+    )
+
+
+def generate_turn(
+    question: str,
+    context: RetrievalContext,
+    adapter: LLMAdapter,
+    registry: ModelRegistry,
+    footer: str,
+    classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
+    document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+    history: tuple[HistoryTurn, ...] = (),
+) -> AnswerResult:
+    """Run both generation passes for one turn and assemble their results.
+
+    The LEGAL pass (`_generate_from_context`) runs always and is never shown
+    a document. The DOCUMENT pass
+    (`openlaw.answers.document_analysis.analyse_document`) runs only when
+    excerpts were actually selected, and is never shown a corpus chunk. The
+    two meet exactly once, in
+    `openlaw.answers.validate.with_document_answer`, which copies the
+    document addendum onto the legal answer and copies nothing else -- see
+    ruling A, recorded in both of those modules' docstrings.
+
+    Order matters for one thing only: the legal pass runs first, so a turn
+    whose document analysis fails still carries a complete legal answer.
+    Events from both passes are concatenated, legal first, so one
+    `persist_answer_events` call writes both passes' refusals.
+
+    A turn with no document costs exactly one generation call, as it did
+    before the second pass existed.
+    """
+    result = _generate_from_context(
+        question, context, adapter, registry, footer, classifier_failures, history
+    )
+    if not document_context.excerpts:
+        return result
+
+    analysis = analyse_document(question, document_context, adapter, registry, history)
+    return result.model_copy(
+        update={
+            "answer": with_document_answer(result.answer, analysis.answer),
+            "events": result.events + analysis.events,
+        }
     )
 
 
@@ -381,6 +476,8 @@ def generate_answer(
     adapter: LLMAdapter,
     registry: ModelRegistry,
     state: str | None = None,
+    document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+    history: tuple[HistoryTurn, ...] = (),
 ) -> AnswerResult:
     """Generate, validate and package one answer.
 
@@ -389,14 +486,27 @@ def generate_answer(
     first and short-circuits before `adapter` is ever called for generation.
     A classifier failure does not short-circuit -- it proceeds to generation
     with the failure recorded on the result (see that module's docstring).
+
+    `document_context` and `history` both default to empty, so every
+    existing caller keeps the single-shot, single-pass behaviour. When a
+    document IS attached, generation runs as two passes (`generate_turn`):
+    this function never hands `document_context` to the pass that produces
+    `claims`, because that pass has no parameter able to accept it.
     """
     detection = detect_crisis_with_classifier(question, adapter, registry)
     if detection.crisis is not None:
         return _crisis_result(detection.crisis, state)
 
     footer = escalation_footer(state)
-    return _generate_from_context(
-        question, context, adapter, registry, footer, _failures_of(detection)
+    return generate_turn(
+        question,
+        context,
+        adapter,
+        registry,
+        footer,
+        _failures_of(detection),
+        document_context,
+        history,
     )
 
 
@@ -472,6 +582,8 @@ def answer_question(
     embedder: QueryEmbedder | None = None,
     expand_fn: ExpandFn | None = None,
     state: str | None = None,
+    document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+    history: tuple[HistoryTurn, ...] = (),
 ) -> AnswerResult:
     """The full path from a citizen's question to a verified answer.
 
@@ -482,17 +594,41 @@ def answer_question(
     would be discarded anyway. The check runs exactly once here (not again
     inside generation), since `adapter` and `registry` are already available
     and a question cleared once does not need re-checking.
+
+    `history` and `document_context` both default to empty. When `history`
+    is given, the chunk ids its surviving claims depend on
+    (`openlaw.answers.history.carried_chunk_ids`) are re-fetched into this
+    turn's own retrieval, so "cited implies shown this turn" stays literally
+    true and the validator needs no "cited earlier" branch. When
+    `document_context` is given, generation runs as two passes -- see
+    `generate_turn`.
+
+    This is the ENGLISH entry point; the multilingual one is
+    `openlaw.language.pipeline.answer_in_conversation`, which performs the
+    same assembly around translation.
     """
     detection = detect_crisis_with_classifier(question, adapter, registry)
     if detection.crisis is not None:
         return _crisis_result(detection.crisis, state)
 
     context = build_retrieval_context(
-        question, settings, search_client, embedder, expand_fn
+        question,
+        settings,
+        search_client,
+        embedder,
+        expand_fn,
+        carried_chunk_ids=carried_chunk_ids(history),
     )
     footer = escalation_footer(state)
-    result = _generate_from_context(
-        question, context, adapter, registry, footer, _failures_of(detection)
+    result = generate_turn(
+        question,
+        context,
+        adapter,
+        registry,
+        footer,
+        _failures_of(detection),
+        document_context,
+        history,
     )
     persist_answer_events(result, settings)
     return result

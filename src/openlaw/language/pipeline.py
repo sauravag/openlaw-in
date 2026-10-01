@@ -6,17 +6,21 @@ Order is load-bearing::
     -> crisis-check the ORIGINAL text (regex, then classifier)  [short-circuits]
     -> translate the query to English
     -> crisis-check the TRANSLATED text (regex ONLY)            [short-circuits]
-    -> retrieve
-    -> generate
-    -> VALIDATE
-    -> translate the answer
+    -> retrieve (re-fetching the chunks earlier turns' claims cite)
+    -> generate the LEGAL answer     (never shown the document)
+    -> generate the DOCUMENT addendum (never shown the law; only when
+                                       excerpts were selected)
+    -> VALIDATE both
+    -> translate the answer (both claim lists, in two separate calls)
     -> attach the STORED crisis verdict of every attached document
        (regex-only, computed once at upload, re-read every turn)
        ALONGSIDE the answer -- never instead of it
 
-**This whole order runs on EVERY turn, not only the first.** This function
-is one turn; a conversation is many calls to it, and there is no "already
-checked" branch anywhere below. A person may reveal danger on the fourth
+**This whole order runs on EVERY turn, not only the first.**
+`answer_in_conversation` is one turn; a conversation is many calls to it,
+and there is no "already checked" branch anywhere below. `answer_in_language`
+is that same function with no history and no document attached -- a special
+case, not a second implementation. A person may reveal danger on the fourth
 turn, and the fourth turn gets exactly the same three checks the first one
 did.
 
@@ -114,8 +118,22 @@ own language whichever layer found it (Task 6 fix round, H3), so a verdict
 produced by an English-reading regex still reaches a Hindi speaker in
 Hindi.
 
+**One turn, two generation passes** (Plan 6 Task 13, ruling A). When a
+document is attached, the legal pass and the document pass are separate
+model calls with separate prompts, separate output types and disjoint id
+namespaces: the pass that produces `claims` is never shown document text,
+and the pass that reads the document can emit only `document_claims`. That
+is the containment for the security review's HIGH finding -- injected text
+inside an uploaded file steering a legal claim under a real, retrieved
+`chunk_id` -- and it is structural, not a matter of careful prompting. The
+assembly lives in `openlaw.answers.generate.generate_turn`; both of those
+modules' docstrings carry the reasoning. The ANSWER translation keeps the
+two apart too: `translate_answer` sends the legal claims and the document
+addendum in two separate calls, so document prose never co-authors the
+translation of a legal claim either (`openlaw.language.translate`).
+
 Once both question-side checks pass, generation is handed to
-`openlaw.answers.generate._generate_from_context` rather than the public
+`openlaw.answers.generate.generate_turn` rather than the public
 `generate_answer` -- the same trick `answer_question` uses in that module,
 and for the same reason (see its own docstring): `english_query` has
 already been cleared by the classifier once (on the original text) and by
@@ -204,9 +222,12 @@ from openlaw.answers.escalation import (
     most_urgent_crisis,
     nalsa_helpline,
 )
-from openlaw.answers.generate import _failures_of, _generate_from_context
+from openlaw.answers.generate import _failures_of, generate_turn
+from openlaw.answers.history import HistoryTurn, carried_chunk_ids
 from openlaw.answers.models import LLMAdapter, ModelRegistry
-from openlaw.answers.validate import ValidatedAnswer
+from openlaw.answers.schema import Claim, DocumentClaim
+from openlaw.answers.validate import DocumentCitation, ValidatedAnswer
+from openlaw.documents.context import EMPTY_DOCUMENT_CONTEXT, DocumentContext
 from openlaw.language.detect import detect_language
 from openlaw.language.glossary import Glossary
 from openlaw.language.translate import translate_answer, translate_query
@@ -224,6 +245,31 @@ class Retriever(Protocol):
 
     def retrieve(self, english_query: str) -> RetrievalContext:
         """Return the retrieval context for `english_query`."""
+        ...
+
+
+class ConversationRetriever(Protocol):
+    """Anything that can retrieve for one TURN of a conversation.
+
+    The two-argument sibling of `Retriever`. `carried_chunk_ids` is
+    `openlaw.answers.history.carried_chunk_ids`'s output -- the corpus chunk
+    ids the previous turns' surviving claims depend on -- and an
+    implementation must RE-FETCH them and merge them into this turn's
+    context, exactly as `openlaw.answers.generate.build_retrieval_context`
+    does. Replaying a cached copy from the earlier turn would not do: the
+    point of the re-fetch is that a chunk which has since been re-indexed,
+    or has left the corpus altogether, stops being citable (see
+    `openlaw.retrieval.fetch`). An id that fails to resolve, for any reason,
+    is simply absent -- and a claim that cited it is then not replayed into
+    the prompt at all, which is how "cited implies shown this turn" stays
+    true with no "cited earlier" branch anywhere in the validator.
+    """
+
+    def retrieve(
+        self, english_query: str, carried_chunk_ids: tuple[str, ...]
+    ) -> RetrievalContext:
+        """Return the retrieval context for `english_query`, including the
+        re-fetched `carried_chunk_ids`."""
         ...
 
 
@@ -285,6 +331,32 @@ class LocalisedAnswer(BaseModel):
     helplines: tuple[Helpline, ...] = ()
     events: tuple[HallucinationEvent, ...] = ()
     classifier_failures: tuple[ClassifierFailureEvent, ...] = ()
+    #: This turn's 0-based position in its conversation -- `len(history)`,
+    #: set by `answer_in_conversation` on every return including the crisis
+    #: short-circuits. A single-shot `answer_in_language` turn is turn 0.
+    #: Carried so the caller persisting this turn (Task 14) does not have to
+    #: recount, and so an out-of-order write is detectable.
+    turn_index: int = 0
+
+    @property
+    def document_claims(self) -> tuple[DocumentClaim, ...]:
+        """What the person's own uploaded document says, in `language`.
+
+        A read-only view of `answer.document_claims` rather than a second
+        copy of it: two fields holding the same list is two things that can
+        disagree, and this project has lost a property in translation five
+        times already. Rendering obligation unchanged and inherited from
+        `openlaw.answers.validate.ValidatedAnswer` -- present these as "what
+        your document says", visibly apart from the legal claims, never
+        under a heading that reads as law.
+        """
+        return self.answer.document_claims
+
+    @property
+    def document_citations(self) -> tuple[DocumentCitation, ...]:
+        """The excerpts `document_claims` point at -- filename and page, and
+        deliberately no `source_url`. A read-only view, as above."""
+        return self.answer.document_citations
 
 
 #: The fixed, generation-free answer returned on a crisis short-circuit --
@@ -302,6 +374,7 @@ def _crisis_answer(
     state: str | None,
     classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
     document_crisis: CrisisKind | None = None,
+    turn_index: int = 0,
 ) -> LocalisedAnswer:
     """Return the immediate, generation-free result for a crisis question.
 
@@ -346,6 +419,7 @@ def _crisis_answer(
         footer="\n\n".join(responses),
         helplines=dedupe_helplines(numbers + (nalsa_helpline(language),)),
         classifier_failures=classifier_failures,
+        turn_index=turn_index,
     )
 
 
@@ -397,6 +471,7 @@ def _clear_crisis_and_translate(
     registry: ModelRegistry,
     state: str | None,
     document_crisis: CrisisKind | None,
+    turn_index: int = 0,
 ) -> LocalisedAnswer | tuple[str, tuple[ClassifierFailureEvent, ...]]:
     """Run both question-side crisis checks and, if neither fires, translate.
 
@@ -427,7 +502,13 @@ def _clear_crisis_and_translate(
     failures = _failures_of(original_detection)
     if original_detection.crisis is not None:
         return _crisis_answer(
-            original_detection.crisis, language, "", state, failures, document_crisis
+            original_detection.crisis,
+            language,
+            "",
+            state,
+            failures,
+            document_crisis,
+            turn_index,
         )
 
     english_query = translate_query(question, language, adapter, registry)
@@ -435,10 +516,133 @@ def _clear_crisis_and_translate(
     translated_crisis = detect_crisis(english_query)
     if translated_crisis is not None:
         return _crisis_answer(
-            translated_crisis, language, english_query, state, failures, document_crisis
+            translated_crisis,
+            language,
+            english_query,
+            state,
+            failures,
+            document_crisis,
+            turn_index,
         )
 
     return english_query, failures
+
+
+def answer_in_conversation(
+    question: str,
+    retriever: ConversationRetriever,
+    adapter: LLMAdapter,
+    registry: ModelRegistry,
+    glossary: Glossary,
+    history: tuple[HistoryTurn, ...] = (),
+    document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
+    document_crisis: CrisisKind | None = None,
+    state: str | None = None,
+    language: str | None = None,
+) -> LocalisedAnswer:
+    """Answer ONE turn of a conversation, with documents attached or not.
+
+    This is the whole multilingual pipeline, and `answer_in_language` is a
+    special case of it rather than a parallel implementation: empty
+    history, no document. The order the module docstring fixes is unchanged
+    and runs on every turn -- crisis routing first, on the original text and
+    then on the translation, before `retriever.retrieve` is reached; a
+    question-derived crisis still short-circuits with zero model calls, on
+    turn five exactly as on turn one.
+
+    `history` is the conversation so far, as `HistoryTurn`s -- validated
+    claims and the person's own questions, never model prose
+    (`openlaw.answers.history`). Two things follow from it, both before
+    generation. The chunk ids its surviving claims depend on
+    (`carried_chunk_ids`) are handed to the retriever to RE-FETCH, so a
+    carried citation is shown to the model again this turn like any other
+    chunk and the validator keeps no "cited earlier" branch. And the turns
+    themselves are replayed into the prompt, narrowed to the ids actually
+    shown -- a claim whose chunk did not come back is simply not rendered.
+
+    `document_context` is this turn's selected excerpts
+    (`openlaw.documents.context.select_excerpts`). When it is non-empty,
+    generation runs as TWO passes (`openlaw.answers.generate.generate_turn`):
+    the legal pass, which cannot be handed the document, and the document
+    pass, which cannot be handed the law. That is ruling A, and it is what
+    makes it impossible for text in an uploaded file to steer a statement
+    about the law.
+
+    `document_crisis` is the STORED, upload-time verdict of the attached
+    documents (`openlaw.documents.extract.scan_for_crisis`), already
+    resolved among several documents by the caller or by
+    `answer_in_language`'s `_document_crisis`. Nothing here reads document
+    text to derive it; it rides alongside a normal answer, never instead of
+    one -- see the module docstring.
+
+    `turn_index` on the result is `len(history)`, on every return path
+    including both crisis short-circuits.
+    """
+    target = language or detect_language(question)
+    turn_index = len(history)
+
+    cleared = _clear_crisis_and_translate(
+        question, target, adapter, registry, state, document_crisis, turn_index
+    )
+    if isinstance(cleared, LocalisedAnswer):
+        return cleared
+    english_query, classifier_failures = cleared
+
+    context = retriever.retrieve(english_query, carried_chunk_ids(history))
+    footer = escalation_footer(state, target)
+    result = generate_turn(
+        english_query,
+        context,
+        adapter,
+        registry,
+        footer,
+        classifier_failures,
+        document_context,
+        history,
+    )
+    localised = translate_answer(result.answer, target, adapter, registry, glossary)
+
+    answered = LocalisedAnswer(
+        answer=localised,
+        english_answer=result.answer,
+        language=target,
+        english_query=english_query,
+        crisis=result.crisis,
+        footer=result.footer,
+        # Every footer cites the NALSA number, crisis or not (Task 6 fix
+        # round, C2) -- structured here so the frontend never has to
+        # pattern-match it out of `footer`'s prose.
+        helplines=(nalsa_helpline(target),),
+        events=result.events,
+        classifier_failures=result.classifier_failures,
+        turn_index=turn_index,
+    )
+    return _with_document_crisis(answered, document_crisis)
+
+
+class _SingleTurnRetriever:
+    """Adapts a one-argument `Retriever` to `ConversationRetriever`.
+
+    `answer_in_language` passes no history, so `carried_chunk_ids(())` is
+    always empty and ignoring it is provably lossless. It is still checked
+    rather than assumed: silently discarding carried ids would break "cited
+    implies shown this turn" in the one place nobody would look, so a
+    non-empty tuple is a programming error and says so.
+    """
+
+    def __init__(self, retriever: Retriever) -> None:
+        self._retriever = retriever
+
+    def retrieve(
+        self, english_query: str, carried_chunk_ids: tuple[str, ...]
+    ) -> RetrievalContext:
+        """Retrieve for a single-shot turn, which can carry nothing."""
+        if carried_chunk_ids:
+            raise ValueError(
+                "a single-turn retriever cannot re-fetch carried chunks; "
+                "use answer_in_conversation with a ConversationRetriever"
+            )
+        return self._retriever.retrieve(english_query)
 
 
 def answer_in_language(
@@ -452,6 +656,12 @@ def answer_in_language(
     document_crisis_kinds: tuple[str | None, ...] = (),
 ) -> LocalisedAnswer:
     """Answer `question` in `language`, or in the language it was asked in.
+
+    The single-shot entry point: one question, no conversation history, no
+    uploaded document. It is a thin call into `answer_in_conversation`, not
+    a second implementation of the same pipeline -- everything below about
+    ordering, crisis routing and translation is that function's behaviour,
+    described here because this is the signature most callers hold.
 
     `language` is the caller's explicit choice -- an interface's language
     selector -- and it wins over detection outright: it selects the answer's
@@ -477,43 +687,23 @@ def answer_in_language(
     once per turn, so passing it on every turn -- not only the turn that
     uploaded -- is what makes a document's verdict outlive its upload. It
     carries stored verdicts and never document text: nothing here can
-    re-scan, or re-classify, a document per turn.
+    re-scan, or re-classify, a document per turn. A document can therefore
+    contribute its crisis verdict here while contributing no excerpts:
+    this entry point passes no `document_context`, so no document text is
+    read on this path at all, and no second generation pass runs.
 
     See the module docstring for why crisis routing runs three checks -- the
     full classifier check on `question` itself, the stored document
     verdicts, then a regex-only check on the English translation -- and all
     of them before `retriever.retrieve` is ever called.
     """
-    target = language or detect_language(question)
-
-    document_crisis = _document_crisis(document_crisis_kinds)
-
-    cleared = _clear_crisis_and_translate(
-        question, target, adapter, registry, state, document_crisis
+    return answer_in_conversation(
+        question,
+        _SingleTurnRetriever(retriever),
+        adapter,
+        registry,
+        glossary,
+        document_crisis=_document_crisis(document_crisis_kinds),
+        state=state,
+        language=language,
     )
-    if isinstance(cleared, LocalisedAnswer):
-        return cleared
-    english_query, classifier_failures = cleared
-
-    context = retriever.retrieve(english_query)
-    footer = escalation_footer(state, target)
-    result = _generate_from_context(
-        english_query, context, adapter, registry, footer, classifier_failures
-    )
-    localised = translate_answer(result.answer, target, adapter, registry, glossary)
-
-    answered = LocalisedAnswer(
-        answer=localised,
-        english_answer=result.answer,
-        language=target,
-        english_query=english_query,
-        crisis=result.crisis,
-        footer=result.footer,
-        # Every footer cites the NALSA number, crisis or not (Task 6 fix
-        # round, C2) -- structured here so the frontend never has to
-        # pattern-match it out of `footer`'s prose.
-        helplines=(nalsa_helpline(target),),
-        events=result.events,
-        classifier_failures=result.classifier_failures,
-    )
-    return _with_document_crisis(answered, document_crisis)

@@ -484,14 +484,17 @@ def test_answer_prompt_keeps_quoted_statutory_text_in_English() -> None:
     assert "english" in system
 
 
-# --- document claims must not survive onto a non-English answer ------------
+# --- document claims survive translation on EVERY return path --------------
 #
-# Plan 6 Task 7, security review HIGH-1. `translate_answer` has four return
-# paths and the drop originally lived on one of them, so the property the
-# comment claimed held only for the case the test happened to exercise. The
-# parametrisation below walks every path on which a non-English answer can
-# leave this function; removing the drop from any one of them turns exactly
-# the corresponding case red.
+# Plan 6 Task 13, ruling B. Document claims used to be DROPPED on every
+# non-English return: a Hindi speaker who attached a lease was told nothing
+# at all about their own paperwork. They are now translated by their own
+# call, and on any failure of that call they degrade to the ENGLISH document
+# claim -- never to nothing. `translate_answer` has three returns and the
+# parametrisation below walks all of them, in both the
+# document-translation-works and document-translation-fails directions,
+# because this project has produced five defects where a property held in
+# English and failed in translation.
 
 _DOCUMENT_CLAIM = DocumentClaim(
     text="Your lease says 11 months.", excerpt_ids=("doc:a:p1:0",)
@@ -501,11 +504,17 @@ _DOCUMENT_CITATION = DocumentCitation(
 )
 
 #: A well-formed translation naming an id that was never sent -- one of the
-#: three ways `_parse_translation` returns None (the others being a refusal
-#: and malformed JSON), all of which share the one fallback return.
+#: three ways a parse returns None (the others being a refusal and malformed
+#: JSON), all of which share the one "keep the English text" fallback.
 _INVENTED_CLAIM_ID = json.dumps(
     {"summary": "अनुवादित", "claims": [{"id": 7, "text": "आविष्कृत"}]},
     ensure_ascii=False,
+)
+
+#: The document pass's own translated reply. No "summary" key: there is
+#: deliberately no document-flavoured equivalent of `unverified_summary`.
+_TRANSLATED_DOCUMENT = json.dumps(
+    {"claims": [{"id": 0, "text": "आपका पट्टा 11 महीने का है।"}]}, ensure_ascii=False
 )
 
 
@@ -528,53 +537,122 @@ def _answer_with_document_claims(*, has_legal_claims: bool) -> ValidatedAnswer:
     )
 
 
+def _queued(has_legal_claims: bool, legal_reply: str, document_reply: str) -> list[str]:
+    """The adapter queue for one `translate_answer` call: the legal call
+    first, and only when there are legal claims to translate, then the
+    document call."""
+    return ([legal_reply] if has_legal_claims else []) + [document_reply]
+
+
 @pytest.mark.parametrize(
-    ("has_legal_claims", "completion"),
+    ("has_legal_claims", "legal_reply"),
     [
-        # The success path: `document_claims=()` in the constructor.
+        # The success path: both halves translated.
         pytest.param(True, TRANSLATED, id="successful-translation"),
-        # `if not answer.claims: return` -- the document-only turn, which is
-        # every document-only turn, since rule 5 leaves them unanswerable.
+        # `legal is None` because there were no claims -- the document-only
+        # turn, which is every document-only turn (rule 5).
         pytest.param(False, TRANSLATED, id="no-legal-claims-short-circuit"),
-        # `if parsed is None: return` -- malformed JSON.
+        # `legal is None` because the reply was malformed.
         pytest.param(True, "not json at all", id="malformed-json-fallback"),
-        # `if parsed is None: return` -- a well-formed reply with a bad id.
+        # `legal is None` because the reply named an id never sent.
         pytest.param(True, _INVENTED_CLAIM_ID, id="invented-claim-id-fallback"),
     ],
 )
-def test_no_return_path_leaves_english_document_claims_in_a_hindi_answer(
-    has_legal_claims: bool, completion: str
+def test_every_return_path_carries_the_translated_document_claims(
+    has_legal_claims: bool, legal_reply: str
 ) -> None:
-    """`ANSWER_SYSTEM_PROMPT` asks the translator for `claims` only, so a
-    document claim has no translated form. Carrying the English text through
-    would put an English sentence about the person's own lease inside an
-    otherwise-Hindi answer -- the defect the final review's H1 fixed on the
-    crisis path, reproduced. Dropping is the conservative direction and must
-    hold on every return, including the error returns.
-    """
+    """Ruling B: a Hindi answer must not lose the document addendum on any
+    path, including the short-circuit and the error fallbacks. A failure on
+    the LEGAL side must not cost the document side its translation -- they
+    are separate calls for exactly that reason."""
     answer = _answer_with_document_claims(has_legal_claims=has_legal_claims)
+    adapter = StubAdapter(_queued(has_legal_claims, legal_reply, _TRANSLATED_DOCUMENT))
 
-    result = translate_answer(
-        answer, "hi", StubAdapter([completion]), ModelRegistry(), _glossary()
+    result = translate_answer(answer, "hi", adapter, ModelRegistry(), _glossary())
+
+    assert result.document_claims == (
+        DocumentClaim(text="आपका पट्टा 11 महीने का है।", excerpt_ids=("doc:a:p1:0",)),
     )
-
-    assert result.document_claims == ()
-    assert result.document_citations == ()
-    assert _DOCUMENT_CLAIM.text not in result.model_dump_json()
+    assert result.document_citations == (_DOCUMENT_CITATION,)
 
 
-def test_an_english_answer_keeps_its_document_claims() -> None:
-    """The invariant is "nothing untranslated reaches the reader", not
-    "document claims are always discarded". An English answer needs no
-    translation, so its addendum survives untouched -- a fix that dropped
-    them unconditionally would silently delete the addendum from every
-    English turn, which is the failure this test exists to catch.
-    """
+@pytest.mark.parametrize(
+    ("has_legal_claims", "legal_reply"),
+    [
+        pytest.param(True, TRANSLATED, id="successful-legal-translation"),
+        pytest.param(False, TRANSLATED, id="no-legal-claims-short-circuit"),
+        pytest.param(True, "not json at all", id="malformed-json-fallback"),
+        pytest.param(True, _INVENTED_CLAIM_ID, id="invented-claim-id-fallback"),
+    ],
+)
+def test_a_failed_document_translation_degrades_to_english_never_to_nothing(
+    has_legal_claims: bool, legal_reply: str
+) -> None:
+    answer = _answer_with_document_claims(has_legal_claims=has_legal_claims)
+    adapter = StubAdapter(_queued(has_legal_claims, legal_reply, "not json at all"))
+
+    result = translate_answer(answer, "hi", adapter, ModelRegistry(), _glossary())
+
+    assert result.document_claims == (_DOCUMENT_CLAIM,)
+    assert result.document_citations == (_DOCUMENT_CITATION,)
+
+
+def test_a_failed_legal_translation_still_keeps_the_english_legal_claims() -> None:
+    """The other half of "degrades to English, never to nothing"."""
     answer = _answer_with_document_claims(has_legal_claims=True)
+    adapter = StubAdapter(["not json at all", _TRANSLATED_DOCUMENT])
 
-    result = translate_answer(
-        answer, "en", StubAdapter([TRANSLATED]), ModelRegistry(), _glossary()
-    )
+    result = translate_answer(answer, "hi", adapter, ModelRegistry(), _glossary())
 
+    assert result.claims == _answer().claims
+    assert result.sources == _answer().sources
+    assert result.document_claims[0].text == "आपका पट्टा 11 महीने का है।"
+
+
+def test_the_document_translation_is_a_separate_call_from_the_legal_one() -> None:
+    """Structural (ruling A, at the translation edge): a document claim's
+    text is the one piece of prose an injected document can influence, so it
+    must never share a prompt with the legal claims whose translation it
+    could otherwise steer."""
+    answer = _answer_with_document_claims(has_legal_claims=True)
+    adapter = StubAdapter([TRANSLATED, _TRANSLATED_DOCUMENT])
+
+    translate_answer(answer, "hi", adapter, ModelRegistry(), _glossary())
+
+    assert len(adapter.calls) == 2
+    legal_call, document_call = adapter.calls
+    assert _DOCUMENT_CLAIM.text not in json.dumps(legal_call["messages"])
+    assert "A refund is required." not in json.dumps(document_call["messages"])
+    assert legal_call["system"] != document_call["system"]
+
+
+def test_the_document_translator_prompt_says_these_are_not_the_law() -> None:
+    answer = _answer_with_document_claims(has_legal_claims=False)
+    adapter = StubAdapter([_TRANSLATED_DOCUMENT])
+
+    translate_answer(answer, "hi", adapter, ModelRegistry(), _glossary())
+    system = adapter.calls[0]["system"].lower()
+
+    assert "not statements of law" in system
+    assert "excerpt" not in system or "id" in system
+
+
+def test_an_answer_with_no_document_claims_costs_no_document_call() -> None:
+    adapter = StubAdapter([TRANSLATED])
+
+    translate_answer(_answer(), "hi", adapter, ModelRegistry(), _glossary())
+
+    assert len(adapter.calls) == 1
+
+
+def test_an_english_answer_keeps_its_document_claims_untranslated() -> None:
+    """An English answer needs no translation at all, so neither call is
+    made and the addendum survives untouched."""
+    answer = _answer_with_document_claims(has_legal_claims=True)
+    adapter = StubAdapter([])
+
+    result = translate_answer(answer, "en", adapter, ModelRegistry(), _glossary())
+
+    assert adapter.calls == []
     assert result.document_claims == (_DOCUMENT_CLAIM,)
     assert result.document_citations == (_DOCUMENT_CITATION,)
