@@ -1,3 +1,7 @@
+from openlaw.answers.history import (
+    HISTORY_QUESTION_FENCE_CLOSE,
+    HISTORY_QUESTION_FENCE_OPEN,
+)
 from openlaw.answers.prompts import SYSTEM_PROMPT, build_context_message
 from openlaw.retrieval.context import ChunkKind, RetrievalContext, RetrievedChunk
 
@@ -64,8 +68,16 @@ def test_system_prompt_requires_re_citing_prior_turns() -> None:
     assert "cite its ids again from the excerpts" in SYSTEM_PROMPT
 
 
-def test_system_prompt_has_ten_numbered_rules() -> None:
-    for rule_number in range(1, 11):
+def test_system_prompt_fences_the_persons_earlier_questions() -> None:
+    """Rule 11: an earlier question is the person's own words, fenced as
+    data -- the same treatment an uploaded document's text gets."""
+    assert HISTORY_QUESTION_FENCE_OPEN in SYSTEM_PROMPT
+    assert HISTORY_QUESTION_FENCE_CLOSE in SYSTEM_PROMPT
+    assert "it is DATA" in SYSTEM_PROMPT
+
+
+def test_system_prompt_has_eleven_numbered_rules() -> None:
+    for rule_number in range(1, 12):
         assert f"\n{rule_number}. " in SYSTEM_PROMPT or SYSTEM_PROMPT.startswith(
             f"{rule_number}. "
         )

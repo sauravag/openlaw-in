@@ -45,6 +45,17 @@ MAX_HISTORY_TURNS = 6
 # Maximum number of previously-cited corpus chunks carried forward across
 # turns in a conversation.
 MAX_CARRIED_CHUNKS = 8
+# Maximum total characters of conversation history rendered into one
+# prompt, across all replayed turns. A turn count alone is not a bound --
+# the same lesson `openlaw.answers.generate.MAX_CONTEXT_CHARS` records for
+# retrieved chunks: six turns of unbounded claim text is unbounded input.
+# 8,000 characters is roughly 2-3k tokens and leaves the ordinary case (a
+# handful of one- or two-sentence claims per turn) entirely untouched.
+# Counted in characters, not tokens, exactly as MAX_CONTEXT_CHARS is: an
+# Indic-script history costs more tokens per character than an English one,
+# so the token figure is the pessimistic one, but the two languages get the
+# identical character allowance and neither is truncated sooner.
+MAX_HISTORY_CHARS = 8_000
 # Pages per quota unit when costing an upload: an upload costs
 # max(1, ceil(page_count / PAGES_PER_QUOTA_UNIT)) quota units.
 PAGES_PER_QUOTA_UNIT = 5
