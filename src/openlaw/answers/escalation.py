@@ -455,6 +455,31 @@ def crisis_helplines(kind: CrisisKind, language: str = "en") -> tuple[Helpline, 
     )
 
 
+def dedupe_helplines(helplines: Iterable[Helpline]) -> tuple[Helpline, ...]:
+    """Return `helplines` with repeated numbers removed, first wins.
+
+    One turn can now assemble numbers from more than one source: the
+    question's category, an attached document's category, and the NALSA
+    number every footer cites. Those sets overlap -- 112 appears in three of
+    the four categories, and `_CRISIS_HELPLINE_NUMBERS[CUSTODIAL_ABUSE]`
+    contains `NALSA_HELPLINE` itself, so even a single-category custodial
+    turn produced 15100 twice before this existed. A user must not be shown
+    the same number twice; a duplicated tap-to-call row reads as a rendering
+    bug and makes the list look untrustworthy exactly where trust matters.
+
+    Order is preserved, so the primary category's numbers stay first (see
+    `openlaw.language.pipeline._crisis_answer`, which depends on that).
+    """
+    seen: set[str] = set()
+    unique: list[Helpline] = []
+    for helpline in helplines:
+        if helpline.number in seen:
+            continue
+        seen.add(helpline.number)
+        unique.append(helpline)
+    return tuple(unique)
+
+
 def nalsa_helpline(language: str = "en") -> Helpline:
     """The one number every `escalation_footer` mentions, structured."""
     return helpline_for(NALSA_HELPLINE, language)

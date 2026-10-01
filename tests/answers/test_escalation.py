@@ -15,11 +15,14 @@ from openlaw.answers.escalation import (
     HallucinationEvent,
     append_events,
     build_hallucination_events,
+    crisis_helplines,
     crisis_kind_from_value,
     crisis_response,
+    dedupe_helplines,
     detect_crisis,
     escalation_footer,
     most_urgent_crisis,
+    nalsa_helpline,
     purge_stale_events,
 )
 from openlaw.answers.escalation import _COMPILED_DEVANAGARI, _DEVANAGARI_CHAR
@@ -627,3 +630,59 @@ def test_every_devanagari_pattern_compiles_and_is_counted() -> None:
         len(patterns) for patterns in DEVANAGARI_CRISIS_PATTERNS.values()
     )
     assert DEVANAGARI_PATTERN_COUNT > 0
+
+
+# --- helpline deduplication (Plan 6 Task 10, ruling 1 revised) -------------
+
+
+def test_dedupe_helplines_keeps_the_first_occurrence_and_the_order() -> None:
+    """Order matters: the primary category's numbers must stay first (see
+    `openlaw.language.pipeline._crisis_answer`)."""
+    dv = crisis_helplines(CrisisKind.DOMESTIC_VIOLENCE)
+    self_harm = crisis_helplines(CrisisKind.SELF_HARM)
+
+    deduped = dedupe_helplines(dv + self_harm + (nalsa_helpline(),))
+
+    numbers = [helpline.number for helpline in deduped]
+    assert numbers == ["112", "181", "1091", "14416", NALSA_HELPLINE]
+
+
+def test_dedupe_helplines_removes_the_overlapping_emergency_number() -> None:
+    """112 is in three of the four category sets, so any two-category turn
+    would otherwise show it twice."""
+    custodial = crisis_helplines(CrisisKind.CUSTODIAL_ABUSE)
+    trafficking = crisis_helplines(CrisisKind.TRAFFICKING)
+
+    numbers = [h.number for h in dedupe_helplines(custodial + trafficking)]
+
+    assert numbers.count("112") == 1
+    assert len(numbers) == len(set(numbers))
+
+
+def test_dedupe_helplines_fixes_the_custodial_nalsa_duplicate() -> None:
+    """`_CRISIS_HELPLINE_NUMBERS[CUSTODIAL_ABUSE]` contains `NALSA_HELPLINE`
+    itself, so appending the footer's NALSA number -- which every crisis turn
+    does -- produced 15100 twice before this helper existed, with no
+    document or second category involved."""
+    with_footer_number = crisis_helplines(CrisisKind.CUSTODIAL_ABUSE) + (
+        nalsa_helpline(),
+    )
+    assert [h.number for h in with_footer_number].count(NALSA_HELPLINE) == 2
+
+    numbers = [h.number for h in dedupe_helplines(with_footer_number)]
+    assert numbers.count(NALSA_HELPLINE) == 1
+
+
+def test_dedupe_helplines_preserves_the_label_language_of_the_first() -> None:
+    hindi_first = dedupe_helplines(
+        crisis_helplines(CrisisKind.DOMESTIC_VIOLENCE, "hi")
+        + crisis_helplines(CrisisKind.DOMESTIC_VIOLENCE, "en")
+    )
+
+    assert {helpline.label for helpline in hindi_first} == {
+        helpline.label for helpline in crisis_helplines(CrisisKind.DOMESTIC_VIOLENCE, "hi")
+    }
+
+
+def test_dedupe_helplines_of_nothing_is_nothing() -> None:
+    assert dedupe_helplines(()) == ()

@@ -39,7 +39,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from openlaw.answers.escalation import CrisisKind, nalsa_helpline
+from openlaw.answers.escalation import CrisisKind, crisis_response, nalsa_helpline
 from openlaw.documents.extract import ExtractedPage, scan_for_crisis
 from openlaw.answers.generate import persist_answer_events
 from openlaw.answers.models import Completion, ModelRegistry, ModelRole, StubAdapter
@@ -789,15 +789,15 @@ def test_a_question_crisis_short_circuits_even_with_a_document_attached() -> Non
     assert len(adapter.calls) == 0
 
 
-def test_the_questions_verdict_outranks_a_documents_on_a_short_circuit() -> None:
-    """Evidence strength, not severity order, decides here. The person is
-    telling us NOW that her husband beats her; a self-harm phrase in an
-    attached file may be two years old or about someone else. The question
-    selects the response, and the turn stays free.
+def test_both_categories_surface_when_question_and_document_differ() -> None:
+    """Ruling 1, revised. A woman asking about domestic violence whose
+    attached document indicates self-harm risk must get the DV helplines AND
+    Tele-MANAS. The turn is already short-circuited, so the second category
+    costs nothing -- and self-harm is at the top of the project's own
+    severity table precisely because it is the most time-critical.
 
-    (Deliberate consequence, flagged in the task report: the document's
-    different category is not separately surfaced on a short-circuit turn.)
-    """
+    Her question stays primary: its prose leads and its numbers come first,
+    so the response still speaks to what she actually said."""
     adapter = StubAdapter([])
     result = answer_in_language(
         "my husband beats me",
@@ -808,9 +808,104 @@ def test_the_questions_verdict_outranks_a_documents_on_a_short_circuit() -> None
         document_crisis_kinds=(CrisisKind.SELF_HARM.value,),
     )
 
-    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
-    assert "181" in result.footer
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE  # primary
+    assert result.document_crisis is CrisisKind.SELF_HARM  # surfaced too
+    # Both categories' prose, hers first.
+    assert result.footer.index("181") < result.footer.index("14416")
+    # Both categories' numbers, tap-to-call.
+    numbers = [helpline.number for helpline in result.helplines]
+    assert "181" in numbers and "14416" in numbers
+    # ...and it still costs nothing.
     assert len(adapter.calls) == 0
+
+
+def test_the_question_category_leads_the_prose_even_when_less_urgent() -> None:
+    """`most_urgent_crisis` is NOT what orders these two: evidence strength
+    is. The document may be two years old or about someone else, so it never
+    takes over the message, however urgent its category."""
+    result = answer_in_language(
+        "my husband beats me",
+        _RaisingRetriever(),
+        StubAdapter([]),
+        ModelRegistry(),
+        _glossary(),
+        document_crisis_kinds=(CrisisKind.SELF_HARM.value,),
+    )
+
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
+    assert result.helplines[0].number == "112"  # first of the DV set
+
+
+def test_the_same_category_in_question_and_document_is_not_repeated() -> None:
+    result = answer_in_language(
+        "my husband beats me",
+        _RaisingRetriever(),
+        StubAdapter([]),
+        ModelRegistry(),
+        _glossary(),
+        document_crisis_kinds=(STORED_DV,),
+    )
+
+    assert result.footer.count(crisis_response(CrisisKind.DOMESTIC_VIOLENCE)) == 1
+    numbers = [helpline.number for helpline in result.helplines]
+    assert len(numbers) == len(set(numbers))
+
+
+def test_a_two_category_crisis_turn_never_shows_a_number_twice() -> None:
+    """112 is in three of the four category sets, and the custodial set
+    contains the NALSA number itself -- so overlap is the normal case. A
+    duplicated tap-to-call row reads as a rendering bug exactly where trust
+    matters most."""
+    result = answer_in_language(
+        "I was beaten by the police",
+        _RaisingRetriever(),
+        StubAdapter([]),
+        ModelRegistry(),
+        _glossary(),
+        document_crisis_kinds=(STORED_DV,),
+    )
+
+    assert result.crisis is CrisisKind.CUSTODIAL_ABUSE
+    numbers = [helpline.number for helpline in result.helplines]
+    assert numbers.count("112") == 1
+    assert numbers.count("15100") == 1  # in the custodial set AND the footer's
+    assert len(numbers) == len(set(numbers))
+
+
+def test_a_single_category_custodial_turn_also_shows_nalsa_once() -> None:
+    """Pre-existing duplicate, fixed by the same dedupe: before it,
+    `crisis_helplines(CUSTODIAL_ABUSE) + (nalsa,)` rendered 15100 twice on
+    every custodial crisis turn, with no document involved at all."""
+    result = answer_in_language(
+        "I was beaten by the police",
+        _RaisingRetriever(),
+        StubAdapter([]),
+        ModelRegistry(),
+        _glossary(),
+    )
+
+    numbers = [helpline.number for helpline in result.helplines]
+    assert numbers.count("15100") == 1
+
+
+def test_a_document_crisis_alongside_an_answer_never_repeats_nalsa() -> None:
+    """Same overlap on the alongside path: a custodial document verdict
+    contributes 15100, and the ordinary answer's footer already cites it."""
+    adapter = StubAdapter(
+        [_SAFE_CLASSIFIER_RESPONSE, "my landlord kept my deposit", _generation()]
+    )
+    result = answer_in_language(
+        "my landlord kept my deposit",
+        _Retriever(),
+        adapter,
+        ModelRegistry(),
+        _glossary(),
+        document_crisis_kinds=(CrisisKind.CUSTODIAL_ABUSE.value,),
+    )
+
+    numbers = [helpline.number for helpline in result.helplines]
+    assert numbers.count("15100") == 1
+    assert result.answer.claims[0].text == "A refund is required."
 
 
 def test_several_attached_documents_resolve_to_the_most_urgent_verdict() -> None:
