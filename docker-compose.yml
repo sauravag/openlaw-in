@@ -284,6 +284,28 @@ services:
       # back to `true` (the safe default `Settings.cookie_secure` itself
       # uses) once you do.
       OPENLAW_COOKIE_SECURE: ${OPENLAW_COOKIE_SECURE:-false}
+      # Document uploads (Plan 6). Before Task 18 NONE of these reached this
+      # container: `Settings.uploads_enabled` defaults to True in code, so a
+      # compose self-host came up advertising uploads while
+      # `document_encryption_key` -- which is never passed either -- stayed
+      # unset, and the first real upload failed on a key that was configured in
+      # the operator's `.env` and never delivered. The safe coherent default is
+      # therefore OFF here and in .env.example (kept in lockstep by
+      # tests/test_config.py::test_env_example_agrees_with_compose_self_host_defaults),
+      # and the key now actually travels: generate one, set both in `.env`, and
+      # the feature comes on deliberately rather than by accident.
+      OPENLAW_UPLOADS_ENABLED: ${OPENLAW_UPLOADS_ENABLED:-false}
+      OPENLAW_DOCUMENT_ENCRYPTION_KEY: ${OPENLAW_DOCUMENT_ENCRYPTION_KEY:-}
+      # Read-only, used only so rows written under a retiring key stay
+      # readable -- see .env.example and the README's "Uploaded documents".
+      OPENLAW_DOCUMENT_ENCRYPTION_KEY_PREVIOUS: ${OPENLAW_DOCUMENT_ENCRYPTION_KEY_PREVIOUS:-}
+      # The caps an operator actually tunes. Passed through so a `.env` edit
+      # reaches the running service instead of being silently ignored.
+      OPENLAW_MAX_UPLOAD_BYTES: ${OPENLAW_MAX_UPLOAD_BYTES:-10485760}
+      OPENLAW_MAX_DOCUMENT_PAGES: ${OPENLAW_MAX_DOCUMENT_PAGES:-20}
+      OPENLAW_MAX_DOCUMENTS_PER_CONVERSATION: ${OPENLAW_MAX_DOCUMENTS_PER_CONVERSATION:-3}
+      OPENLAW_ANONYMOUS_UPLOAD_TTL_HOURS: ${OPENLAW_ANONYMOUS_UPLOAD_TTL_HOURS:-24}
+      OPENLAW_ANONYMOUS_CONVERSATION_TTL_HOURS: ${OPENLAW_ANONYMOUS_CONVERSATION_TTL_HOURS:-24}
       # These two MUST resolve inside the bind mount above, and the mount
       # MUST NOT be /app/data: that directory holds data/glossary/
       # legal_terms.json, baked into the image, and mounting over it made

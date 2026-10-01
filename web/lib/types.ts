@@ -197,8 +197,27 @@ export interface ConversationTurnCardData {
   language: string
 }
 
-/** A conversation's turns. Mirrors `openlaw.api.schemas.ConversationView`. */
+/**
+ * One document still attached to a restored conversation. Mirrors
+ * `openlaw.api.schemas.ConversationDocumentCard`.
+ *
+ * Metadata only: there is deliberately no field here for document text, and
+ * none for a URL. A reader needs to recognise their own file and withdraw it.
+ */
+export interface ConversationDocumentCardData {
+  id: string
+  filename: string
+  page_count: number
+  expires_at: string | null
+  retention_notice: string
+}
+
+/** A conversation's turns and its attached documents. Mirrors
+ * `openlaw.api.schemas.ConversationView`. */
 export interface ConversationViewData {
   conversation_id: string
   turns: ConversationTurnCardData[]
+  /** Optional so a response without it still restores the transcript -- see
+   * `isConversationView` in `lib/api.ts`. */
+  documents?: ConversationDocumentCardData[]
 }

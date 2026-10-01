@@ -283,6 +283,48 @@ describe('readConversation', () => {
     )
   })
 
+  it('returns the attached documents, and asks for them in the reader\'s language', async () => {
+    const view = {
+      conversation_id: 'conv-1',
+      turns: [],
+      documents: [
+        {
+          id: 'doc-1',
+          filename: 'lease.pdf',
+          page_count: 3,
+          expires_at: null,
+          retention_notice: 'Stays until you delete it.',
+        },
+      ],
+    }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, view))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const outcome = await readConversation({ conversationId: 'conv-1', language: 'hi' })
+
+    expect(outcome).toEqual({ kind: 'conversation', data: view })
+    // The retention sentence is per-owner and server-composed, so the language
+    // has to travel with the request or a Hindi reader gets an English promise.
+    expect(fetchMock.mock.calls[0][0]).toContain('language=hi')
+  })
+
+  it('rejects a document card whose page count is not a number', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          conversation_id: 'conv-1',
+          turns: [],
+          documents: [{ id: 'd', filename: 'f', page_count: 'three', retention_notice: 'x' }],
+        }),
+      ),
+    )
+
+    expect((await readConversation({ conversationId: 'c', language: 'en' })).kind).toBe(
+      'refused',
+    )
+  })
+
   it('treats a 200 with a body that is not a conversation as a refusal', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, { turns: 'nope' })))
 

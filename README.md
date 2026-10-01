@@ -21,6 +21,17 @@ The underlying legal text is a Government work under s.17(d) of the Copyright Ac
 
 Stated plainly, because a legal tool that overstates its coverage is dangerous:
 
+- **"Backed by a citation" means the citation resolves, not that the sentence
+  was checked against it.** The validator (`openlaw.answers.validate`) proves
+  that every chunk a claim cites was retrieved and shown to the model on that
+  same turn, and that it carries a resolvable government `source_url`. It does
+  **not** check entailment: nothing verifies that the claim's wording is what
+  that chunk actually says. So an unsupported *citation* is structurally
+  impossible, while a claim that misstates a provision it correctly cites is
+  not. That is the strongest honest reading of the line at the top of this
+  file, and it is why every answer carries the source card: the citation is
+  there to be read, not merely counted. There is no entailment check anywhere
+  in this pipeline, in either the corpus or the uploaded-document namespace.
 - Retrieval coverage is not corpus coverage — 1,786,868 more judgments are held as
   extracted text upstream than are embedded.
 - Consumer fora (NCDRC and State Commissions) are **not** in this corpus.
@@ -182,6 +193,196 @@ intentional forward design, not accidental debt, and its access precondition
 above is written down precisely so a future writer sets up the restricted
 role first, not after.
 
+## Uploaded documents
+
+A person can attach their own paperwork — a lease, an eviction notice, an FIR
+copy, a medical report — and the answer may quote it. Everything an operator
+needs to know before enabling that is here, including the parts that are not
+flattering.
+
+### What is accepted, and what is refused
+
+| Limit | Value | Setting |
+|---|---|---|
+| Content types | `application/pdf`, `text/plain`, `.docx` | `openlaw.documents.ALLOWED_CONTENT_TYPES` |
+| Maximum upload size | 10 MiB | `OPENLAW_MAX_UPLOAD_BYTES` |
+| Maximum pages per document | 20 | `OPENLAW_MAX_DOCUMENT_PAGES` |
+| Documents per conversation | 3 | `OPENLAW_MAX_DOCUMENTS_PER_CONVERSATION` |
+| Quota cost | `max(1, ceil(pages / 5))` units | `openlaw.documents.PAGES_PER_QUOTA_UNIT` |
+| Excerpts reaching the model | at most 6, 1,200 chars each, 12,000 total | `openlaw.documents.context` |
+
+**There is no OCR.** An image is not an accepted content type, and a PDF with
+no extractable text layer is refused with `no_text`. This means the most
+vulnerable upload is the most likely to be refused: someone photographing an
+FIR on a cheap phone gets a refusal, not an answer. That is the deliberate
+choice — a refusal that routes to DLSA/NALSA is honest, where silently
+reading a photograph as an empty document and answering anyway would not be
+— but it is a real coverage gap, not a detail. Adding OCR is a project of its
+own.
+
+**A plain-text file over about 60 KB is refused, and this is documented rather
+than fixed.** Plain text is paginated at 3,000 characters per page
+(`openlaw.documents.CHARS_PER_TEXT_PAGE`), so 60,000 characters is 20 pages
+and anything past that crosses the 20-page cap. Raising the text page size
+was considered and rejected: `max_document_pages` is simultaneously the page
+cap, the basis of the `ceil(pages / 5)` quota charge, and the unit a reader
+sees in a document citation, so making a text "page" six or ten times larger
+than a PDF page would make the same quota charge mean different amounts of
+work and the same page number mean different amounts of text. The cap is
+honest as it stands; a 60 KB `.txt` legal document is also well outside what
+this feature is for. Operators who genuinely need more can raise
+`OPENLAW_MAX_DOCUMENT_PAGES`, at a proportional cost in quota and context.
+
+### Encryption at rest, and what rotating the key destroys
+
+Every stored byte of document content and every excerpt is AES-256-GCM
+ciphertext (`openlaw.documents.crypto`), with a fresh 96-bit nonce per row
+and the row's own id bound in as associated data, so a ciphertext moved to
+another row fails authentication instead of decrypting as somebody else's
+document. `OPENLAW_DOCUMENT_ENCRYPTION_KEY` is a base64-encoded 32-byte
+CSPRNG value — **the configured value IS the key**; there is no derivation
+step, so a password or a phrase there is a weak key, not a seed.
+
+**Changing the key without `OPENLAW_DOCUMENT_ENCRYPTION_KEY_PREVIOUS`
+destroys every existing upload.** Rows record a non-secret fingerprint of
+the key that encrypted them (`key_id`), and decryption looks the key up by
+that fingerprint; a row whose key is in neither slot cannot be read by
+anybody, including the person who uploaded it. Setting the retiring key as
+`..._PREVIOUS` keeps those rows readable while new uploads move to the
+current key — that is a one-generation grace window, not key rotation.
+**There is no re-encryption job**, no per-tenant envelope, and no key
+management beyond these two environment variables. That is acceptable for a
+self-hosted single-tenant deployment and is **not** acceptable for a managed
+multi-tenant one; draw that line before crossing it.
+
+**Uploads are OFF by default for self-hosters, and you turn them on
+deliberately.** `OPENLAW_UPLOADS_ENABLED` defaults to `false` in both
+`docker-compose.yml` and the shipped `.env.example` (kept in lockstep by
+`tests/test_config.py::test_env_example_agrees_with_compose_self_host_defaults`),
+because the alternative was worse: `Settings.uploads_enabled` defaults to
+`True` in code, and before this `docker-compose.yml` passed neither that switch
+nor `OPENLAW_DOCUMENT_ENCRYPTION_KEY` to the `api` container at all — so a
+compose self-host advertised uploads, ignored the key the operator had
+configured in `.env`, and failed on the first real upload. To enable them:
+
+    python -c "import base64,os;print(base64.b64encode(os.urandom(32)).decode())"
+    # put that in OPENLAW_DOCUMENT_ENCRYPTION_KEY in .env, then:
+    #   OPENLAW_UPLOADS_ENABLED=true
+    docker compose up -d
+    ./scripts/verify_selfhost.sh   # checks the key's presence and length, never prints it
+
+`OPENLAW_UPLOADS_ENABLED=false` stops uploads and deliberately does **not**
+stop deletions — turning the feature off must never trap somebody's FIR in
+storage they can no longer clear.
+
+### Anonymous uploads expire in 24 hours, on purpose
+
+An anonymous upload and the conversation holding it get
+`now + OPENLAW_ANONYMOUS_UPLOAD_TTL_HOURS` (default 24) at write time; an
+authenticated one gets `NULL` and is kept until the owner deletes it. See
+"Retention" above for the purge mechanism and how to schedule it.
+
+The asymmetry is the point. Anonymous ownership is **a cookie**: there is no
+way to contact that person later, no way for them to prove the upload was
+theirs after they clear their browser, and therefore no way for them to come
+back and delete it. Keeping an anonymous FIR or medical report indefinitely
+would create an undeletable document belonging to nobody — the single worst
+outcome available here — so its lifetime is bounded by a timer instead of
+being left to someone who may never return. The residual exposure is real
+and is not hidden by the TTL: clearing cookies orphans a document until it
+expires, and a shared cybercafe machine *within* that 24-hour window shares
+the document with the next person at that machine. The invitation to sign in
+is the only mitigation available without an identity.
+
+### Cost: a document turn is two model calls, and only one of them caches
+
+**Budget two full uncached model calls for every turn that carries a
+document.** A document turn runs two separate generation passes — one that
+reads the uploaded text, one that composes legal claims — and the
+document-analysis pass's prefix is below the provider's minimum cacheable
+length, so it pays full input price every time. The pass separation is a
+safety property, not an inefficiency to optimise away: it is what stops text
+inside somebody's lease from steering a claim about the law.
+
+The legal pass does cache, and the saving is large and measured, not assumed:
+on a second identical call, **3,520 of 3,622 prompt tokens came back from
+cache (~97%), billed at 0.2x with no write cost** — confirmed from live
+responses and from first-party cost data, read back from
+`usage.prompt_tokens_details.cached_tokens`. Caching on that route is
+automatic: there is no breakpoint to declare, so it is earned purely by
+keeping the prefix byte-stable (`openlaw.answers.prompts.build_turn_messages`)
+and forfeited by putting variable bytes first. Prefixes under roughly
+1,000–1,500 tokens were never cached at all in measurement, which is exactly
+why the document pass does not benefit. Earlier versions of this repository
+asserted the opposite — that OpenRouter caching "does not transfer" — and that
+claim has been removed everywhere rather than softened.
+
+### Safety limits that documents do not close
+
+Stated here because a reader who takes the citation guarantee at face value
+would otherwise over-trust these paths.
+
+- **`Claim.text` is never entailment-checked.** The validator
+  (`openlaw.answers.validate`) proves that every id a claim cites was in the
+  set shown to the model that turn, and that a legal claim never cites a
+  `doc:` excerpt id nor a document claim a corpus chunk id. It does **not**
+  prove the claim's sentence is what the cited chunk or excerpt actually
+  says. There is no entailment check anywhere in this pipeline, in either
+  namespace. Pass separation stops uploaded text from steering a legal claim;
+  nothing verifies a claim against its source.
+- **Hindi safety text is implemented but unverified.** Every static Hindi
+  string on the crisis, refusal and footer paths, the 21 Devanagari crisis
+  patterns, and roughly ten new interface strings are machine-written and
+  have had **no native-speaker review**. `python scripts/review_translations.py`
+  prints the whole backlog as a review sheet; it is not validated until a
+  native speaker has signed off on that sheet. Treat Hindi crisis routing as
+  unverified, not as tested.
+- **A Devanagari document contributes no excerpt to the answer at all.** Found
+  by the adversarial gate while writing it, and not yet fixed.
+  `openlaw.index.sparse.tokenise` matches `[a-z0-9]+`, so a document written in
+  Devanagari yields no tokens beyond its digits, shares none with a Devanagari
+  question, and `select_excerpts` returns nothing — the turn proceeds as if no
+  file had been attached, with no refusal shown. Upload-time crisis scanning is
+  unaffected, because it reads the whole document rather than selected
+  excerpts. It is not fixed here because `tokenise` is shared with the BM25
+  sparse vectors already built into Qdrant
+  (`scripts/build_sparse_vectors.py`): widening its pattern would make
+  query-time tokenisation disagree with the built index, which is a measured
+  retrieval change and a task of its own. Pinned by
+  `tests/redteam/test_document_injection.py::test_a_devanagari_document_contributes_no_excerpt`,
+  so a future fix cannot land without this paragraph being revisited.
+- **The Devanagari crisis patterns favour precision over recall**, so a
+  Devanagari document can still miss. They require complete, unambiguous
+  phrases rather than single evocative words, because a document-only match
+  adds a helpline card beside an ordinary legal answer and a card that
+  appears on every Hindi document is one people learn to ignore. The regex
+  layer remains script-limited — every Indic script other than Devanagari is
+  uncovered — which is why `openlaw.api.refusal`'s script hedge still
+  matters.
+- **An upload refusal carries NALSA only**, not a category helpline. There is
+  no question text on an upload request to classify, so the refusal cannot
+  know whether the person is in a domestic-violence situation or disputing a
+  deposit, and it offers the general free-legal-aid route rather than guessing
+  a category. Relatedly, and pre-existing: a 422 on a malformed `/ask` body
+  never reaches the crisis regex, so a crisis question rejected by schema
+  validation gets the generic refusal.
+- **Per-process state does not survive horizontal scaling.** Conversations and
+  documents are in Postgres, but the anonymous quota and the rate limiter are
+  still per-process. Unchanged by uploads; restated because uploads raise the
+  value of a bypass.
+
+### The adversarial gate
+
+`tests/redteam/` is a CI gate, not a one-off exercise:
+`test_document_injection.py` drives every hostile body in
+`tests/redteam/prompts/injection.txt` through the real validator, the real
+fence and the real HTTP surface with a model stub that **obeys** the
+injection, and `test_cross_account.py` drives two token subjects across every
+document and conversation endpoint. The assertions are structural — no legal
+claim cites a `doc:` id, no uploaded text becomes a source card, the
+escalation footer is on every response, a cross-owner read is a 404 — never
+anything about model wording.
+
 ## Setup
 
     cp .env.example .env
@@ -209,8 +410,9 @@ Calling the `local_nano` backend without the extra installed raises a clear
 
 ### Database migrations
 
-`alembic upgrade head` (above) creates the five application tables (`users`,
-`quota_usage`, `conversations`, `messages`, `hallucination_log`) in the
+`alembic upgrade head` (above) creates the eight application tables
+(`users`, `quota_usage`, `conversations`, `messages`, `documents`,
+`document_excerpts`, `document_access_log`, `hallucination_log`) in the
 `openlaw` database — run it once, on every fresh Postgres, **before**
 `pytest`. Migrations do not assume an empty database: if these tables
 already exist some other way (an early dev workflow that predates Alembic,
@@ -378,9 +580,13 @@ corpus. Be clear-eyed about what that means before you start:
        ./scripts/verify_selfhost.sh
 
    Expected: `[Selfhost] PASS`. This confirms the stack is up, every
-   datastore is reachable, and the API and frontend are both serving --
-   it does **not** require the corpus build from step 3 to be finished
-   first (see that script's own comments for exactly what it does and does
+   datastore is reachable, and the API and frontend are both serving. When
+   `OPENLAW_UPLOADS_ENABLED=true` it also verifies the upload surface: that
+   `OPENLAW_DOCUMENT_ENCRYPTION_KEY` is present and decodes to 32 bytes
+   (**the key is never printed** -- only its presence and length), and that a
+   tiny text file can be uploaded, deleted, and is then gone. With uploads off
+   those checks are skipped and said to be skipped. It does **not** require the
+   corpus build from step 3 to be finished first (see that script's own comments for exactly what it does and does
    not check, and why). Re-run it after the corpus build finishes: with
    `/readyz` reporting ready, its final check asks a real question and
    checks BOTH `is_answerable: true` and a non-empty `sources` list before

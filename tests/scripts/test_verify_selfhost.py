@@ -59,3 +59,89 @@ def test_unverified_branch_admits_it_did_not_check_a_citation() -> None:
     source = _source()
     unverified_branch = source.split('"is_answerable":true', 1)[1]
     assert "did NOT verify a cited answer" in unverified_branch
+
+
+# --- the upload round trip and the key check (Plan 6 Task 18) ----------------
+
+
+def test_the_script_never_echoes_the_document_encryption_key() -> None:
+    """**The property that matters most in this file.** The script reads the key
+    into `document_key` to measure it; no line may ever put that variable into
+    output, and it must be unset immediately after measuring."""
+    source = _source()
+
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if "document_key" not in stripped:
+            continue
+        assert not stripped.startswith("echo"), f"the key could be printed: {line}"
+        assert not stripped.startswith("printf '[Selfhost]"), line
+    assert "unset document_key" in source
+    # And nothing interpolates it into a message or a URL.
+    assert "${document_key}" not in source
+
+
+def test_the_key_check_reports_only_presence_and_length() -> None:
+    source = _source()
+
+    assert "OPENLAW_DOCUMENT_ENCRYPTION_KEY is empty" in source
+    assert "decodes to 32 bytes" in source
+    assert "The key itself is deliberately not printed." in source
+
+
+def test_the_key_check_only_runs_when_uploads_are_enabled() -> None:
+    """A deployment with uploads switched off has no key to check, and failing
+    it there would be a false alarm, not a finding."""
+    source = _source()
+
+    kill_switch = source.index("uploads_enabled=")
+    key_check = source.index("OPENLAW_DOCUMENT_ENCRYPTION_KEY is set")
+    assert kill_switch < key_check
+    assert "skipping the document checks, which is correct, not a gap." in source
+
+
+def test_the_script_uploads_and_then_deletes_a_document() -> None:
+    source = _source()
+
+    assert "-X POST http://localhost:8080/api/openlaw/documents" in source
+    assert "-X DELETE" in source
+    assert '"http://localhost:8080/api/openlaw/documents/${document_id}"' in source
+
+
+def test_a_delete_that_does_not_return_204_fails_the_script() -> None:
+    """An upload that cannot be withdrawn is the one failure this feature must
+    not have, so it is a hard exit rather than a warning."""
+    source = _source()
+
+    assert 'if [ "$delete_status" != "204" ]; then' in source
+    delete_branch = source.split('if [ "$delete_status" != "204" ]; then', 1)[1]
+    assert "exit 1" in delete_branch.split("fi", 1)[0]
+
+
+def test_a_second_delete_must_be_a_404_not_a_403() -> None:
+    """Idempotent and unenumerable: the script pins the behaviour that makes
+    `DELETE /documents/{id}` useless as an enumeration oracle."""
+    source = _source()
+
+    assert 'if [ "$repeat_status" != "404" ]; then' in source
+
+
+def test_the_upload_round_trip_reuses_one_cookie_jar() -> None:
+    """An anonymous upload is owned by a cookie. Without `-b`, the DELETE
+    arrives as a different identity and is correctly refused -- which would
+    make this check fail for a reason that is not a defect."""
+    source = _source()
+
+    assert 'cookie_jar="$(mktemp)"' in source
+    assert source.count('-c "$cookie_jar" -b "$cookie_jar"') >= 3
+
+
+def test_env_is_parsed_rather_than_sourced() -> None:
+    """A malformed or hostile `.env` line must not be able to execute."""
+    source = _source()
+
+    assert "source .env" not in source
+    assert ". .env" not in source
+    assert 'sed -n "s/^${name}=//p" .env' in source

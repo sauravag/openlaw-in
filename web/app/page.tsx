@@ -24,6 +24,10 @@ import {
   type ThreadTurn,
   type TurnOutcome,
 } from "@/lib/thread";
+import {
+  attachedFromConversationCard,
+  type AttachedDocument,
+} from "@/lib/documents";
 import { useDocuments } from "@/lib/useDocuments";
 
 type Status = "idle" | "loading" | "error";
@@ -87,7 +91,11 @@ function useRestoreFromQueryString(
  */
 function useRestoreConversation(
   language: Language["code"],
-  onRestored: (conversationId: string, turns: ThreadTurn[]) => void,
+  onRestored: (
+    conversationId: string,
+    turns: ThreadTurn[],
+    documents: AttachedDocument[],
+  ) => void,
 ) {
   useEffect(() => {
     const storedId = readStoredConversationId();
@@ -100,7 +108,11 @@ function useRestoreConversation(
         forgetStoredConversationId();
         return;
       }
-      onRestored(outcome.data.conversation_id, outcome.data.turns.map(replayedTurn));
+      onRestored(
+        outcome.data.conversation_id,
+        outcome.data.turns.map(replayedTurn),
+        (outcome.data.documents ?? []).map(attachedFromConversationCard),
+      );
     });
     return () => {
       isStale = true;
@@ -196,10 +208,16 @@ export default function HomePage() {
   });
 
   useRestoreFromQueryString(setQuestion, setLanguage);
-  useRestoreConversation(language, (restoredId, restoredTurns) => {
-    setConversationId(restoredId);
-    setTurns(restoredTurns);
-  });
+  useRestoreConversation(
+    language,
+    (restoredId, restoredTurns, restoredDocuments) => {
+      setConversationId(restoredId);
+      setTurns(restoredTurns);
+      // The documents the server says are still attached, so the per-document
+      // delete control survives a reload -- see `ConversationView.documents`.
+      attachments.restore(restoredDocuments);
+    },
+  );
 
   // Task 6 review, H3: screen readers must pronounce Hindi content with a
   // Hindi voice, not the `lang="en"` the server-rendered shell starts with.
@@ -396,16 +414,15 @@ export default function HomePage() {
           * below the question it will be read for, above the answers it will
           * appear in.
           *
-          * **Known gap, recorded rather than papered over:**
-          * `GET /conversations/{id}` returns turns only, with no document
-          * list, so after a page reload this section starts empty even for a
-          * conversation that still holds files. The per-document delete
-          * control therefore cannot be offered for a restored conversation;
-          * "delete this conversation and the documents in it" (below) still
-          * can, and cascades server-side, so a person is never left unable to
-          * withdraw a file -- only unable to withdraw one of several
-          * individually. Closing it properly needs a documents field on
-          * `ConversationView`.
+          * This list survives a page reload: `GET /conversations/{id}` returns
+          * `documents` (metadata only -- ids, filenames, page counts, never
+          * content), and `useRestoreConversation` adopts them above. That is
+          * what makes per-document deletion reachable after a refresh rather
+          * than only within the session that uploaded the file -- an
+          * authenticated upload is retained *until the owner deletes it*, and
+          * a promise whose only mechanism disappears on reload is not a
+          * promise. "Delete this conversation and the documents in it" (below)
+          * remains the bulk withdrawal.
           *
           * The upload control is a real multipart form, so a no-JavaScript
           * visitor's file is stored rather than silently lost -- see

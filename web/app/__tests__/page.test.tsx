@@ -636,6 +636,80 @@ describe("HomePage", () => {
     expect(screen.getByText(getStrings("en").restoredTurnNote)).toBeInTheDocument();
   });
 
+  it("restores attached documents so per-document delete survives a reload", async () => {
+    // The whole point of `ConversationView.documents`: an authenticated upload
+    // is kept until its owner deletes it, and before this the only control
+    // behind that promise vanished on refresh.
+    window.sessionStorage.setItem(CONVERSATION_STORAGE_KEY, "conv-1");
+    mockedReadConversation.mockResolvedValue({
+      kind: "conversation",
+      data: {
+        conversation_id: "conv-1",
+        turns: [],
+        documents: [
+          {
+            id: "doc-1",
+            filename: "lease.pdf",
+            page_count: 3,
+            expires_at: null,
+            retention_notice: "Stored encrypted; stays until you delete it.",
+          },
+        ],
+      },
+    });
+    mockedDeleteDocument.mockResolvedValue({ kind: "deleted" });
+    const strings = getStrings("en");
+
+    render(<HomePage />);
+
+    const deleteButton = await screen.findByRole("button", {
+      name: strings.deleteDocumentLabel("lease.pdf"),
+    });
+    expect(
+      screen.getByText("Stored encrypted; stays until you delete it."),
+    ).toBeInTheDocument();
+
+    await userEvent.click(deleteButton);
+
+    await waitFor(() =>
+      expect(mockedDeleteDocument).toHaveBeenCalledWith(
+        expect.objectContaining({ documentId: "doc-1" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: strings.deleteDocumentLabel("lease.pdf"),
+        }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("restores the transcript even when the response carries no document list", async () => {
+    // Failure direction: a missing `documents` field must cost the document
+    // list, never the whole thread.
+    window.sessionStorage.setItem(CONVERSATION_STORAGE_KEY, "conv-1");
+    mockedReadConversation.mockResolvedValue({
+      kind: "conversation",
+      data: {
+        conversation_id: "conv-1",
+        turns: [
+          {
+            turn_index: 0,
+            question: "How much notice?",
+            answer: "Notice must be one month.",
+            document_answer: null,
+            language: "en",
+          },
+        ],
+      },
+    });
+
+    render(<HomePage />);
+
+    expect(await screen.findByText("How much notice?")).toBeInTheDocument();
+  });
+
   it("forgets a stored conversation the server will not give back", async () => {
     window.sessionStorage.setItem(CONVERSATION_STORAGE_KEY, "conv-gone");
     mockedReadConversation.mockResolvedValue({

@@ -4,6 +4,7 @@ import {
   ANONYMOUS_UPLOAD_TTL_HOURS,
   MAX_DOCUMENTS_PER_CONVERSATION,
   MAX_UPLOAD_BYTES,
+  attachedFromConversationCard,
   attachedFromSummary,
   localUploadProblem,
   uploadRefusal,
@@ -133,6 +134,44 @@ describe('mirrored server limits', () => {
       'application/pdf',
       'text/plain',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    ])
+  })
+})
+
+describe('attachedFromConversationCard', () => {
+  it('produces the same shape an upload does, so a restored file is identical', () => {
+    const restored = attachedFromConversationCard({
+      id: 'doc-1',
+      filename: 'lease.pdf',
+      page_count: 3,
+      expires_at: null,
+      retention_notice: 'Stays until you delete it.',
+    })
+
+    expect(restored).toEqual({
+      id: 'doc-1',
+      filename: 'lease.pdf',
+      pageCount: 3,
+      retentionNotice: 'Stays until you delete it.',
+      expiresAt: null,
+    })
+  })
+
+  it('carries no field that could hold document content', () => {
+    const restored = attachedFromConversationCard({
+      id: 'doc-1',
+      filename: 'lease.pdf',
+      page_count: 1,
+      expires_at: '2026-10-02T00:00:00+00:00',
+      retention_notice: 'Deleted in 24 hours.',
+    })
+
+    expect(Object.keys(restored).sort()).toEqual([
+      'expiresAt',
+      'filename',
+      'id',
+      'pageCount',
+      'retentionNotice',
     ])
   })
 })

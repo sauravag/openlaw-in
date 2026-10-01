@@ -344,3 +344,74 @@ def delete_document(
     session.delete(document)
     session.flush()
     return True
+
+
+@dataclass(frozen=True)
+class StoredDocument:
+    """One document's METADATA. Deliberately carries no content of any kind.
+
+    `ciphertext`, `nonce` and `key_id` are absent by construction rather than
+    by discipline at the call site: a listing exists so a reader can see which
+    of their files are attached and withdraw one, and nothing about that needs
+    the document's text. A type that cannot carry the plaintext cannot leak it
+    into a response body by a later edit.
+    """
+
+    id: str
+    filename: str
+    page_count: int
+    expires_at: datetime | None
+
+
+def list_conversation_documents(
+    session: Session,
+    conversation_id: str,
+    owner: Owner,
+) -> tuple[StoredDocument, ...]:
+    """Return the metadata of every document `owner` has filed under
+    `conversation_id`, oldest first.
+
+    **Why this exists.** An authenticated upload is retained *until the owner
+    deletes it*, and the per-document delete control is the only mechanism
+    behind that promise. Without a listing, a page reload left the reader able
+    to delete the whole conversation but not one file out of three -- a
+    promise whose mechanism disappears on refresh, which is the same defect
+    class as a documented retention window with no purge behind it.
+
+    Owner-scoped in the query itself (`owner_clause`), not filtered in Python
+    afterwards, and `conversation_id` is additionally resolved through
+    `find_owned_conversation` so a conversation belonging to someone else is
+    an empty result from a caller's point of view -- the route turns that into
+    the same 404 an unknown id gets, never a 403 that would confirm the id
+    exists.
+
+    **No audit row is written.** `document_access_log` records reads of
+    document CONTENT (`load_attached_documents` decrypts; this does not and
+    cannot -- see `StoredDocument`). Logging a metadata listing as
+    `action="read"` would put rows in the audit trail that did not read
+    anything, which makes the trail less useful for the investigation it
+    exists to serve, not more.
+    """
+    if find_owned_conversation(session, conversation_id, owner) is None:
+        return ()
+    rows = (
+        session.execute(
+            select(Document)
+            .where(
+                Document.conversation_id == conversation_id,
+                owner_clause(Document, owner),
+            )
+            .order_by(Document.created_at, Document.id)
+        )
+        .scalars()
+        .all()
+    )
+    return tuple(
+        StoredDocument(
+            id=row.id,
+            filename=row.filename,
+            page_count=row.page_count,
+            expires_at=row.expires_at,
+        )
+        for row in rows
+    )

@@ -55,6 +55,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     Response,
     UploadFile,
@@ -65,6 +66,7 @@ from sqlalchemy.orm import Session
 from openlaw.api.refusal import EXTRACTION_REFUSAL_KEYS, raise_refusal
 from openlaw.api.routes import caller_owner, metered_caller
 from openlaw.api.schemas import (
+    ConversationDocumentCard,
     ConversationTurnCard,
     ConversationView,
     DocumentSummary,
@@ -86,7 +88,12 @@ from openlaw.answers.history import HistoryTurn
 from openlaw.documents import ALLOWED_CONTENT_TYPES, PAGES_PER_QUOTA_UNIT
 from openlaw.documents.extract import ExtractionError
 from openlaw.documents.fence import sanitise
-from openlaw.documents.store import delete_document, store_document
+from openlaw.documents.store import (
+    StoredDocument,
+    delete_document,
+    list_conversation_documents,
+    store_document,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -434,15 +441,26 @@ def remove_document(
 def read_conversation(
     request: Request,
     conversation_id: str,
+    language: str | None = Query(default=None),
     authorization: str | None = Header(default=None),
 ) -> ConversationView:
-    """Return the caller's own conversation, for rendering after a reload.
+    """Return the caller's own conversation and its attached documents, for
+    rendering after a reload.
 
     Built from `openlaw.db.conversations.load_history`, which returns
     `HistoryTurn`s rather than raw `Message` rows -- so there is no field on
     anything this endpoint touches that could carry `unverified_summary`. Legal
     claims and document claims are rendered into separate fields, exactly as
     they are on a live turn.
+
+    `documents` carries METADATA only (`openlaw.documents.store
+    .list_conversation_documents`, whose return type cannot hold content), and
+    exists so the per-document delete control survives a page reload: an
+    authenticated upload is retained until its owner deletes it, and before
+    this field that owner could only delete the whole conversation. `language`
+    selects the retention sentence, and is unvalidated on purpose -- it is used
+    only as a dictionary key with an English fallback
+    (`_retention_notice`), never interpolated into anything.
     """
     settings: Settings = request.app.state.settings
     session_factory: Callable = request.app.state.session_factory
@@ -454,11 +472,37 @@ def read_conversation(
             turns = load_history(session, conversation_id, owner)
         except AccessDenied:
             raise_refusal("not_found")
+        documents = list_conversation_documents(session, conversation_id, owner)
+        notice = _retention_notice(owner, settings, language)
     return ConversationView(
         conversation_id=conversation_id,
         turns=tuple(
             _turn_card(index, turn) for index, turn in enumerate(turns)
         ),
+        documents=tuple(
+            _document_card(document, notice) for document in documents
+        ),
+    )
+
+
+def _document_card(
+    document: StoredDocument, retention_notice: str
+) -> ConversationDocumentCard:
+    """Render one still-attached document, metadata only.
+
+    `retention_notice` is passed in rather than recomputed per document: it
+    depends on the OWNER, not on the file, and computing it once is what keeps
+    two documents in one conversation from ever disagreeing about how long
+    either is kept.
+    """
+    return ConversationDocumentCard(
+        id=document.id,
+        filename=document.filename,
+        page_count=document.page_count,
+        expires_at=(
+            document.expires_at.isoformat() if document.expires_at else None
+        ),
+        retention_notice=retention_notice,
     )
 
 

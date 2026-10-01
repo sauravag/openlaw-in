@@ -27,7 +27,13 @@ from openlaw.db.models import (
 )
 from openlaw.documents.crypto import key_fingerprint
 from openlaw.documents.extract import ExtractionError
-from openlaw.documents.store import audit, delete_document, load_excerpts, store_document
+from openlaw.documents.store import (
+    audit,
+    delete_document,
+    list_conversation_documents,
+    load_excerpts,
+    store_document,
+)
 
 VALID_KEY = base64.b64encode(b"0" * 32).decode()
 _TEXT_TYPE = "text/plain"
@@ -368,3 +374,117 @@ def test_audit_records_anonymous_actors_distinctly_from_signed_in_ones() -> None
     row = session.query(DocumentAccessLog).filter_by(document_id="doc-1").one()
     assert row.actor_kind == "anon"
     assert row.actor_ref == "anon-tok"
+
+
+# --- Listing a conversation's documents (Plan 6 Task 18) --------------------
+
+
+def test_listing_returns_metadata_with_no_content_field_at_all() -> None:
+    session = _session()
+    user = _user(session)
+    owner = Owner(user.id, None)
+    settings = _settings()
+    conversation = _conversation(session, owner, settings)
+    document = store_document(
+        session, owner, conversation.id, "lease.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+
+    listed = list_conversation_documents(session, conversation.id, owner)
+
+    assert len(listed) == 1
+    assert listed[0].id == document.id
+    assert listed[0].filename == "lease.txt"
+    assert listed[0].page_count == document.page_count
+    # The type itself cannot carry plaintext, ciphertext, nonce or key id --
+    # that is the protection, not a convention at the call site.
+    assert set(vars(listed[0])) == {"id", "filename", "page_count", "expires_at"}
+
+
+def test_listing_never_writes_an_audit_row() -> None:
+    """`document_access_log` records reads of CONTENT. A metadata listing
+    decrypts nothing, and logging it as a read would dilute the trail."""
+    session = _session()
+    user = _user(session)
+    owner = Owner(user.id, None)
+    settings = _settings()
+    conversation = _conversation(session, owner, settings)
+    store_document(
+        session, owner, conversation.id, "f.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+    session.query(DocumentAccessLog).delete()
+
+    list_conversation_documents(session, conversation.id, owner)
+
+    assert session.query(DocumentAccessLog).count() == 0
+
+
+def test_listing_a_conversation_another_subject_owns_is_empty() -> None:
+    session = _session()
+    owner_a = Owner(_user(session, "a@example.com").id, None)
+    owner_b = Owner(_user(session, "b@example.com").id, None)
+    settings = _settings()
+    conversation = _conversation(session, owner_a, settings)
+    store_document(
+        session, owner_a, conversation.id, "f.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+
+    assert list_conversation_documents(session, conversation.id, owner_b) == ()
+
+
+def test_listing_a_conversation_another_anonymous_token_owns_is_empty() -> None:
+    session = _session()
+    settings = _settings()
+    owner_a = Owner(None, "token-a")
+    conversation = _conversation(session, owner_a, settings)
+    store_document(
+        session, owner_a, conversation.id, "f.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+
+    assert list_conversation_documents(session, conversation.id, Owner(None, "token-b")) == ()
+
+
+def test_listing_an_unknown_conversation_is_empty() -> None:
+    session = _session()
+    owner = Owner(_user(session).id, None)
+
+    assert list_conversation_documents(session, "no-such-conversation", owner) == ()
+
+
+def test_listing_carries_the_anonymous_expiry_and_omits_it_when_authenticated() -> None:
+    session = _session()
+    settings = _settings()
+    anonymous = Owner(None, "token-a")
+    anon_conversation = _conversation(session, anonymous, settings)
+    store_document(
+        session, anonymous, anon_conversation.id, "f.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+    signed_in = Owner(_user(session).id, None)
+    signed_in_conversation = _conversation(session, signed_in, settings)
+    store_document(
+        session, signed_in, signed_in_conversation.id, "f.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+
+    assert list_conversation_documents(session, anon_conversation.id, anonymous)[0].expires_at
+    assert (
+        list_conversation_documents(session, signed_in_conversation.id, signed_in)[0].expires_at
+        is None
+    )
+
+
+def test_a_deleted_document_leaves_the_listing() -> None:
+    session = _session()
+    owner = Owner(_user(session).id, None)
+    settings = _settings()
+    conversation = _conversation(session, owner, settings)
+    first = store_document(
+        session, owner, conversation.id, "a.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+    second = store_document(
+        session, owner, conversation.id, "b.txt", _TEXT_TYPE, _NOTICE_TEXT, settings
+    )
+
+    assert delete_document(session, first.id, owner) is True
+
+    assert [entry.id for entry in list_conversation_documents(session, conversation.id, owner)] == [
+        second.id
+    ]

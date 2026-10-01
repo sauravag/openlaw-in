@@ -405,6 +405,33 @@ user question (any supported language)
                        + corpus date + DLSA/NALSA escalation
 ```
 
+### 6.1 Uploaded documents are a second citation class
+
+A citizen may attach their own paperwork — a lease, an eviction notice, an FIR copy
+— and the answer may quote it. That text is **evidence of what their paper says, never
+evidence of what the law is**, and the contract above is extended, not relaxed, to hold
+that line.
+
+**The two-namespace rule.** Corpus chunk ids and uploaded-excerpt ids live in disjoint
+namespaces: every uploaded excerpt id begins `doc:`, and no corpus id does. The model
+emits two separate claim lists — legal claims citing corpus `chunk_id`s, document claims
+citing `doc:` excerpt ids — and the validator checks each list against its own namespace.
+A claim is dropped whole, not trimmed, if any id it cites is outside its namespace or
+outside what was actually shown this turn.
+
+**The no-mixing rule.** Nothing merges the two. A legal claim citing a `doc:` id is
+dropped; a document claim citing a corpus id is dropped; a document excerpt never becomes
+a source card (the document citation type has no `source_url` field to carry one, by
+construction); and document claims are rendered in their own response field under their
+own heading, never concatenated into the legal answer. Uploaded text reaches the model
+inside explicit delimiters, in a pass separate from the one that composes legal claims,
+so a document instructing the model to ignore its rules cannot steer a legal claim.
+
+**What is NOT verified.** The validator proves a cited excerpt or chunk was shown this
+turn. It does not prove the claim's sentence is what that excerpt or chunk actually says
+— there is no entailment check anywhere in this pipeline, in either namespace. That is a
+known limit, stated here rather than left to be discovered.
+
 ### Why structured outputs
 
 The generator returns `output_config.format` JSON — a list of claims, each carrying the
@@ -555,7 +582,18 @@ Render order is `tools → system → messages`; any byte change invalidates eve
 after it. The system prompt, answer-format rules and legal glossary sit **before** the
 cache breakpoint. Retrieved chunks — different every turn — sit **after** it. Caching
 retrieved context would yield a 0% hit rate. Verify with
-`usage.cache_read_input_tokens`.
+`usage.cache_read_input_tokens` on the Anthropic path.
+
+**Measured, on the OpenRouter/GLM path this deployment actually routes to.** Caching
+there is automatic — there is no breakpoint to declare, so it is earned by prefix
+stability alone — and it is real and large: 3,520 of 3,622 prompt tokens came back from
+cache on a second identical call (~97%), billed at 0.2x with no write cost, both figures
+confirmed from live responses and first-party cost data rather than from documentation.
+Read it back from `usage.prompt_tokens_details.cached_tokens`; a top-level
+`usage.cache_discount` was never observed. Two caveats an operator must budget for:
+prefixes under roughly 1,000–1,500 tokens were never cached at all, and the
+document-analysis pass's prefix sits below that floor — so **a turn carrying an uploaded
+document costs two full uncached model calls**, and only the legal pass benefits.
 
 ---
 
@@ -713,7 +751,13 @@ standards.
 - Tribunal and regulator decisions — **not deferred but unavailable**: held as PDFs
   with no extracted text (§4). Blocked on upstream OCR, not on our scoping.
 - LLM-based knowledge-graph extraction — **rejected, not deferred** (§5).
-- Document drafting, document upload, case tracking.
+- Document drafting and case tracking.
+- **Document upload is no longer out of scope.** It was listed here, alongside
+  drafting and case tracking, until the 2026-09-29 conversations-and-artifacts
+  plan added it — as a separate citation class that is never presented as law
+  (§6.1). The line is amended rather than deleted so the reversal is on the
+  record: this document is the authority every plan argues from, and a silent
+  edit would make it untrustworthy. Drafting and case tracking remain out.
 - Lawyer-facing research tooling.
 - Mobile applications.
 - Any paid tier.

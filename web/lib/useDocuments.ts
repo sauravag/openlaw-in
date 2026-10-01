@@ -33,6 +33,14 @@ export interface DocumentsState {
   refusal: RefusalData | null
   attachFile: (file: File) => Promise<void>
   removeDocument: (documentId: string) => Promise<void>
+  /**
+   * Adopt the documents a restored conversation still holds.
+   *
+   * Replaces the list outright rather than merging: the server's answer to
+   * "which of my files are still attached" is the authoritative one, and a
+   * merge could leave a document on screen that was deleted in another tab.
+   */
+  restore: (documents: readonly AttachedDocument[]) => void
   /** Forget every document, after the whole conversation has been deleted. */
   clear: () => void
 }
@@ -92,6 +100,10 @@ export function useDocuments({
     setDocuments((current) => withoutDocument(current, documentId))
   }
 
+  function restore(restored: readonly AttachedDocument[]): void {
+    setDocuments([...restored])
+  }
+
   function clear(): void {
     setDocuments([])
     setRefusal(null)
@@ -106,6 +118,7 @@ export function useDocuments({
     refusal,
     attachFile,
     removeDocument,
+    restore,
     clear,
   }
 }

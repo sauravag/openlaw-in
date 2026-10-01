@@ -1,6 +1,10 @@
 import { getFallbackHelplineSet } from './fallbackHelplines'
 import { getStrings } from './strings'
-import type { DocumentSummaryData, RefusalData } from './types'
+import type {
+  ConversationDocumentCardData,
+  DocumentSummaryData,
+  RefusalData,
+} from './types'
 
 /**
  * The client-side model of a document the reader has attached.
@@ -68,6 +72,29 @@ export function attachedFromSummary(summary: DocumentSummaryData): AttachedDocum
     pageCount: summary.page_count,
     retentionNotice: summary.retention_notice,
     expiresAt: summary.expires_at,
+  }
+}
+
+/**
+ * Project a RESTORED document onto the same interface shape.
+ *
+ * Separate from `attachedFromSummary` because the two server shapes are
+ * genuinely different types (`DocumentSummary` carries `conversation_id` and
+ * `quota_remaining`; a restored card carries neither), and collapsing them
+ * into one loose shape is how a field quietly goes missing. The RESULT is
+ * identical, which is the point: a document restored after a reload is
+ * indistinguishable on screen from one just uploaded, and carries the same
+ * delete control.
+ */
+export function attachedFromConversationCard(
+  card: ConversationDocumentCardData,
+): AttachedDocument {
+  return {
+    id: card.id,
+    filename: card.filename,
+    pageCount: card.page_count,
+    retentionNotice: card.retention_notice,
+    expiresAt: card.expires_at,
   }
 }
 

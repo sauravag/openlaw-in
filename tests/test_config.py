@@ -210,6 +210,11 @@ def test_env_example_agrees_with_compose_self_host_defaults() -> None:
     for var, attr in [
         ("OPENLAW_QUOTA_ENABLED", "quota_enabled"),
         ("OPENLAW_COOKIE_SECURE", "cookie_secure"),
+        # Plan 6 Task 18: before this, `api` was never given
+        # OPENLAW_UPLOADS_ENABLED or OPENLAW_DOCUMENT_ENCRYPTION_KEY at all,
+        # so a compose self-host came up with uploads ON (the code default)
+        # and no key to encrypt with.
+        ("OPENLAW_UPLOADS_ENABLED", "uploads_enabled"),
     ]:
         match = re.search(r"\$\{" + var + r":-(\w+)\}", compose_text)
         assert match, f"{var} has no ${{...:-default}} fallback in docker-compose.yml"
@@ -457,14 +462,24 @@ def test_document_limits_can_be_overridden_via_environment(monkeypatch) -> None:
     assert settings.document_audit_log_path == Path("/secure/document_access.jsonl")
 
 
-def test_env_example_uploads_settings_parse_and_default_to_enabled() -> None:
-    """The shipped .env.example must parse and leave uploads on by default,
-    with no key configured -- exercising the same `cp .env.example .env`
-    path as the existing coherence tests above."""
+def test_env_example_uploads_settings_parse_and_default_to_disabled() -> None:
+    """The shipped .env.example must parse, and must NOT leave uploads on with
+    no key configured.
+
+    **This assertion was inverted by Plan 6 Task 18, deliberately.** It
+    previously asserted `uploads_enabled is True` alongside an empty
+    `document_encryption_key` -- and that combination is incoherent: the
+    feature is advertised and the first real upload fails, on a person's FIR,
+    because there is nothing to encrypt with. `docker-compose.yml` did not even
+    pass either setting to the `api` container, so an operator who configured a
+    key in `.env` saw it ignored. Both files now default the switch OFF and the
+    key now travels, and `test_env_example_agrees_with_compose_self_host_defaults`
+    keeps them in lockstep.
+    """
     root = Path(__file__).resolve().parent.parent
     example = Settings(_env_file=root / ".env.example")  # type: ignore[call-arg]
 
-    assert example.uploads_enabled is True
+    assert example.uploads_enabled is False
     assert not example.document_encryption_key
     assert not example.document_encryption_key_previous
     assert example.max_upload_bytes == 10_485_760

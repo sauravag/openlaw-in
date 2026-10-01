@@ -121,6 +121,107 @@ def test_get_a_foreign_conversation_is_a_404(tmp_path: Path) -> None:
     assert response.json()["helplines"]
 
 
+def test_get_conversation_lists_the_documents_still_attached(tmp_path: Path) -> None:
+    """The reload path for per-document deletion (Plan 6 Task 18).
+
+    An authenticated upload is retained until its owner deletes it, and this
+    list is the only thing that makes the per-document control reachable after
+    a refresh.
+    """
+    client = build_client(tmp_path)
+    document = upload(client, filename="lease.txt", headers=bearer()).json()
+
+    response = client.get(
+        f"/conversations/{document['conversation_id']}", headers=bearer()
+    )
+
+    assert response.status_code == 200
+    listed = response.json()["documents"]
+    assert [entry["id"] for entry in listed] == [document["id"]]
+    assert listed[0]["filename"] == "lease.txt"
+    assert listed[0]["page_count"] == document["page_count"]
+
+
+def test_a_listed_document_carries_no_content_and_no_url(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    document = upload(client, headers=bearer()).json()
+
+    response = client.get(
+        f"/conversations/{document['conversation_id']}", headers=bearer()
+    )
+
+    entry = response.json()["documents"][0]
+    assert set(entry) == {
+        "id",
+        "filename",
+        "page_count",
+        "expires_at",
+        "retention_notice",
+    }
+    # The uploaded text is in `tests/api/conftest.NOTICE_TEXT`; no fragment of
+    # it may reach a listing, nor may anything that looks like a source link.
+    assert "security deposit" not in response.text
+    assert "source_url" not in response.text
+
+
+def test_a_listed_document_can_then_be_deleted_individually(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    first = upload(client, filename="a.txt", headers=bearer()).json()
+    conversation_id = first["conversation_id"]
+    second = upload(
+        client, filename="b.txt", conversation_id=conversation_id, headers=bearer()
+    ).json()
+
+    assert (
+        client.delete(f"/documents/{first['id']}", headers=bearer()).status_code == 204
+    )
+
+    remaining = client.get(
+        f"/conversations/{conversation_id}", headers=bearer()
+    ).json()["documents"]
+    assert [entry["id"] for entry in remaining] == [second["id"]]
+
+
+def test_an_anonymous_listing_repeats_the_expiry_promise(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    document = upload(client).json()
+
+    entry = client.get(
+        f"/conversations/{document['conversation_id']}"
+    ).json()["documents"][0]
+
+    assert entry["expires_at"] is not None
+    assert entry["retention_notice"] == document["retention_notice"]
+
+
+def test_a_hindi_listing_renders_the_retention_notice_in_hindi(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+    document = upload(client, headers=bearer()).json()
+
+    entry = client.get(
+        f"/conversations/{document['conversation_id']}?language=hi",
+        headers=bearer(),
+    ).json()["documents"][0]
+
+    assert entry["retention_notice"] != document["retention_notice"]
+    assert any("\u0900" <= char <= "\u097f" for char in entry["retention_notice"])
+
+
+def test_a_listing_never_shows_another_identity_their_documents(tmp_path: Path) -> None:
+    """A conversation one identity owns, holding a document another uploaded,
+    cannot exist -- but the listing is owner-scoped independently anyway."""
+    client = build_client(tmp_path)
+    mine = upload(client, headers=bearer("user-1", "one@example.com")).json()
+
+    response = client.get(
+        f"/conversations/{mine['conversation_id']}",
+        headers=bearer("user-2", "two@example.com"),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["helplines"]
+
+
 def test_delete_a_conversation_removes_its_turns_and_documents(tmp_path: Path) -> None:
     client = build_client(tmp_path)
     document = upload(client, headers=bearer()).json()

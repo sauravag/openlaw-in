@@ -402,13 +402,46 @@ class ConversationTurnCard(BaseModel):
     language: str
 
 
+class ConversationDocumentCard(BaseModel):
+    """One document still attached to a conversation, after a reload.
+
+    **Metadata only, and that is enforced by the type, not by the caller.**
+    There is no field here that could carry document text, a decrypted
+    excerpt, a ciphertext blob, or a URL -- the same reason
+    `DocumentCitationCard` has no `source_url`. A reader needs to recognise
+    their own file and withdraw it; neither needs its content back.
+
+    Built from `openlaw.documents.store.StoredDocument`, which also cannot
+    hold content. `retention_notice` is the same sentence the upload response
+    carried (`openlaw.api.artifacts._retention_notice`) so a restored list
+    repeats the promise that was made rather than paraphrasing it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    filename: str
+    page_count: int
+    expires_at: str | None = None
+    retention_notice: str
+
+
 class ConversationView(BaseModel):
-    """A conversation's turns, for rendering after a reload."""
+    """A conversation's turns and its still-attached documents, for rendering
+    after a reload.
+
+    `documents` exists because an authenticated upload is retained *until the
+    owner deletes it*, and per-document deletion is the only mechanism behind
+    that promise. Before this field the list came back empty on reload, so the
+    reader could delete the whole conversation but not one file out of three
+    -- see `openlaw.documents.store.list_conversation_documents`.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     conversation_id: str
     turns: tuple[ConversationTurnCard, ...] = ()
+    documents: tuple[ConversationDocumentCard, ...] = ()
 
 
 class QuotaExceeded(BaseModel):

@@ -191,7 +191,24 @@ function isConversationView(value: unknown): value is ConversationViewData {
   return (
     typeof body.conversation_id === "string" &&
     Array.isArray(body.turns) &&
-    body.turns.every(isConversationTurnCard)
+    body.turns.every(isConversationTurnCard) &&
+    // Optional rather than required on purpose: a response from a server that
+    // predates the `documents` field must still restore the TRANSCRIPT. Hard
+    // coupling here would turn a missing document list into a lost thread,
+    // which is the worse of the two failures.
+    isOptionalArrayOf(body.documents, isConversationDocumentCard)
+  );
+}
+
+function isConversationDocumentCard(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const document = value as Record<string, unknown>;
+  return (
+    typeof document.id === "string" &&
+    typeof document.filename === "string" &&
+    typeof document.page_count === "number" &&
+    isOptionalNullableString(document.expires_at) &&
+    typeof document.retention_notice === "string"
   );
 }
 
@@ -542,11 +559,17 @@ export async function readConversation(
       data: fallbackRefusalData(params.language),
     };
   }
-  const response = await send(`${CONVERSATIONS_ENDPOINT}/${params.conversationId}`, {
-    method: "GET",
-    credentials: "include",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  // `language` selects the retention sentence on each restored document, so a
+  // Hindi reader is not shown an English promise about their own file.
+  const query = `?language=${encodeURIComponent(params.language)}`;
+  const response = await send(
+    `${CONVERSATIONS_ENDPOINT}/${params.conversationId}${query}`,
+    {
+      method: "GET",
+      credentials: "include",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    },
+  );
   if (response === null) {
     return {
       kind: "refused",
