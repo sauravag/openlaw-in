@@ -10,6 +10,11 @@ interface RefusalNoticeProps {
    * H3) -- independent of `data`, which carries no `language` field (the
    * 500 body has no answer to have been localised for). */
   language: string
+  /** Set `false` when the caller has already rendered this refusal's crisis
+   * block higher up the page -- see `AnswerView`'s identical prop, and
+   * `app/page.tsx`, which hoists the newest turn's crisis above the thread.
+   * Defaults to `true` so nothing is lost by omission. */
+  showCrisis?: boolean
 }
 
 /**
@@ -37,11 +42,15 @@ interface RefusalNoticeProps {
  * because "we could not answer" is not itself an emergency, while what the
  * person asked about might be.
  */
-export default function RefusalNotice({ data, language }: RefusalNoticeProps) {
+export default function RefusalNotice({
+  data,
+  language,
+  showCrisis = true,
+}: RefusalNoticeProps) {
   const strings = getStrings(language)
   return (
     <article data-testid="refusal" className="flex flex-col gap-5">
-      {data.crisis_response && (
+      {showCrisis && data.crisis_response && (
         <CrisisAlert
           crisisResponse={data.crisis_response}
           helplines={data.helplines}

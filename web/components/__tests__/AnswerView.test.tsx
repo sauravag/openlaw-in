@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import AnswerView from '../AnswerView'
+import { getStrings } from '@/lib/strings'
 import type { AnswerData, SourceCard } from '@/lib/types'
 
 /** `SourceCard` gained `kind` and the judgment fields in Plan 6 Task 7; this
@@ -163,6 +164,93 @@ describe('AnswerView', () => {
     expect(
       screen.queryByRole('heading', { name: /what the law says/i }),
     ).not.toBeInTheDocument()
+  })
+
+  it('renders document content in its own region, structurally apart from the law (Task 17)', () => {
+    // The single most important visual requirement of Task 17, asserted
+    // structurally rather than by wording: the document region and the
+    // sources region are different elements, and neither contains the
+    // other's content. A future restyle can move anything it likes as long
+    // as that separation survives.
+    render(
+      <AnswerView
+        data={{
+          ...baseAnswer,
+          document_answer: 'Clause 7 of your lease requires two months of notice.',
+          document_citations: [
+            { excerpt_id: 'doc:1', document_id: 'd1', filename: 'lease.pdf', page_number: 4 },
+          ],
+        }}
+      />,
+    )
+    const strings = getStrings('en')
+    const documentRegion = screen.getByRole('region', {
+      name: strings.documentCitationsHeading,
+    })
+    const sourcesRegion = screen.getByRole('region', { name: strings.sourcesHeading })
+
+    expect(documentRegion).not.toBe(sourcesRegion)
+    expect(documentRegion.contains(sourcesRegion)).toBe(false)
+    expect(sourcesRegion.contains(documentRegion)).toBe(false)
+    // The law's prose is not inside the document region...
+    expect(documentRegion).not.toHaveTextContent('deposit must be refunded')
+    // ...and the reader's own filename is not inside the sources region.
+    expect(sourcesRegion).not.toHaveTextContent('lease.pdf')
+    // The document region says in words that it is not law.
+    expect(documentRegion).toHaveTextContent(strings.documentNotLawNote)
+  })
+
+  it('never gives document content a link, while every law source keeps one', () => {
+    const { container } = render(
+      <AnswerView
+        data={{
+          ...baseAnswer,
+          document_answer: 'Clause 7 of your lease requires two months of notice.',
+          document_citations: [
+            { excerpt_id: 'doc:1', document_id: 'd1', filename: 'lease.pdf', page_number: 4 },
+          ],
+        }}
+      />,
+    )
+    const documentRegion = screen.getByRole('region', {
+      name: getStrings('en').documentCitationsHeading,
+    })
+    expect(documentRegion.querySelectorAll('a')).toHaveLength(0)
+    expect(container.querySelector('a[href^="https://www.indiacode"]')).toBeInTheDocument()
+  })
+
+  it('puts the crisis box above the document region as well as above the law', () => {
+    const { container } = render(
+      <AnswerView
+        data={{
+          ...baseAnswer,
+          crisis_response: 'Call 181 for help now.',
+          document_answer: 'Clause 7 of your lease requires two months of notice.',
+          document_citations: [],
+        }}
+      />,
+    )
+    const text = container.textContent ?? ''
+    expect(text.indexOf('Call 181')).toBeLessThan(text.indexOf('Clause 7 of your lease'))
+  })
+
+  it('omits the document region entirely when no document contributed to the turn', () => {
+    render(<AnswerView data={baseAnswer} />)
+    expect(
+      screen.queryByRole('region', { name: getStrings('en').documentCitationsHeading }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('lets the page hoist the crisis box out of the answer without losing it twice over', () => {
+    // `page.tsx` renders the latest turn crisis ABOVE the whole thread, so
+    // the copy inside the answer would be a second, lower one.
+    render(
+      <AnswerView
+        data={{ ...baseAnswer, crisis_response: 'Call 181 for help now.' }}
+        showCrisis={false}
+      />,
+    )
+    expect(screen.queryByTestId('crisis')).not.toBeInTheDocument()
   })
 
   it('shows the unanswerable framing sentence outside the answer paragraph, in the answer language', () => {

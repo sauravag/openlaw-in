@@ -67,6 +67,60 @@ export interface UIStrings {
   /** Secondary line under a citation, naming the host it opens. */
   sourceOpensAt: (host: string) => string;
   notLegalAdvice: string;
+
+  // --- Conversations and documents (Plan 6 Task 17) ---------------------
+  /** Heading above the thread of questions and answers. */
+  threadHeading: string;
+  /** Small label above the person's own question inside a turn. */
+  yourQuestionLabel: string;
+  /** Names the documents that were read for one particular turn. */
+  attachedToThisTurnLabel: string;
+  /** Says a replayed turn came back from storage, and what is missing from it. */
+  restoredTurnNote: string;
+  /** The destructive control that removes a conversation and its documents. */
+  deleteConversationLabel: string;
+  /** Heading of the attached-documents section. */
+  documentsHeading: string;
+  /**
+   * The honest paragraph: read only to answer, stored encrypted, deletable,
+   * and (for an anonymous visitor) temporary. Never buried, never overstated.
+   */
+  documentsIntro: string;
+  /** Accessible label of the file input itself. */
+  attachFileLabel: string;
+  /** Visible text of the upload form's submit button (the no-JavaScript path). */
+  attachButton: string;
+  /** States the limits BEFORE a file is chosen, so a refusal is never a surprise. */
+  uploadLimitsNote: (maxMegabytes: number, maxDocuments: number) => string;
+  /** Shown instead of the file input once the conversation holds its maximum. */
+  uploadFullNote: (maxDocuments: number) => string;
+  /**
+   * The anonymous-retention sentence, with the one action that changes it.
+   * `hours` comes from `documents.ANONYMOUS_UPLOAD_TTL_HOURS`, mirroring
+   * `Settings.anonymous_upload_ttl_hours`.
+   */
+  anonymousUploadNotice: (hours: number) => string;
+  signInCta: string;
+  /** Progress line while a file is in flight. */
+  uploadingStatus: (filename: string) => string;
+  /** Accessible name of a document's delete button -- names the file. */
+  deleteDocumentLabel: (filename: string) => string;
+  /** Visible text of that same button, where the filename is already beside it. */
+  deleteDocumentButton: string;
+  documentPageCount: (count: number) => string;
+  attachedToNextTurnLabel: string;
+  /** Heads the region that holds the reader's OWN document content. */
+  documentCitationsHeading: string;
+  /** The sentence that makes the distinction impossible to miss. */
+  documentNotLawNote: string;
+  documentPageLabel: (page: number) => string;
+  /** Upload refusals the client itself detects, before any byte is sent. */
+  uploadTooLargeError: (maxMegabytes: number) => string;
+  uploadUnsupportedTypeError: string;
+  uploadTooManyDocumentsError: (maxDocuments: number) => string;
+  uploadNoFileError: string;
+  /** Escalation footer attached to a locally detected upload refusal. */
+  uploadFailedFooter: string;
 }
 
 const EN: UIStrings = {
@@ -118,6 +172,42 @@ const EN: UIStrings = {
   sourceDecidedOn: (date) => `Decided ${date}`,
   sourceOpensAt: (host) => `Opens ${host}`,
   notLegalAdvice: "This is legal information, not legal advice.",
+
+  threadHeading: "Your conversation",
+  yourQuestionLabel: "You asked",
+  attachedToThisTurnLabel: "Read for this question",
+  restoredTurnNote:
+    "Restored after the page reloaded. The sources were not saved with it \u2014 ask again to see them.",
+  deleteConversationLabel: "Delete this conversation and the documents in it",
+  documentsHeading: "Your documents",
+  documentsIntro:
+    "A document you attach is read only to help answer your question. It is stored encrypted, it is not shown to anyone else, and you can delete it here at any time.",
+  attachFileLabel: "Choose a document (PDF, Word or text)",
+  attachButton: "Attach document",
+  uploadLimitsNote: (maxMegabytes, maxDocuments) =>
+    `Up to ${maxDocuments} documents, each no larger than ${maxMegabytes} MB. PDF, Word (.docx) and plain text only \u2014 photographs and scans cannot be read.`,
+  uploadFullNote: (maxDocuments) =>
+    `You have attached the most documents we can read at once (${maxDocuments}). Delete one to attach another.`,
+  anonymousUploadNotice: (hours) =>
+    `This document will be deleted after ${hours} hours. Sign in to keep it.`,
+  signInCta: "Sign in",
+  uploadingStatus: (filename) => `Sending ${filename}\u2026`,
+  deleteDocumentLabel: (filename) => `Delete ${filename}`,
+  deleteDocumentButton: "Delete",
+  documentPageCount: (count) => (count === 1 ? "1 page" : `${count} pages`),
+  attachedToNextTurnLabel: "These will be read for your next question.",
+  documentCitationsHeading: "From your document",
+  documentNotLawNote: "This is your own document, not law.",
+  documentPageLabel: (page) => `Page ${page}`,
+  uploadTooLargeError: (maxMegabytes) =>
+    `That file is larger than ${maxMegabytes} MB, so it was not sent. Try a smaller file, or only the pages that matter.`,
+  uploadUnsupportedTypeError:
+    "We can only read PDF, Word (.docx) and plain text files. Photographs and scanned images cannot be read.",
+  uploadTooManyDocumentsError: (maxDocuments) =>
+    `You can attach at most ${maxDocuments} documents to one conversation. Delete one before adding another.`,
+  uploadNoFileError: "No file was chosen, so nothing was sent.",
+  uploadFailedFooter:
+    "Your document was not stored. This is legal information, not legal advice \u2014 free legal aid is available on 15100.",
 };
 
 const HI: UIStrings = {
@@ -169,6 +259,42 @@ const HI: UIStrings = {
   sourceDecidedOn: (date) => `निर्णय की तारीख़ ${date}`,
   sourceOpensAt: (host) => `${host} खुलेगा`,
   notLegalAdvice: "यह कानूनी जानकारी है, कानूनी सलाह नहीं।",
+
+  threadHeading: "आपकी बातचीत",
+  yourQuestionLabel: "आपने पूछा",
+  attachedToThisTurnLabel: "इस सवाल के लिए पढ़ा गया",
+  restoredTurnNote:
+    "पेज दोबारा लोड होने के बाद वापस लाया गया। इसके साथ स्रोत सुरक्षित नहीं रहते \u2014 उन्हें देखने के लिए सवाल फिर पूछें।",
+  deleteConversationLabel: "यह बातचीत और इसमें रखे दस्तावेज़ मिटाएँ",
+  documentsHeading: "आपके दस्तावेज़",
+  documentsIntro:
+    "आप जो दस्तावेज़ जोड़ते हैं, उसे सिर्फ़ आपके सवाल का जवाब देने में मदद के लिए पढ़ा जाता है। वह एन्क्रिप्टेड रूप में रखा जाता है, किसी और को नहीं दिखाया जाता, और आप उसे यहाँ से कभी भी मिटा सकते हैं।",
+  attachFileLabel: "दस्तावेज़ चुनें (PDF, Word या टेक्स्ट)",
+  attachButton: "दस्तावेज़ जोड़ें",
+  uploadLimitsNote: (maxMegabytes, maxDocuments) =>
+    `कुल ${maxDocuments} दस्तावेज़ तक, हर एक ${maxMegabytes} MB से बड़ा नहीं। सिर्फ़ PDF, Word (.docx) और सादा टेक्स्ट \u2014 फ़ोटो और स्कैन नहीं पढ़े जा सकते।`,
+  uploadFullNote: (maxDocuments) =>
+    `आपने एक साथ पढ़े जा सकने वाले सबसे ज़्यादा दस्तावेज़ (${maxDocuments}) जोड़ दिए हैं। नया जोड़ने के लिए एक मिटाएँ।`,
+  anonymousUploadNotice: (hours) =>
+    `यह दस्तावेज़ ${hours} घंटों के बाद मिटा दिया जाएगा। इसे रखना है तो साइन इन करें।`,
+  signInCta: "साइन इन करें",
+  uploadingStatus: (filename) => `${filename} भेजा जा रहा है\u2026`,
+  deleteDocumentLabel: (filename) => `${filename} मिटाएँ`,
+  deleteDocumentButton: "मिटाएँ",
+  documentPageCount: (count) => `${count} पृष्ठ`,
+  attachedToNextTurnLabel: "आपके अगले सवाल के लिए इन्हें पढ़ा जाएगा।",
+  documentCitationsHeading: "आपके दस्तावेज़ से",
+  documentNotLawNote: "यह आपका अपना दस्तावेज़ है, कानून नहीं।",
+  documentPageLabel: (page) => `पृष्ठ ${page}`,
+  uploadTooLargeError: (maxMegabytes) =>
+    `यह फ़ाइल ${maxMegabytes} MB से बड़ी है, इसलिए भेजी नहीं गई। कोई छोटी फ़ाइल आज़माएँ, या सिर्फ़ ज़रूरी पन्ने भेजें।`,
+  uploadUnsupportedTypeError:
+    "हम सिर्फ़ PDF, Word (.docx) और सादा टेक्स्ट फ़ाइलें पढ़ सकते हैं। फ़ोटो और स्कैन की गई तस्वीरें नहीं पढ़ी जा सकतीं।",
+  uploadTooManyDocumentsError: (maxDocuments) =>
+    `एक बातचीत में ज़्यादा से ज़्यादा ${maxDocuments} दस्तावेज़ जोड़े जा सकते हैं। नया जोड़ने से पहले एक मिटाएँ।`,
+  uploadNoFileError: "कोई फ़ाइल नहीं चुनी गई, इसलिए कुछ नहीं भेजा गया।",
+  uploadFailedFooter:
+    "आपका दस्तावेज़ सुरक्षित नहीं रखा गया। यह कानूनी जानकारी है, कानूनी सलाह नहीं \u2014 मुफ़्त कानूनी सहायता 15100 पर उपलब्ध है।",
 };
 
 export function getStrings(language: Language["code"] | string): UIStrings {

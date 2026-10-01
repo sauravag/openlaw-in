@@ -21,6 +21,23 @@ const nextConfig: NextConfig = {
         source: "/api/openlaw/ask",
         destination: `${OPENLAW_API_URL}/ask`,
       },
+      // The conversations-and-documents surface (`openlaw.api.artifacts`,
+      // Plan 6 Task 15). Still enumerated one route at a time rather than
+      // wildcarded, for the same reason M7 narrowed `/ask`: a `/:path*`
+      // rewrite would also expose `/readyz`, which reports Postgres and
+      // Qdrant reachability to any anonymous caller.
+      {
+        source: "/api/openlaw/documents",
+        destination: `${OPENLAW_API_URL}/documents`,
+      },
+      {
+        source: "/api/openlaw/documents/:documentId",
+        destination: `${OPENLAW_API_URL}/documents/:documentId`,
+      },
+      {
+        source: "/api/openlaw/conversations/:conversationId",
+        destination: `${OPENLAW_API_URL}/conversations/:conversationId`,
+      },
     ];
   },
 };

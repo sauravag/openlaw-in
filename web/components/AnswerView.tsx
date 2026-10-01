@@ -1,11 +1,21 @@
 import { getStrings } from '@/lib/strings'
 import type { AnswerData } from '@/lib/types'
 import CrisisAlert from './CrisisAlert'
+import DocumentCitationList from './DocumentCitationList'
 import HelplineList from './HelplineList'
 import SourceList from './SourceList'
 
 interface AnswerViewProps {
   data: AnswerData
+  /**
+   * Set `false` when the caller has already rendered this answer's crisis
+   * block somewhere higher up the page. `app/page.tsx` does exactly that for
+   * the newest turn: inside a thread the newest answer sits LAST, so a crisis
+   * response left here would be below every earlier turn's legal analysis.
+   * Defaults to `true`, so a standalone `AnswerView` still renders it and no
+   * caller can lose it by forgetting a prop.
+   */
+  showCrisis?: boolean
 }
 
 /**
@@ -42,14 +52,26 @@ interface AnswerViewProps {
  * citations (an unanswerable turn, or a crisis short-circuit) that heading
  * is withheld: dressing "we found nothing" up as a statement of law would
  * be the exact overclaim the whole validation pipeline exists to prevent.
+ *
+ * **The reader's own document is a third thing, and the hardest to get
+ * right.** `data.document_answer` and `data.document_citations` (Plan 6 Task
+ * 15) arrive as separate fields from `answer`/`sources` and are rendered by a
+ * separate component into a visually separate region -- warm ground, dashed
+ * edge, paperclip, the sentence "This is your own document, not law.", and not
+ * one link anywhere in it. This component never concatenates the two halves,
+ * and it could not pass a document citation to `SourceList` even by mistake:
+ * `DocumentCitationCard` has no `source_url`, so the types refuse it. See
+ * `DocumentCitationList`'s docstring for the four independent signals that
+ * draw the boundary, and `__tests__/AnswerView.test.tsx` for the structural
+ * assertion that neither region ever contains the other's content.
  */
-export default function AnswerView({ data }: AnswerViewProps) {
+export default function AnswerView({ data, showCrisis = true }: AnswerViewProps) {
   const strings = getStrings(data.language)
   const hasCitedLaw = data.sources.length > 0
 
   return (
     <article className="flex flex-col gap-6">
-      {data.crisis_response && (
+      {showCrisis && data.crisis_response && (
         <CrisisAlert
           crisisResponse={data.crisis_response}
           helplines={data.helplines}
@@ -78,6 +100,15 @@ export default function AnswerView({ data }: AnswerViewProps) {
       </div>
 
       <SourceList sources={data.sources} language={data.language} />
+
+      {/* After the law and its sources, never interleaved with them: a reader
+        * scanning down the page meets the cited law, the links that back it,
+        * and only then their own paperwork, clearly marked as theirs. */}
+      <DocumentCitationList
+        documentAnswer={data.document_answer ?? null}
+        citations={data.document_citations ?? []}
+        language={data.language}
+      />
 
       <footer className="flex flex-col gap-3 border-t border-line pt-4 text-sm text-muted">
         <p className="whitespace-pre-line">{data.footer}</p>

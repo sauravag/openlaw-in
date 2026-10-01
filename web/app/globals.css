@@ -47,6 +47,21 @@
   --color-docmark: #3f4a5a;
   --color-docmark-soft: #eef0f4;
 
+  /* The reader's OWN uploaded paperwork -- never the law. A deliberately
+   * WARM, paper-like ground, where every legal surface on this page is cool
+   * white or a blue-grey tint: the two can be told apart at a glance, at any
+   * width, and on a washed-out cheap screen. Colour is never the only signal
+   * (see `DocumentCitationList`: a dashed edge, a paperclip, and the sentence
+   * "This is your own document, not law."), but it is the one that works
+   * before a word is read. `paper-ink` is 8.9:1 on `paper`.
+   *
+   * Not to be confused with `docmark` above, which colours a CORPUS citation
+   * whose kind we could not classify -- a government document with a URL.
+   * Nothing here ever has a URL. */
+  --color-paper: #faf6ee;
+  --color-paper-edge: #a08a5e;
+  --color-paper-ink: #4a3f28;
+
   /* System stack only -- no web font, nothing to download, nothing to block
    * the first paint. The Devanagari faces listed are the ones Android and
    * Windows actually ship, so Hindi renders in a real UI face rather than a

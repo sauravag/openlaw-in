@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // `vitest run --coverage` writes its own bundled HTML/JS reporter here.
+    // Generated third-party output, already gitignored; linting it only
+    // produced warnings about its own eslint-disable comments.
+    "coverage/**",
   ]),
 ]);
 

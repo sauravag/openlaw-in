@@ -194,4 +194,63 @@ describe('askQuestion', () => {
       expect(outcome.data.escalation_footer.length).toBeGreaterThan(0)
     }
   })
+
+  it('continues an existing conversation and names the documents this turn may quote', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, baseAnswer))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await askQuestion({
+      question: 'What does my lease say?',
+      language: 'en',
+      conversationId: 'conv-1',
+      documentIds: ['doc-1', 'doc-2'],
+    })
+
+    const sentBody = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(sentBody.conversation_id).toBe('conv-1')
+    expect(sentBody.document_ids).toEqual(['doc-1', 'doc-2'])
+  })
+
+  it('starts a new conversation with no document ids when none were given', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, baseAnswer))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await askQuestion({ question: 'q', language: 'en' })
+
+    const sentBody = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(sentBody.conversation_id).toBeNull()
+    expect(sentBody.document_ids).toEqual([])
+  })
+
+  it('accepts an answer carrying a document half, and rejects a malformed one', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          ...baseAnswer,
+          conversation_id: 'conv-1',
+          turn_index: 1,
+          document_answer: 'Your lease says two months.',
+          document_citations: [
+            { excerpt_id: 'doc:1', document_id: 'd1', filename: 'lease.pdf', page_number: 4 },
+          ],
+        }),
+      ),
+    )
+    const accepted = await askQuestion({ question: 'q', language: 'en' })
+    expect(accepted.kind).toBe('answer')
+
+    vi.unstubAllGlobals()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          ...baseAnswer,
+          document_citations: [{ excerpt_id: 'doc:1', filename: 'lease.pdf' }],
+        }),
+      ),
+    )
+    const rejected = await askQuestion({ question: 'q', language: 'en' })
+    expect(rejected.kind).toBe('refused')
+  })
 })

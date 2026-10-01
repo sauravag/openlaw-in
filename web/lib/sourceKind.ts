@@ -16,6 +16,17 @@ import type { SourceCard } from './types'
  * build does not recognise -- a server that grows a third `ChunkKind` gets
  * a neutral word here, never a wrong one.
  *
+ * **`'document'` here has nothing to do with an uploaded document, and the
+ * collision of names is a real trap.** This value classifies a CORPUS chunk
+ * whose kind this build cannot label -- a government source that still has a
+ * `source_url` and still renders as a link. A file the reader uploaded is a
+ * different thing entirely: it has no URL, never reaches `SourceCard` or
+ * `SourceList`, and renders through `components/DocumentCitationList.tsx`
+ * from `DocumentCitationCard`, which has no `source_url` field to give it
+ * one. Nothing in the upload path may reuse this value, and nothing here may
+ * grow an upload case. Renaming either would be churn; knowing which is
+ * which is the requirement.
+ *
  * No court is ever inferred from a hostname, and none is composed from
  * `court_code` either: a bucket name is not a jurisdiction and `"3_22"` is
  * not the name of a court, so printing one would be fabricating provenance.
