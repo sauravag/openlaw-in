@@ -28,15 +28,21 @@ automatic cache can actually match turn over turn. History is a large and
 *growing* stable prefix once a conversation has more than one turn, so this
 ordering matters far more by turn five than it does on turn one.
 
-**What is, and is not, cacheable — stated plainly so nobody budgets
-wrong.** The system prompt and conversation history are genuinely stable
-and grow the cache's useful prefix turn over turn. Retrieved corpus
-excerpts and fenced document excerpts are NOT cacheable in any useful
-sense: a fresh search runs every turn, so they differ turn to turn even
-within one conversation. They sit ahead of the question only because
-everything stable must precede everything variable, not because they are
-expected to hit. Only the question itself is guaranteed to change every
-single turn.
+**What is, and is not, cacheable — stated plainly, with a measured number,
+so nobody budgets wrong.** The system prompt and conversation history are
+genuinely stable and grow the cache's useful prefix turn over turn; once
+warm, that stable prefix itself caches at roughly 97% (measured directly
+against the live API -- see `openlaw.answers.openrouter_client`'s module
+docstring for the numbers). Retrieved corpus excerpts and fenced document
+excerpts are NOT cacheable in any useful sense: a fresh search runs every
+turn, so they differ turn to turn even within one conversation. They sit
+ahead of the question only because everything stable must precede
+everything variable, not because they are expected to hit. The overall
+per-turn saving is therefore NOT "~97% of input tokens" -- it is the
+stable prefix's ~97% diluted by whatever fraction of this turn's input is
+stable vs. variable, a ratio that starts small (turn one has no history
+yet) and grows with conversation length as history accumulates. Only the
+question itself is guaranteed to change every single turn.
 """
 
 from typing import Any

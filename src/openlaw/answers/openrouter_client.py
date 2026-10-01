@@ -71,16 +71,37 @@ not worth a per-model compatibility cliff on a code path whose failure mode
 is silent. A deployment that wants to spend differently passes `reasoning=`
 to the constructor; nothing else in the pipeline needs to know.
 
-**Prompt caching is automatic here, not something this adapter builds.**
-Caching on the Z.AI/GLM route is automatic and needs no `cache_control`;
-cached input bills at roughly 0.2x with no write cost. What the
+**Prompt caching is automatic here, not something this adapter builds --
+and it is real and large, measured, not theoretical.** Caching on the
+Z.AI/GLM route is automatic and needs no `cache_control`. What the
 OpenAI-compatible surface lacks is a way to place a breakpoint -- so the
 cache is earned by prefix stability (`openlaw.answers.prompts.
-build_turn_messages`) rather than declared. The figure is read back from
-`usage.prompt_tokens_details.cached_tokens` and `usage.cache_discount`, so
-it is measured, not assumed -- see `_cached_prompt_tokens` and the
-`logger.info` line in `parse_response` below, which is how a deployment
-answers "is the cache hitting?" with a number rather than a guess.
+build_turn_messages`) rather than declared. Measured directly against the
+live API with a byte-identical ~3,000-4,200-token stable prefix sent three
+times in a row: the first call is always cold (`cached_tokens == 0`); every
+call after that reports `cached_tokens` at 95-97% of the prefix (one run:
+3,622 prompt tokens, 3,520 cached on calls two and three -- 97.2%; a second,
+independent run: 4,206 prompt tokens, 4,096 cached from call two onward --
+97.4%). The figure is read back from `usage.prompt_tokens_details.
+cached_tokens` (`_cached_prompt_tokens`, surfaced into `Completion.raw[
+"usage"]["cached_prompt_tokens"]`) and logged on every call
+(`_log_usage`/`parse_response`), so a deployment answers "is the cache
+hitting?" with a number, not a guess.
+`tests/answers/test_openrouter_client.py::
+test_a_second_identical_prefix_call_hits_the_automatic_cache` (`@pytest.
+mark.integration`, run manually) is the reproducible version of this
+measurement; a prefix under roughly 1,000-1,500 tokens was observed NOT to
+cache at all in testing -- there is a provider-side minimum, so a short
+synthetic prefix can silently prove nothing.
+
+The ~0.2x cached-input billing rate is also confirmed by direct
+measurement, not repeated from documentation: solving `cost =
+uncached_tokens * P + cached_tokens * d * P + completion_cost` across
+several live calls with different total/cached token counts (holding
+`completion_tokens` fixed) for a consistent per-token price `P` and
+completion cost yields `d == 0.2` reproducing every observed `cost` to
+within floating-point rounding (~1e-7 relative error) -- there is no
+separate cache-write cost in any of these calls either.
 
 An earlier version of this docstring asserted that OpenRouter caching "does
 not transfer" and told operators to budget the full system prompt at the
@@ -90,8 +111,14 @@ a true fact belongs here, not a hedge on a false one. What remains true
 and worth repeating is that retrieved corpus excerpts and document
 excerpts are NOT cacheable -- they differ every turn by construction (see
 `openlaw.answers.prompts`'s module docstring) -- so the achievable hit rate
-rises with conversation length (more stable history) and never reaches
-100% (the question and the fresh retrieval never cache).
+on the overall per-turn input depends on the stable:variable token ratio
+(it rises with conversation length, as history grows) even though the
+stable prefix itself caches at ~97% once warm; it never reaches 100%,
+because the question and this turn's fresh retrieval never cache. (A
+top-level `usage.cache_discount` field is read when present, defensively --
+`_USAGE_FIELDS` -- but was not observed in any live response captured
+during this measurement; the cache figure that IS reliably present and
+load-bearing here is `prompt_tokens_details.cached_tokens`.)
 
 **Failure direction: closed, never open.** Nothing here ever invents text. A
 refusal (`message.refusal`, or `finish_reason == "content_filter"`) returns

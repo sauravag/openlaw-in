@@ -13,6 +13,7 @@ rather than an intermediate value.
 """
 
 import json
+import uuid
 from typing import Any
 
 import httpx
@@ -607,24 +608,42 @@ def test_a_second_identical_prefix_call_hits_the_automatic_cache() -> None:
     control and must not assert on every push. Skips cleanly with no key
     configured.
 
-    Uses the real, long `SYSTEM_PROMPT` as the stable prefix precisely
-    because it is the thing `openlaw.answers.prompts`'s module docstring
-    says genuinely caches -- a short, synthetic string might fall under
-    whatever minimum-size threshold the provider applies before caching
-    engages at all, and silently prove nothing.
+    The stable prefix is `SYSTEM_PROMPT` (~700 tokens) padded with distinct,
+    realistic filler text out to roughly 3,000+ tokens, well past the
+    provider's minimum cacheable-prefix size. A first version of this test
+    sent `SYSTEM_PROMPT` alone (~700 tokens) and measured `cached_tokens ==
+    0` on the second call every time -- not an adapter bug (`Completion.raw
+    ["usage"]["cached_prompt_tokens"]` was independently verified end-to-end
+    against live responses and correctly mirrors `usage.prompt_tokens_
+    details.cached_tokens`), but a too-small prefix never crossing whatever
+    minimum the provider imposes before it caches at all. A random nonce is
+    folded into the filler so this test's prefix has never been sent before
+    (no stale warm cache from an earlier run inflating the "cold" first
+    call), and the assertion is on the SECOND call only -- the first is
+    always cold, by construction.
     """
     settings = get_settings()
     if not settings.openrouter_api_key:
         pytest.skip("OPENROUTER_API_KEY is not configured")
 
-    adapter = OpenRouterAdapter(api_key=settings.openrouter_api_key)
+    nonce = uuid.uuid4().hex
+    filler_paragraph = (
+        f"\n\nReference paragraph {{index}} (session {nonce}): the Transfer of "
+        "Property Act, 1882 and the Model Tenancy Act, 2021 govern landlord-"
+        "tenant relationships in most Indian states, covering deposit "
+        "refunds, eviction notice periods, and maintenance obligations."
+    )
+    stable_system = SYSTEM_PROMPT + "".join(
+        filler_paragraph.format(index=i) for i in range(60)
+    )
     messages = [{"role": "user", "content": "Question: how do I register a company in India?"}]
 
+    adapter = OpenRouterAdapter(api_key=settings.openrouter_api_key)
     first = adapter.complete(
-        model=MODEL, system=SYSTEM_PROMPT, messages=messages, output_schema=None, max_tokens=16
+        model=MODEL, system=stable_system, messages=messages, output_schema=None, max_tokens=16
     )
     second = adapter.complete(
-        model=MODEL, system=SYSTEM_PROMPT, messages=messages, output_schema=None, max_tokens=16
+        model=MODEL, system=stable_system, messages=messages, output_schema=None, max_tokens=16
     )
 
     assert first.text
