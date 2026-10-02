@@ -42,7 +42,7 @@ openlaw-in/
 │   │   ├── identifiers.py               # join-key normalisation
 │   │   ├── dates.py                     # the two decision_date formats
 │   │   ├── subjects.py                  # string-encoded legal_subject lists
-│   │   ├── quality.py                   # judge noise, OCR margin letters
+│   │   ├── quality.py                   # judge parser-noise filter
 │   │   ├── join.py                      # KanoonGPT metadata index
 │   │   ├── sources.py                   # government URL resolution
 │   │   └── filters.py                   # English filter, chunk dedup
@@ -330,10 +330,15 @@ without them.
 - [ ] **Step 1: Create `docker-compose.yml`**
 
 ```yaml
+# Local development only. Every port is bound to 127.0.0.1 so these
+# datastores are not reachable from the local network — the credentials
+# below are development defaults and Qdrant runs without authentication.
+# Production deployment must supply real secrets and its own network policy.
+
 services:
   qdrant:
     image: qdrant/qdrant:v1.16.3
-    ports: ["6333:6333", "6334:6334"]
+    ports: ["127.0.0.1:6333:6333", "127.0.0.1:6334:6334"]
     volumes: ["./data/qdrant:/qdrant/storage"]
 
   postgres:
@@ -342,7 +347,7 @@ services:
       POSTGRES_USER: openlaw
       POSTGRES_PASSWORD: openlaw
       POSTGRES_DB: openlaw
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: ["./data/postgres:/var/lib/postgresql/data"]
 
   neo4j:
@@ -352,7 +357,7 @@ services:
       NEO4J_PLUGINS: '["graph-data-science"]'
       NEO4J_server_memory_pagecache_size: 4G
       NEO4J_server_memory_heap_max__size: 4G
-    ports: ["7474:7474", "7687:7687"]
+    ports: ["127.0.0.1:7474:7474", "127.0.0.1:7687:7687"]
     volumes: ["./data/neo4j:/data"]
 ```
 
@@ -737,11 +742,19 @@ git commit -m "feat: parse decision dates and string-encoded legal subjects"
 
 ---
 
-## Task 5: Quality filters
+## Task 5: Judge-name quality filter
 
-Two measured defects. vaquill's judge extraction emits parser noise — real observed values include `['which']` and `['SH. ANIL KUMAR SISODIA', 'vide']`. And English Supreme Court text carries stray Supreme Court Reports margin letters (`A`–`H`) inline.
+One measured defect. vaquill's judge extraction emits parser noise — real observed values include `['which']` and `['SH. ANIL KUMAR SISODIA', 'vide']` in Delhi High Court rows.
 
-Margin-letter scrubbing is deliberately **conservative**: a single capital letter is only removed when it is isolated between two lowercase word characters and not preceded by a legal-reference keyword, because `Section 302 A` and `Exhibit A` are legitimate. `text_original` is never modified.
+> **Removed after review: `scrub_margin_letters`.** An earlier version of this task also
+> stripped stray Supreme Court Reports margin letters (`A`-`H`) from judgment text. It was
+> implemented, reviewed, and **removed** — the regex could not distinguish a margin marker
+> from a single capital letter used as a party placeholder, which is the dominant idiom in
+> Indian statutory illustrations (`"A owes B a sum of money"`). Measured against the real
+> corpus it fired on **60.5% of English Supreme Court chunks**, corrupting text such as
+> `"if A owes B a sum of money"` into `"if owes a sum of money"`. Margin letters are now
+> left in place deliberately: leaving OCR noise is strictly better than corrupting a legal
+> quotation, and no signal in the text alone separates the two cases. Do not re-add it.
 
 **Files:**
 - Create: `src/openlaw/corpus/quality.py`
@@ -752,7 +765,6 @@ Margin-letter scrubbing is deliberately **conservative**: a single capital lette
 - Produces:
   - `is_plausible_judge_name(name: str | None) -> bool`
   - `clean_judge_names(names: list[str] | None) -> tuple[str, ...]`
-  - `scrub_margin_letters(text: str) -> str`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -761,11 +773,7 @@ Create `tests/corpus/test_quality.py`:
 ```python
 import pytest
 
-from openlaw.corpus.quality import (
-    clean_judge_names,
-    is_plausible_judge_name,
-    scrub_margin_letters,
-)
+from openlaw.corpus.quality import clean_judge_names, is_plausible_judge_name
 
 
 @pytest.mark.parametrize(
@@ -795,40 +803,6 @@ def test_clean_judge_names_on_all_noise_returns_empty() -> None:
 @pytest.mark.parametrize("names", [None, []])
 def test_clean_judge_names_handles_absent_input(names: list[str] | None) -> None:
     assert clean_judge_names(names) == ()
-
-
-def test_scrubs_isolated_scr_margin_letter() -> None:
-    text = (
-        "the respondent was in perfect condition of health and never really "
-        "required H admission"
-    )
-    assert scrub_margin_letters(text) == (
-        "the respondent was in perfect condition of health and never really "
-        "required admission"
-    )
-
-
-def test_preserves_statutory_section_letters() -> None:
-    """'Section 302 A' must survive — it is a real provision reference."""
-    text = "punishable under Section 302 A of the Code"
-    assert scrub_margin_letters(text) == text
-
-
-def test_preserves_exhibit_and_annexure_letters() -> None:
-    for text in ("marked as Exhibit A by the court", "filed at Annexure B herein"):
-        assert scrub_margin_letters(text) == text
-
-
-def test_preserves_letters_outside_the_margin_range() -> None:
-    """Only A-H are SCR margin markers; other capitals are not scrubbed."""
-    text = "the witness identified accused Z during the parade"
-    assert scrub_margin_letters(text) == text
-
-
-def test_scrubbing_is_idempotent() -> None:
-    text = "the appeal was G dismissed by this Court"
-    once = scrub_margin_letters(text)
-    assert scrub_margin_letters(once) == once
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -841,20 +815,19 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'openlaw.corpus.qualit
 ```python
 """Quality filters for measured defects in the vaquill judgment corpus.
 
-Two defects are handled:
+Judge extraction emits parser noise. Observed real values include ``['which']``
+and ``['SH. ANIL KUMAR SISODIA', 'vide']``.
 
-1. Judge extraction emits parser noise. Observed real values include
-   ``['which']`` and ``['SH. ANIL KUMAR SISODIA', 'vide']``.
-2. English Supreme Court text carries stray Supreme Court Reports margin letters
-   (``A``-``H``) inline, an artifact of the reporter's page layout.
-
-Margin-letter removal is conservative by design. ``Section 302 A`` and
-``Exhibit A`` are legitimate, so a letter is removed only when isolated between
-lowercase words and not preceded by a legal-reference keyword. Callers must
-retain ``text_original`` unmodified for audit.
+**Margin letters are deliberately NOT scrubbed.** English Supreme Court text
+carries stray Supreme Court Reports margin markers (``A``-``H``) inline, an
+artifact of the reporter's page layout. Removing them is not safe: an isolated
+capital between two lowercase words is equally likely to be a party placeholder
+in a statutory illustration — ``"A owes B a sum of money"`` — which is the
+dominant idiom in Indian law. A regex fired on 60.5% of English Supreme Court
+chunks and turned ``"if A owes B a sum of money"`` into ``"if owes a sum of
+money"``. Leaving OCR noise in place is strictly better than corrupting a legal
+quotation, so the noise stays. Do not re-add a scrubber.
 """
-
-import re
 
 # Lowercase function words that indicate a mis-parsed judge field.
 _JUDGE_NOISE: frozenset[str] = frozenset(
@@ -864,15 +837,6 @@ _JUDGE_NOISE: frozenset[str] = frozenset(
     }
 )
 _MIN_JUDGE_LENGTH = 3
-
-# An isolated A-H between two lowercase words: the SCR margin-marker shape.
-_MARGIN_LETTER = re.compile(r"(?<=[a-z])\s+([A-H])\s+(?=[a-z])")
-# Keywords after which a lone capital is a real reference, not a margin marker.
-_REFERENCE_KEYWORDS = re.compile(
-    r"\b(section|sections|exhibit|annexure|annexures|schedule|part|clause|"
-    r"chapter|appendix|form|table|article)\s+(?:\d+\s+)?[A-H]\b",
-    re.IGNORECASE,
-)
 
 
 def is_plausible_judge_name(name: str | None) -> bool:
@@ -893,46 +857,18 @@ def clean_judge_names(names: list[str] | None) -> tuple[str, ...]:
     if not names:
         return ()
     return tuple(name.strip() for name in names if is_plausible_judge_name(name))
-
-
-def scrub_margin_letters(text: str) -> str:
-    """Remove isolated Supreme Court Reports margin letters (A-H) from `text`.
-
-    Conservative: a letter preceded by a legal-reference keyword is preserved.
-    Returns a new string; `text` is not modified.
-    """
-    if not text:
-        return text
-
-    protected: list[str] = [
-        match.group(0) for match in _REFERENCE_KEYWORDS.finditer(text)
-    ]
-    placeholders: dict[str, str] = {
-        f"\x00{index}\x00": phrase for index, phrase in enumerate(protected)
-    }
-
-    guarded = text
-    for placeholder, phrase in placeholders.items():
-        guarded = guarded.replace(phrase, placeholder, 1)
-
-    scrubbed = _MARGIN_LETTER.sub(" ", guarded)
-
-    for placeholder, phrase in placeholders.items():
-        scrubbed = scrubbed.replace(placeholder, phrase)
-
-    return scrubbed
 ```
 
 - [ ] **Step 4: Run it to verify it passes**
 
 Run: `pytest tests/corpus/test_quality.py -v --no-cov`
-Expected: PASS (21 passed)
+Expected: PASS (16 passed)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/openlaw/corpus/quality.py tests/corpus/test_quality.py
-git commit -m "feat: filter judge parser noise and scrub SCR margin letters"
+git commit -m "feat: filter judge parser noise from vaquill judgment metadata"
 ```
 
 ---
@@ -2164,10 +2100,15 @@ def restore_collection(
     spec: CollectionSpec, qdrant_url: str, client: httpx.Client
 ) -> None:
     """Create `spec`'s collection and recover every shard snapshot into it."""
-    client.put(
+    created = client.put(
         f"{qdrant_url}/collections/{spec.name}",
         json=build_collection_payload(spec),
-    ).raise_for_status()
+    )
+    # 409 means the collection already exists, which is what we wanted. Anything
+    # else is a real failure. Without this the restore cannot be retried after an
+    # interrupted 10.44 GB download.
+    if created.status_code != 409:
+        created.raise_for_status()
 
     for shard in range(spec.shards):
         index = client.get(f"{spec.mirror}/shard-{shard}/index.json").json()
@@ -2262,7 +2203,7 @@ git commit -m "feat: restore published acts_india Qdrant collection"
 - Create: `tests/index/test_embed.py`, `tests/index/test_upsert.py`
 
 **Interfaces:**
-- Consumes: `JudgmentChunk` (Task 6), `MetadataIndex`/`build_metadata_index` (Task 8), `resolve_judgment_url` (Task 8), `english_only`/`deduplicate` (Task 9), `scrub_margin_letters` (Task 5), `build_collection_payload`/`CollectionSpec` (Task 10)
+- Consumes: `JudgmentChunk` (Task 6), `MetadataIndex`/`build_metadata_index` (Task 8), `resolve_judgment_url` (Task 8), `english_only`/`deduplicate` (Task 9), `build_collection_payload`/`CollectionSpec` (Task 10)
 - Produces:
   - `embed.EMBEDDING_MODEL: str` — `"voyage-4"`
   - `embed.EMBEDDING_DIMENSIONS: int` — `1024`
@@ -2565,7 +2506,6 @@ import httpx
 from openlaw.config import get_settings
 from openlaw.corpus.filters import deduplicate, english_only
 from openlaw.corpus.join import build_metadata_index
-from openlaw.corpus.quality import scrub_margin_letters
 from openlaw.corpus.sources import resolve_judgment_url
 from openlaw.datasets.vaquill import read_judgment_chunks
 from openlaw.index.embed import DEFAULT_BATCH_SIZE, VoyageEmbedder, batched
@@ -2611,7 +2551,7 @@ def main() -> int:
             if not resolved:
                 continue
 
-            texts = [scrub_margin_letters(chunk.text) for chunk, _ in resolved]
+            texts = [chunk.text for chunk, _ in resolved]
             vectors = embedder.embed_documents(texts)
 
             points = []
@@ -2930,6 +2870,56 @@ git commit -m "feat: corpus validation gate and attribution-bearing README"
 
 ---
 
+## Task 13: Rebuild sparse vectors consistently
+
+Hybrid retrieval (Plan 3) needs a sparse vector per chunk, and the ones we have cannot be
+used as they stand. **Measured on 5,000 random `acts_india` points:** 51.7% carry
+BM25-saturated weights (capped ≈2.2) while 47.6% carry raw term counts (values to 16+),
+mixed together with no pattern by jurisdiction or document type. Since hybrid search sums
+these weights, a raw-count chunk can outscore a BM25 chunk ~7x for no relevance reason.
+The collection also sets no IDF modifier, so "shall" counts as much as "arbitration".
+Separately, SC points from Task 11 are written **dense-only** and have no sparse vector at
+all.
+
+Both problems are fixed by one pass. This needs **no model and no API** — sparse vectors
+are computed from the `text` already in each payload, so this is CPU work of roughly an
+hour, not a re-embedding.
+
+**Files:**
+- Create: `src/openlaw/index/sparse.py`
+- Create: `scripts/build_sparse_vectors.py`
+- Create: `tests/index/test_sparse.py`
+
+**Interfaces:**
+- Consumes: `SC_COLLECTION` (Task 11); the live `acts_india` collection (read-only)
+- Produces:
+  - `SPARSE_VECTOR_NAME: str` — `"sparse"`
+  - `bm25_vector(text: str, idf: Mapping[int, float], avg_len: float) -> dict[str, list]`
+    returning `{"indices": [...], "values": [...]}`
+  - `token_index(token: str) -> int` — stable hash, matching the published scheme
+  - `corpus_statistics(texts: Iterable[str]) -> tuple[dict[int, float], float]` — document
+    frequencies → IDF, and mean document length
+
+**Constraints:**
+- **Never write to `acts_india`.** Rebuilt statute vectors go to a **new** collection; the
+  restored one stays untouched (it is the only copy of the published dense vectors and is
+  expensive to restore).
+- `k1=1.2`, `b=0.75`; IDF computed over the v1 corpus, not assumed.
+- Assert the two-scheme defect is gone afterwards: no value above `k1 + 1` in a sample.
+- Idempotent and checkpointed, like Task 11 — it touches ~1.47M points.
+
+- [ ] **Step 1: Write the failing test** — `tests/index/test_sparse.py`: a repeated term
+      saturates below `k1 + 1`; a rare term outweighs a common one at equal frequency;
+      `token_index` is stable across calls; an empty string yields an empty vector.
+- [ ] **Step 2: Implement** `src/openlaw/index/sparse.py`.
+- [ ] **Step 3: Driver** `scripts/build_sparse_vectors.py` — two passes (statistics, then
+      write), `--collection`, `--restart`, checkpointed.
+- [ ] **Step 4: Verify on the live index** — rebuild, then confirm no raw-count outliers
+      remain and that a known statutory phrase ranks its own section top-1 on sparse alone.
+- [ ] **Step 5: Commit** — `feat: rebuild sparse vectors under one consistent BM25 scheme`
+
+---
+
 ## Self-Review
 
 **1. Spec coverage.**
@@ -2939,7 +2929,7 @@ git commit -m "feat: corpus validation gate and attribution-bearing README"
 | §3.3 the join (SC 100%, HC 98.6%) | Tasks 3, 8 |
 | §3.3 identifier format table | Task 3 |
 | §3.4.1 SC 33.3% English | Task 9 |
-| §3.4.3 judge parser noise, OCR margin letters | Task 5 |
+| §3.4.3 judge parser noise | Task 5 (margin-letter scrubbing removed after review — see Task 5 note) |
 | §3.4.4 unusable semantic section labels | Not indexed as a retrieval field — deliberately unused. No task needed. |
 | §3.4.5 `legal_subject` string-encoded, no consumer tag | Task 4 |
 | §3.4.6 `section_title` quirk | `title` and `section_number` are indexed instead (Task 6). No task needed. |
@@ -2963,7 +2953,6 @@ Spec phases 2–6 are out of scope for this plan by design — see the handoff b
 - `CaseMetadata.from_row(row)` — no `corpus_version` (metadata is not versioned); defined Task 6, used Task 7. Intentional asymmetry.
 - `MetadataIndex.lookup` / `build_metadata_index` — defined Task 8; used Task 11 driver. Consistent.
 - `build_collection_payload(spec)` / `CollectionSpec` — defined Task 10; reused in Task 11's driver for `SC_COLLECTION`. Consistent.
-- `scrub_margin_letters` — defined Task 5; used Task 11 driver. Consistent.
 - `CorpusStats.english_fraction` — a property, not a method; used only in Task 9.
 - `require_url` (Task 8) raises; the Task 11 driver instead counts and skips via `resolve_judgment_url`. Both behaviours are intentional and documented in the `require_url` docstring — the strict form exists for callers that must fail loudly.
 - `validate_payloads` / `ValidationReport` — defined Task 12; used only there.
@@ -2974,7 +2963,7 @@ Spec phases 2–6 are out of scope for this plan by design — see the handoff b
 
 **Plan complete and saved to `docs/superpowers/plans/2026-09-08-corpus-foundation.md`.**
 
-This is Plan 1 of 5. The remaining plans are written after their predecessor lands:
+This is Plan 1 of 5 (13 tasks; Task 13 added after the sparse-vector defect was measured). The remaining plans are written after their predecessor lands:
 
 2. **Knowledge graph** (spec §5) — Neo4j builder, GDS PageRank and Louvain
 3. **Retrieval and answer contract** (spec §6) — hybrid retrieval, citation validator

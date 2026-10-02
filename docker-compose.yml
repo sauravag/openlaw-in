@@ -1,0 +1,395 @@
+# One-command self-hosting (Task 7, spec success criterion 12.7).
+#
+# `docker compose up -d` brings up every datastore, runs migrations, and
+# starts the API, web frontend, and a single reverse-proxy ingress. It does
+# NOT bring up a working corpus -- Qdrant starts empty. `/readyz`
+# (openlaw.api.routes) reports that honestly (status "degraded" until the
+# corpus collections are populated), and `api`'s healthcheck below surfaces
+# the same thing to `docker compose ps`/`docker inspect` rather than
+# reporting a broken stack as healthy. See README's "Self-hosting" section
+# for how the corpus is actually built -- it is not, and cannot be, part of
+# this command: it is ~1.5M vectors built over many hours from two large
+# datasets, not something `docker compose up` can ship.
+#
+# Every DATASTORE port (Qdrant, Postgres, Neo4j) AND both application
+# services (`api`, `web`) are bound to 127.0.0.1 -- none of them are reachable
+# from the local network or the internet (Task 7 review, H3: a fresh review
+# found `api`/`web` published on 0.0.0.0, exposing an unauthenticated,
+# Anthropic-money-spending `/ask` to the whole LAN with no TLS). The ONLY
+# service meant to be reached from outside this host is `proxy` (below),
+# which is also the only address `OPENLAW_TRUSTED_PROXY_IPS` needs to change
+# for if you replace it with your own ingress -- see that block's comment.
+#
+# Datastore ports MUST stay bound to 127.0.0.1 -- this is a hard project
+# constraint, not a default to reconsider.
+#
+# --- Reverse-proxy trust (binding requirement 1; Task 7 review, H1) --------
+# `web` (Next.js) proxies `/ask` to `api` server-side (see
+# `web/next.config.ts`'s `rewrites()`) purely so the anonymous-quota cookie
+# round-trips with zero CORS configuration -- but a Next.js `rewrites()`
+# entry is NOT a reverse proxy and must never be trusted as one: it does not
+# set `X-Forwarded-For` on its own (Next only fills that header in when
+# ABSENT, `x-forwarded-for ??= ...`, `node_modules/next/dist/server/
+# base-server.js`), and because it copies incoming headers through
+# unchanged, a client hitting `web` directly could forge whatever
+# `X-Forwarded-For` it liked. Trusting `web` as if it corrected that header
+# would be WORSE than trusting nothing: every real caller collapses into one
+# shared rate-limit bucket (no real per-client value ever arrives), and a
+# spoofed header lets an attacker bypass the limiter outright.
+#
+# The fix is `proxy`: a real reverse proxy (nginx, `nginx/nginx.conf`) that
+# is the ONLY externally-reachable entry point (`api`/`web` are loopback-only
+# above) and that OVERWRITES `X-Forwarded-For` with the connection it
+# actually observed (`proxy_set_header X-Forwarded-For $remote_addr;` --
+# never `$proxy_add_x_forwarded_for`, which appends to a client-supplied
+# value instead of replacing it). `web`'s rewrite then forwards that
+# genuine value through to `api` unchanged (Next's `??=` never overwrites an
+# already-present header), so `api` sees `web`'s address as its peer (the
+# one address actually connecting to it) and a REAL, un-forgeable client
+# address in `X-Forwarded-For`. `OPENLAW_TRUSTED_PROXY_IPS` below is
+# therefore `web`'s fixed compose-network address, not `proxy`'s -- adding
+# `proxy` did not change who `api`'s direct peer is, only guaranteed that
+# what it forwards is honest.
+#
+# If you replace `proxy` with your own ingress (a managed load balancer, a
+# different reverse proxy, TLS termination for a public deployment) and it
+# still forwards to `web` on this network, `OPENLAW_TRUSTED_PROXY_IPS` needs
+# NO change, PROVIDED your ingress also overwrites `X-Forwarded-For` the way
+# `nginx/nginx.conf` does above -- verify that explicitly; do not assume it.
+# The one case that DOES need a change: an ingress that talks to `api`
+# directly, bypassing `web`'s rewrite (or a future multi-replica `api`
+# behind a load balancer) -- then set `OPENLAW_TRUSTED_PROXY_IPS` to THAT
+# proxy's/load balancer's actual address instead of `web`'s.
+
+networks:
+  default:
+    ipam:
+      config:
+        # A narrower `ip_range` than the full `subnet` (Task 7 review, M1):
+        # without it, Docker's dynamic allocator could hand `web`'s intended
+        # static address to some other container first, and `--scale`
+        # anything would fight over the same pool. Dynamic addresses come
+        # from the upper half (.128-.254); `web`'s static address below
+        # (.10) is deliberately outside that range. This subnet still can
+        # collide with an existing network on your host (a VPN, another
+        # Compose project) -- if `docker compose up` fails with a pool-
+        # overlap error, change the subnet/ip_range here AND the two
+        # `172.31.238.10` references below (`web`'s `ipv4_address` and
+        # `api`'s `OPENLAW_TRUSTED_PROXY_IPS`) together.
+        - subnet: 172.31.238.0/24
+          ip_range: 172.31.238.128/25
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.16.3
+    restart: unless-stopped
+    ports: ["127.0.0.1:6333:6333", "127.0.0.1:6334:6334"]
+    volumes: ["./data/qdrant:/qdrant/storage"]
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openlaw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openlaw}
+      POSTGRES_DB: openlaw
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["./data/postgres:/var/lib/postgresql/data"]
+    # Needed so `migrate` below can wait for a Postgres that can actually
+    # accept connections, not merely a container that has started.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openlaw"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:2026.06.0-community
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-openlawdev}
+      NEO4J_PLUGINS: '["graph-data-science"]'
+      NEO4J_server_memory_pagecache_size: 4G
+      NEO4J_server_memory_heap_max__size: 4G
+    ports: ["127.0.0.1:7474:7474", "127.0.0.1:7687:7687"]
+    volumes: ["./data/neo4j:/data"]
+
+  # One-shot: applies pending Alembic migrations, then exits. `api` will not
+  # start until this exits 0 (binding requirement 5 -- migrations run as
+  # part of bringing the stack up). Safe to re-run on every `docker compose
+  # up`: `alembic upgrade head` against an already-current database is a
+  # no-op (see README's "Database migrations" section for the one case it
+  # is NOT safe to assume -- a database with these tables created some
+  # other way -- and the containerised `alembic stamp head` escape hatch
+  # for that case, Task 7 review M4: `docker compose run --rm migrate
+  # alembic stamp head`).
+  #
+  # Shares `image:` with `api` below (Task 7 review, M6) so
+  # `docker compose build`/`up` builds this ~4 GB image ONCE, not twice --
+  # both services use the same `build:` context and Dockerfile, so this is
+  # one image serving two roles, not two separately-tagged copies of it.
+  migrate:
+    image: openlaw-in-api:local
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      OPENLAW_DATABASE_URL: postgresql+psycopg://openlaw:${POSTGRES_PASSWORD:-openlaw}@postgres:5432/openlaw
+      # Required by openlaw.config.Settings but never read by `alembic
+      # upgrade head` itself (they only matter to the corpus-build scripts,
+      # which this compose file does not run -- see README's "Corpus
+      # build" section). Any value satisfies the shared Settings model.
+      OPENLAW_VAQUILL_ROOT: /corpus-build-only/vaquill
+      OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    cap_drop: [ALL]
+    # CHOWN/SETUID/SETGID/DAC_OVERRIDE: what docker-entrypoint.sh's
+    # root-then-drop-to-`openlaw` sequence actually needs (Task 7 review,
+    # M3) -- verified by running this exact image with exactly this
+    # capability set; `cap_drop: [ALL]` alone breaks the entrypoint's
+    # `chown`.
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+
+  # One-shot: enforces the documented 90-day retention window on verbatim,
+  # potentially sensitive user text (final whole-plan review, H5). Runs
+  # `scripts/purge_retention.py`, then exits -- it does NOT start with
+  # `docker compose up -d` (the `tools` profile below excludes it from the
+  # default set of services that command starts). An operator schedules it
+  # externally, e.g. a host cron entry running
+  # `docker compose run --rm purge` on a daily or weekly cadence -- see
+  # README's "Retention" section for the exact command and why nothing in
+  # this Compose file runs it automatically (a purge is a data-deleting
+  # operation; making it opt-in-by-schedule rather than opt-out is the
+  # safer default).
+  #
+  # Shares `image:`/`build:` with `api`/`migrate` (same reasoning as
+  # `migrate`'s own comment) rather than a third build of the same image.
+  purge:
+    image: openlaw-in-api:local
+    build: .
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      OPENLAW_DATABASE_URL: postgresql+psycopg://openlaw:${POSTGRES_PASSWORD:-openlaw}@postgres:5432/openlaw
+      # Required by Settings; unused by this script itself (corpus-build
+      # scripts only -- see the `migrate` service's comment above).
+      OPENLAW_VAQUILL_ROOT: /corpus-build-only/vaquill
+      OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
+      # These two MUST resolve inside the bind mount above, and the mount
+      # MUST NOT be /app/data: that directory holds data/glossary/
+      # legal_terms.json, baked into the image, and mounting over it made
+      # load_glossary() raise FileNotFoundError so the API crash-looped.
+      OPENLAW_HALLUCINATION_LOG_PATH: /app/var/hallucinations.jsonl
+      OPENLAW_CLASSIFIER_FAILURE_LOG_PATH: /app/var/classifier_failures.jsonl
+    volumes:
+      # The same bind mount `api` uses (Task 7 review, M2) -- this is what
+      # `Settings.hallucination_log_path`/`.classifier_failure_log_path`
+      # actually resolve to on disk, and what this command purges.
+      - ./data/app:/app/var
+    command: ["python", "scripts/purge_retention.py"]
+    restart: "no"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+
+  api:
+    image: openlaw-in-api:local
+    build: .
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_started
+      neo4j:
+        condition: service_started
+    environment:
+      OPENLAW_DATABASE_URL: postgresql+psycopg://openlaw:${POSTGRES_PASSWORD:-openlaw}@postgres:5432/openlaw
+      OPENLAW_QDRANT_URL: http://qdrant:6333
+      OPENLAW_NEO4J_URI: bolt://neo4j:7687
+      OPENLAW_NEO4J_USER: neo4j
+      OPENLAW_NEO4J_PASSWORD: ${NEO4J_PASSWORD:-openlawdev}
+      # Required by Settings; unused by the running service (corpus-build
+      # scripts only -- see the `migrate` service's comment above).
+      OPENLAW_VAQUILL_ROOT: /corpus-build-only/vaquill
+      OPENLAW_KANOONGPT_ROOT: /corpus-build-only/kanoongpt
+      # Query embedding defaults to the local, open-weight voyage-4-nano --
+      # its CODE is baked into this image (see Dockerfile), but its WEIGHTS
+      # download from the Hugging Face Hub on first use, before uvicorn
+      # binds a port (Task 7 review, H4 -- an earlier version of this
+      # comment claimed the weights themselves were baked in, which is
+      # false and made the documented verification's timeout too short).
+      # `hf_cache` below persists that download across container recreates
+      # so it only ever happens once per host, not once per `docker compose
+      # up`.
+      OPENLAW_QUERY_EMBEDDER_BACKEND: ${OPENLAW_QUERY_EMBEDDER_BACKEND:-local_nano}
+      OPENLAW_VOYAGE_API_KEY: ${OPENLAW_VOYAGE_API_KEY:-}
+      # --- LLM providers ------------------------------------------------
+      # Which provider serves a role is encoded in that role's model string
+      # (`openrouter:z-ai/glm-5.3-flash`; unprefixed means Anthropic), so a
+      # deployment can run the generator on OpenRouter while leaving
+      # translation and crisis classification on Anthropic Haiku. Blank
+      # here means "use the shipped default for that role" -- see
+      # openlaw.config.Settings and openlaw.answers.routing.
+      OPENLAW_MODEL_GENERATOR: ${OPENLAW_MODEL_GENERATOR:-}
+      OPENLAW_MODEL_TRANSLATOR: ${OPENLAW_MODEL_TRANSLATOR:-}
+      OPENLAW_MODEL_CLASSIFIER: ${OPENLAW_MODEL_CLASSIFIER:-}
+      # Neither key uses compose's `${...:?}` hard-fail any more, and that
+      # is the point: this file cannot know which providers a deployment's
+      # model strings route to, so hard-failing on the Anthropic key here
+      # would block a perfectly valid all-OpenRouter deployment that has no
+      # Anthropic key at all. The check moved somewhere that CAN know --
+      # openlaw.api.deps._require_provider_keys walks the configured models
+      # at startup and demands a key for exactly the providers they
+      # reference, naming the missing variable, before anything expensive
+      # is built. Binding requirement 4 (fail loudly at startup, never a
+      # half-working service) is still met; it is just enforced where the
+      # answer is knowable. Set whichever you need in your .env.
+      OPENLAW_ANTHROPIC_API_KEY: ${OPENLAW_ANTHROPIC_API_KEY:-}
+      # Deliberately NOT OPENLAW_-prefixed: this is OpenRouter's own
+      # documented variable name, read verbatim via a pydantic
+      # validation_alias (openlaw.config.Settings.openrouter_api_key) so
+      # nobody has to rename a key they already have.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      # A legal-aid body running its own instance should not inherit the
+      # hosted tier's rate limit -- see .env.example and the README. Kept
+      # in lockstep with .env.example's own default by
+      # tests/test_config.py::test_env_example_agrees_with_compose_self_host_defaults
+      # (Task 7 review, C2) -- `cp .env.example .env` must never silently
+      # override this fallback.
+      OPENLAW_QUOTA_ENABLED: ${OPENLAW_QUOTA_ENABLED:-false}
+      OPENLAW_MONTHLY_QUOTA: ${OPENLAW_MONTHLY_QUOTA:-30}
+      OPENLAW_ANONYMOUS_QUOTA: ${OPENLAW_ANONYMOUS_QUOTA:-3}
+      # Left blank: sign-in is optional infrastructure, not required for the
+      # anonymous Q&A path this compose file ships working out of the box.
+      # Set both to enable Supabase email/Google auth.
+      OPENLAW_SUPABASE_URL: ${OPENLAW_SUPABASE_URL:-}
+      OPENLAW_SUPABASE_JWT_SECRET: ${OPENLAW_SUPABASE_JWT_SECRET:-}
+      # See the "Reverse-proxy trust" note above this file's `services:`
+      # block -- `web`'s fixed address on this compose network, kept
+      # honest by `proxy` actually setting `X-Forwarded-For`, not a
+      # generic reverse-proxy placeholder.
+      OPENLAW_TRUSTED_PROXY_IPS: '["172.31.238.10"]'
+      # This stack ships with no TLS termination out of the box (plain HTTP
+      # on localhost) -- a `Secure` cookie would never round-trip, silently
+      # breaking anonymous-quota tracking the moment OPENLAW_QUOTA_ENABLED
+      # is turned on. Kept in lockstep with .env.example the same way
+      # OPENLAW_QUOTA_ENABLED is, above. Put TLS on `proxy` (or replace it)
+      # for any deployment reachable over the public internet and set this
+      # back to `true` (the safe default `Settings.cookie_secure` itself
+      # uses) once you do.
+      OPENLAW_COOKIE_SECURE: ${OPENLAW_COOKIE_SECURE:-false}
+      # Document uploads (Plan 6). Before Task 18 NONE of these reached this
+      # container: `Settings.uploads_enabled` defaults to True in code, so a
+      # compose self-host came up advertising uploads while
+      # `document_encryption_key` -- which is never passed either -- stayed
+      # unset, and the first real upload failed on a key that was configured in
+      # the operator's `.env` and never delivered. The safe coherent default is
+      # therefore OFF here and in .env.example (kept in lockstep by
+      # tests/test_config.py::test_env_example_agrees_with_compose_self_host_defaults),
+      # and the key now actually travels: generate one, set both in `.env`, and
+      # the feature comes on deliberately rather than by accident.
+      OPENLAW_UPLOADS_ENABLED: ${OPENLAW_UPLOADS_ENABLED:-false}
+      OPENLAW_DOCUMENT_ENCRYPTION_KEY: ${OPENLAW_DOCUMENT_ENCRYPTION_KEY:-}
+      # Read-only, used only so rows written under a retiring key stay
+      # readable -- see .env.example and the README's "Uploaded documents".
+      OPENLAW_DOCUMENT_ENCRYPTION_KEY_PREVIOUS: ${OPENLAW_DOCUMENT_ENCRYPTION_KEY_PREVIOUS:-}
+      # The caps an operator actually tunes. Passed through so a `.env` edit
+      # reaches the running service instead of being silently ignored.
+      OPENLAW_MAX_UPLOAD_BYTES: ${OPENLAW_MAX_UPLOAD_BYTES:-10485760}
+      OPENLAW_MAX_DOCUMENT_PAGES: ${OPENLAW_MAX_DOCUMENT_PAGES:-20}
+      OPENLAW_MAX_DOCUMENTS_PER_CONVERSATION: ${OPENLAW_MAX_DOCUMENTS_PER_CONVERSATION:-3}
+      OPENLAW_ANONYMOUS_UPLOAD_TTL_HOURS: ${OPENLAW_ANONYMOUS_UPLOAD_TTL_HOURS:-24}
+      OPENLAW_ANONYMOUS_CONVERSATION_TTL_HOURS: ${OPENLAW_ANONYMOUS_CONVERSATION_TTL_HOURS:-24}
+      # These two MUST resolve inside the bind mount above, and the mount
+      # MUST NOT be /app/data: that directory holds data/glossary/
+      # legal_terms.json, baked into the image, and mounting over it made
+      # load_glossary() raise FileNotFoundError so the API crash-looped.
+      OPENLAW_HALLUCINATION_LOG_PATH: /app/var/hallucinations.jsonl
+      OPENLAW_CLASSIFIER_FAILURE_LOG_PATH: /app/var/classifier_failures.jsonl
+    ports: ["127.0.0.1:8000:8000"]
+    volumes:
+      # Task 7 review, M2: `hallucination_log_path`/`classifier_failure_log_path`
+      # (openlaw.config.Settings) default under `data/` -- without a volume
+      # here they write to the container's writable layer and are lost on
+      # every recreate, which is not acceptable for the product's safety
+      # audit trail (verbatim rejected-claim/classifier-outage records).
+      # docker-entrypoint.sh chowns this to the `openlaw` user at container
+      # start, since Docker creates a not-yet-existing bind-mount source
+      # owned by root regardless of what the image's own build-time layer
+      # was chowned to.
+      - ./data/app:/app/var
+      # Persists the voyage-4-nano weights (see the comment above) across
+      # container recreates -- home directory of the `openlaw` user (Task 7
+      # Dockerfile: `useradd --home-dir /app`), which is where
+      # huggingface_hub's default cache resolves to.
+      - hf_cache:/app/.cache/huggingface
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      # Binding requirement 2: wired to /readyz, not /health -- an empty or
+      # unbuilt corpus must show this container as unhealthy, not merely
+      # "the process is up" (which /health alone would report even with a
+      # totally empty Qdrant). curl is installed in the Dockerfile
+      # specifically for this.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      # Generous: the FIRST start on a fresh host downloads the nano model
+      # weights (Task 7 review, H4) before uvicorn even binds a port, which
+      # can take several minutes on a slow connection -- see README.
+      start_period: 300s
+
+  web:
+    build:
+      context: ./web
+      args:
+        OPENLAW_API_URL: http://api:8000
+      # NOT also set under `environment:` below (Task 7 review, M5): Next.js
+      # resolves this only at `next build` time (see web/Dockerfile's
+      # header comment, verified) -- a runtime environment variable here
+      # would be silently inert and is actively misleading to leave in.
+    restart: unless-stopped
+    # `service_started`, deliberately not `service_healthy`: `api`'s
+    # healthcheck above is tied to a POPULATED corpus, which will not exist
+    # yet on a fresh self-host (binding requirement 6 -- the application
+    # must come up around an empty corpus, not refuse to come up at all
+    # until a many-hour corpus build finishes elsewhere).
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      default:
+        ipv4_address: 172.31.238.10
+    ports: ["127.0.0.1:3000:3000"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # The one externally-reachable service (Task 7 review, H1/H3) -- see the
+  # "Reverse-proxy trust" note above this file's `services:` block for why
+  # it exists and exactly what it must do (overwrite `X-Forwarded-For`, see
+  # nginx/nginx.conf). `nginxinc/nginx-unprivileged` runs nginx as a
+  # non-root user with no capabilities needed to bind its port (8080, not
+  # the usual 80 -- ports below 1024 need CAP_NET_BIND_SERVICE, which this
+  # image is built to avoid needing at all).
+  proxy:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports: ["8080:8080"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  hf_cache:

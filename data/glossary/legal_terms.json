@@ -1,0 +1,62 @@
+[
+  {
+    "term": "anticipatory bail",
+    "preserve_english": true,
+    "translations": {"hi": "अग्रिम जमानत", "mr": "अटकपूर्व जामीन", "bn": "আগাম জামিন"}
+  },
+  {
+    "term": "cognizable offence",
+    "preserve_english": true,
+    "translations": {"hi": "संज्ञेय अपराध", "mr": "दखलपात्र गुन्हा"}
+  },
+  {
+    "term": "non-cognizable offence",
+    "preserve_english": true,
+    "translations": {"hi": "असंज्ञेय अपराध"}
+  },
+  {
+    "term": "lok adalat",
+    "preserve_english": true,
+    "translations": {"hi": "लोक अदालत", "ta": "லோக் அதாலத்"}
+  },
+  {
+    "term": "first information report",
+    "preserve_english": true,
+    "translations": {"hi": "प्रथम सूचना रिपोर्ट"}
+  },
+  {
+    "term": "public interest litigation",
+    "preserve_english": true,
+    "translations": {"hi": "जनहित याचिका"}
+  },
+  {
+    "term": "writ petition",
+    "preserve_english": true,
+    "translations": {"hi": "रिट याचिका"}
+  },
+  {
+    "term": "power of attorney",
+    "preserve_english": true,
+    "translations": {"hi": "मुख्तारनामा"}
+  },
+  {
+    "term": "succession certificate",
+    "preserve_english": true,
+    "translations": {"hi": "उत्तराधिकार प्रमाणपत्र"}
+  },
+  {
+    "term": "maintenance",
+    "preserve_english": false,
+    "translations": {"hi": "भरण-पोषण", "ta": "ஜீவனாம்சம்", "bn": "ভরণপোষণ"}
+  },
+  {
+    "term": "decree",
+    "preserve_english": false,
+    "translations": {"hi": "डिक्री"}
+  },
+  {
+    "term": "injunction",
+    "preserve_english": false,
+    "translations": {"hi": "निषेधाज्ञा"}
+  }
+]

@@ -169,6 +169,13 @@ These were found by inspecting the data and must be handled in the pipeline.
    (`A` through `H`) inline. Judge extraction has parser noise — observed values
    include `judges: ['which']` and `['SH. ANIL KUMAR SISODIA', 'vide']` in Delhi HC.
 
+   **Margin letters are left in place deliberately.** Stripping them was implemented and
+   then removed: an isolated capital between two lowercase words is indistinguishable
+   from a party placeholder in a statutory illustration (`"A owes B a sum of money"`),
+   the dominant idiom in Indian law. The regex fired on **60.5% of English Supreme Court
+   chunks** and corrupted `"if A owes B a sum of money"` into `"if owes a sum of money"`.
+   Judge-noise filtering is safe and is kept; margin-letter scrubbing is not and is not.
+
 4. **Semantic section labels are effectively unusable.** In 300,000 sampled SC chunks:
    `body` 149,163, `paragraph` 122,518, `section` 25,278 — but `ratio_decidendi` 25,
    `obiter_dicta` 9, `precedents` 7. Retrieval must not depend on these to locate a
@@ -197,6 +204,17 @@ These were found by inspecting the data and must be handled in the pipeline.
 - **Tribunal and regulator decisions are not available as text.** 2,112,201 documents
   (542 GB) are held as PDFs only — `Extracted text: No`, "Case index searchable".
   RERA, CAT, DRT, NGT, NCLT, ITAT and CESTAT cannot be cited. See §4.
+- **137,441 `acts_india` provisions (12.5%) have no resolvable government URL.** Counted
+  over the **full** restored population of 1,098,577, not a sample — an earlier
+  20,000-point sample suggested 17.0%, which scroll order had biased. They carry an empty
+  or non-URL `source_url` (one holds the bare string `14300`) and are *entirely* regulator
+  instruments (`jurisdiction: regulatory`) — MCA notifications, Law Commission reports.
+  **These must be excluded at retrieval time by payload filter**, because a provision that
+  cannot be cited must never be offered as a source. They are not deleted: the snapshot is
+  the publisher's artifact and the exclusion belongs in retrieval, not in the corpus.
+- **No `acts_india` point carries a `corpus_version` field.** All 1,098,577 lack it — the
+  published snapshot predates our convention. Version provenance for restored collections
+  comes from the collection name and release notes, not from point payloads.
 - **District and trial court decisions are not included** in the upstream corpus.
 - **High Court judgments are not in v1** — deferred to phase 2 (§4).
 - **Snapshots are point-in-time.** `v2026.08` is an archive, not current law.
@@ -210,15 +228,22 @@ These were found by inspecting the data and must be handled in the pipeline.
 | Source | Vectors | Method | Cost |
 |---|---:|---|---|
 | `acts_india` — 22,265 enactments, all sections, regulator instruments | 1,098,269 | Restore published snapshot (10.44 GB) | Free |
-| Supreme Court, English only — 35,596 cases | 371,247 | Re-embed with voyage-4 | ~$20–35 |
+| Supreme Court, English only — 35,596 cases | 371,247 | Re-embed with voyage-4 | ~$8 (measured) |
 
 **Supreme Court is re-embedded rather than restored.** `legal_corpus_v2` does contain
 Supreme Court chunks with citations, but it holds 11,823,753 SC **and** High Court
 vectors across four shards that cannot be split by court, so obtaining 371,247 SC
-chunks would mean a 167.25 GB download and a 32 GB-RAM box. Re-embedding ~280M tokens
-for ~$20–35 is dramatically cheaper and yields exactly the wanted slice. Embedding
-**must** use voyage-4 to stay in the same vector space as `acts_india`; vectors from a
-different model are not comparable.
+chunks would mean a 167.25 GB download and a 32 GB-RAM box. Re-embedding is dramatically
+cheaper and yields exactly the wanted slice. Measured on the English-only chunks the
+filter actually keeps: **~917 tokens/chunk, ~340M tokens total**. Voyage grants the first
+200M tokens of the voyage-4 generation free, so the billable remainder is ~140M at
+$0.06/M — **~$8**. Embedding **must** use the voyage-4 series to stay in the same vector
+space as `acts_india`; vectors from a different model are not comparable.
+
+**Token counts are language-bound.** The same Voyage tokenizer yields ~4.0 characters per
+token on English but ~0.94 on the court's regional-language translations, which shred into
+byte-level pieces. Indexing those would cost ~4x more per chunk on top of tripling the
+chunk count — an independent reason for the English-only corpus (§4.1).
 
 **High Courts are deferred to phase 2.** When they are added, the source should be
 **`legal_corpus_v2` (167.25 GB, carries citations), not `legal_corpus_v1`
@@ -361,7 +386,8 @@ user question (any supported language)
   ├─ classifier model  → intent, complexity, crisis detection
   ├─ translator model  → query translated to English
   │
-  ├─ hybrid retrieval  → voyage-4 dense + published sparse BM25
+  ├─ query embedding   → voyage-4-nano, run LOCALLY (no API key, no per-query cost)
+  ├─ hybrid retrieval  → voyage-4 dense + rebuilt sparse BM25 (§8.1)
   │                      Qdrant payload filters (court, year, in_force, jurisdiction)
   ├─ graph expansion   → cited sections, referenced Acts, related provisions
   ├─ rerank            → cross-encoder
@@ -378,6 +404,33 @@ user question (any supported language)
   └─ render            → answer + source cards linking to government PDFs
                        + corpus date + DLSA/NALSA escalation
 ```
+
+### 6.1 Uploaded documents are a second citation class
+
+A citizen may attach their own paperwork — a lease, an eviction notice, an FIR copy
+— and the answer may quote it. That text is **evidence of what their paper says, never
+evidence of what the law is**, and the contract above is extended, not relaxed, to hold
+that line.
+
+**The two-namespace rule.** Corpus chunk ids and uploaded-excerpt ids live in disjoint
+namespaces: every uploaded excerpt id begins `doc:`, and no corpus id does. The model
+emits two separate claim lists — legal claims citing corpus `chunk_id`s, document claims
+citing `doc:` excerpt ids — and the validator checks each list against its own namespace.
+A claim is dropped whole, not trimmed, if any id it cites is outside its namespace or
+outside what was actually shown this turn.
+
+**The no-mixing rule.** Nothing merges the two. A legal claim citing a `doc:` id is
+dropped; a document claim citing a corpus id is dropped; a document excerpt never becomes
+a source card (the document citation type has no `source_url` field to carry one, by
+construction); and document claims are rendered in their own response field under their
+own heading, never concatenated into the legal answer. Uploaded text reaches the model
+inside explicit delimiters, in a pass separate from the one that composes legal claims,
+so a document instructing the model to ignore its rules cannot steer a legal claim.
+
+**What is NOT verified.** The validator proves a cited excerpt or chunk was shown this
+turn. It does not prove the claim's sentence is what that excerpt or chunk actually says
+— there is no entailment check anywhere in this pipeline, in either namespace. That is a
+known limit, stated here rather than left to be discovered.
 
 ### Why structured outputs
 
@@ -422,6 +475,66 @@ text is the authoritative one and a translated statute is not the statute.
 ---
 
 ## 8. Model configuration — per role
+
+### 8.1 Embedding: cloud for documents, local for queries
+
+Embedding is split by where the cost falls. Documents are embedded **once**; queries are
+embedded on **every request, forever**.
+
+| Role | Model | Where | Cost |
+|---|---|---|---|
+| Statute vectors | `voyage-4` (published) | already restored | free |
+| SC document vectors | `voyage-4` via Voyage API | one-off build | ~$8 |
+| **Query vectors** | **`voyage-4-nano`** (Apache 2.0) | **locally, on CPU/GPU** | **free, no key** |
+
+This works only because the whole voyage-4 family shares one embedding space, which was
+verified against the live collection rather than taken from the vendor's claim:
+
+- same text, nano vs stored voyage-4: **0.951 mean cosine** (p05 0.92, min 0.836) at 1024
+  dims; unrelated text scores 0.362, so the alignment is real, not an artefact
+- nano query → voyage-4 documents: **65% top-1, 85% top-10**, matching nano → nano
+  (67.5% / 85%). Mixing the two costs nothing measurable
+- `voyage-4` API output reproduces the publisher's own vectors at **0.9886 mean cosine**
+  with `input_type="document"` (0.9825 without it — so the parameter is load-bearing), and
+  already returns 1024 dims
+
+**Consequence for self-hosting (§12.7):** no API key is needed to *run* OpenLaw.in. A
+self-hoster embeds queries locally with nano, and either restores published vectors or
+embeds the SC corpus locally with nano — measured at 20 chunks/s on an Apple M4 Max,
+so ~5 hours for the 371,247 SC chunks. Slower hardware scales that up proportionally.
+
+### 8.2 Sparse vectors must be rebuilt, not trusted
+
+The published sparse vectors are **internally inconsistent**. Sampling 5,000 random
+`acts_india` points found two incompatible weighting schemes mixed together:
+
+| Weighting | Share |
+|---|---:|
+| BM25-saturated (values capped ≈2.2) | 51.7% |
+| Raw term counts (values to 16+) | 47.6% |
+| Indeterminate (short chunks) | 0.7% |
+
+The split does not follow jurisdiction or document type, so it looks like a mid-ingestion
+change the publisher never backfilled. Because hybrid search sums these weights, a
+raw-count chunk can outscore a BM25 chunk by ~7x for reasons unrelated to relevance, and
+the collection sets no IDF modifier, so common words weigh as much as rare ones.
+
+Sparse vectors are therefore **regenerated from payload text** under one consistent BM25
+scheme with IDF. This needs no model and no API: it is a CPU pass of roughly an hour over
+1.1M chunks. SC points are written dense-only and receive their sparse vectors in the same
+pass.
+
+### 8.3 Operational traps (measured, not theoretical)
+
+- **Pin `transformers`.** `voyage-4-nano` ships modelling code written against 4.51 and
+  fails on 5.x twice: no `config_class` on the custom class, then a renamed
+  `create_causal_mask` argument.
+- **Never set `PYTORCH_ENABLE_MPS_FALLBACK=1`.** It silently relocates work to the CPU and
+  ran **26x slower** (2.0 vs 52 chunks/s).
+- **Set `HF_HUB_DISABLE_XET=1`.** Hugging Face's Xet transfer backend stalled indefinitely
+  on a normal home connection; plain HTTPS downloads worked immediately.
+
+### 8.4 Generation models
 
 Models are configurable **per pipeline role**, not globally. Translation does not need
 the reasoning capability that grounded legal answering needs, and paying frontier prices
@@ -469,7 +582,18 @@ Render order is `tools → system → messages`; any byte change invalidates eve
 after it. The system prompt, answer-format rules and legal glossary sit **before** the
 cache breakpoint. Retrieved chunks — different every turn — sit **after** it. Caching
 retrieved context would yield a 0% hit rate. Verify with
-`usage.cache_read_input_tokens`.
+`usage.cache_read_input_tokens` on the Anthropic path.
+
+**Measured, on the OpenRouter/GLM path this deployment actually routes to.** Caching
+there is automatic — there is no breakpoint to declare, so it is earned by prefix
+stability alone — and it is real and large: 3,520 of 3,622 prompt tokens came back from
+cache on a second identical call (~97%), billed at 0.2x with no write cost, both figures
+confirmed from live responses and first-party cost data rather than from documentation.
+Read it back from `usage.prompt_tokens_details.cached_tokens`; a top-level
+`usage.cache_discount` was never observed. Two caveats an operator must budget for:
+prefixes under roughly 1,000–1,500 tokens were never cached at all, and the
+document-analysis pass's prefix sits below that floor — so **a turn carrying an uploaded
+document costs two full uncached model calls**, and only the legal pass benefits.
 
 ---
 
@@ -585,8 +709,14 @@ standards.
 1. **The evaluation set is the hard, unglamorous prerequisite.** ~200 real citizen legal
    problems with known-correct answers are the only way to know whether any of this
    works. Sourcing them — ideally with legal-aid clinics — is on the critical path.
-2. **voyage-4 is a hard vendor dependency** for query embedding, since the published
-   vectors live in its space. Escaping it means re-embedding the corpus.
+2. ~~**voyage-4 is a hard vendor dependency** for query embedding~~ — **resolved**, see
+   §8.1. `voyage-4-nano` is open-weights (Apache 2.0) and shares the voyage-4 embedding
+   space, so query embedding runs locally with no API key. Measured, not assumed: nano
+   vectors match the stored voyage-4 vectors for the same text at **0.951 mean cosine**
+   (p05 0.92) once truncated to 1024 dims, and nano queries retrieve from voyage-4
+   document vectors as well as from nano's own (**85% top-10 either way**). What remains
+   is a *build-time* dependency only: a one-off ~$8 to embed the SC corpus, which a
+   self-hoster can avoid entirely by embedding locally with nano instead.
 3. **Upstream documentation is unreliable and must be cross-checked.** The dataset
    README mislabels both judgment collections (§3.1), and an earlier draft of this spec
    built a whole corpus tier on that error. Trust the `open-india-law` repository's
@@ -621,7 +751,13 @@ standards.
 - Tribunal and regulator decisions — **not deferred but unavailable**: held as PDFs
   with no extracted text (§4). Blocked on upstream OCR, not on our scoping.
 - LLM-based knowledge-graph extraction — **rejected, not deferred** (§5).
-- Document drafting, document upload, case tracking.
+- Document drafting and case tracking.
+- **Document upload is no longer out of scope.** It was listed here, alongside
+  drafting and case tracking, until the 2026-09-29 conversations-and-artifacts
+  plan added it — as a separate citation class that is never presented as law
+  (§6.1). The line is amended rather than deleted so the reversal is on the
+  record: this document is the authority every plan argues from, and a silent
+  edit would make it untrustworthy. Drafting and case tracking remain out.
 - Lawyer-facing research tooling.
 - Mobile applications.
 - Any paid tier.

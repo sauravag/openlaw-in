@@ -1714,6 +1714,14 @@ CMD ["uvicorn", "openlaw.api.deps:production_app", "--factory", \
 
 `OPENLAW_QUOTA_ENABLED` defaults to `false` here: a legal-aid body running its own instance should not inherit the hosted tier's rate limit.
 
+> **Security note (carried from Plan 1's fix round).** The datastore ports are bound
+> to `127.0.0.1` in Plan 1's compose file and must stay that way — only `api` and
+> `web` are the intended reachable surface. Two things must change before any
+> deployment that is not localhost-only: the Postgres password must come from the
+> environment rather than the literal `openlaw`, and `api`/`web` must sit behind a
+> reverse proxy terminating TLS. Qdrant and Neo4j must never be published beyond
+> loopback — the API reaches them over the compose network by service name.
+
 - [ ] **Step 3: Write the verification script**
 
 Create `scripts/verify_selfhost.sh`:

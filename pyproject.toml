@@ -1,0 +1,65 @@
+[project]
+name = "openlaw"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "pyarrow>=18.0",
+    "pydantic[email]>=2.9",
+    "pydantic-settings>=2.6",
+    "qdrant-client>=1.12",
+    "voyageai>=0.3",
+    "httpx>=0.27",
+    "neo4j>=5.26",
+    "numpy>=2.0",
+    "anthropic>=0.69",
+    "langdetect>=1.0.9",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    "pyjwt[crypto]>=2.9",
+    "pypdf>=5.1",
+    "python-docx>=1.1",
+    "cryptography>=44.0",
+    # Required by FastAPI to parse `multipart/form-data` -- the only shape a
+    # document upload can arrive in (`POST /documents`, Plan 6 T15). FastAPI
+    # raises at import time, not request time, without it, so a deployment
+    # missing it cannot start rather than failing on a citizen's first upload.
+    "python-multipart>=0.0.18",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-cov>=6.0"]
+# Local query embedding (voyage-4-nano, Plan 3 T1) -- kept OPTIONAL (spec §12.7):
+# the voyage_api backend and CI must not pay for ~2GB of torch/transformers they
+# never import just because dependency resolution runs. Install with
+# `pip install -e ".[local-nano]"`; openlaw.retrieval.factory raises an
+# actionable ImportError naming that exact command if it's missing.
+#
+# Pinned exactly, not a range: nano's shipped remote code needed hand-patching
+# for transformers 5.x (see openlaw.retrieval._nano_compat) and is only known to
+# work with this combination. Bumping any of these needs re-verifying that patch.
+local-nano = [
+    "transformers==5.17.0",
+    "sentence-transformers==6.1.0",
+    "torch==2.14.0",
+    "huggingface-hub>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openlaw"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=openlaw --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    "integration: requires a live external dependency (Neo4j, Qdrant, or the voyage-4-nano model) -- skips cleanly if unavailable",
+]
+
+[tool.coverage.run]
+omit = ["scripts/*"]
