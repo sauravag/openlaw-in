@@ -31,6 +31,13 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, '.'),
+      // Next aliases `server-only` itself at build time (the package is not
+      // installed); under vitest there is no such alias, and the real module
+      // throws by design, so point it at Next's own no-op twin.
+      'server-only': path.resolve(
+        import.meta.dirname,
+        'node_modules/next/dist/compiled/server-only/empty.js',
+      ),
     },
   },
 })
