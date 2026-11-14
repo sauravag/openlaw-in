@@ -363,3 +363,80 @@ def test_an_empty_shard_is_still_a_valid_table(tmp_path: Path) -> None:
 
     assert back.num_rows == 0
     assert back.schema == export_schema()
+
+
+# --- integrity and pinning ----------------------------------------------------
+
+
+def test_sha256_file_matches_hashlib(tmp_path: Path) -> None:
+    import hashlib
+
+    from openlaw.index.publish import sha256_file
+
+    path = tmp_path / "shard.bin"
+    path.write_bytes(b"section 420" * 100_000)
+    assert sha256_file(path) == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_verify_sha256_refuses_a_mismatch_and_names_both_hashes(tmp_path: Path) -> None:
+    from openlaw.index.publish import IntegrityError, verify_sha256
+
+    path = tmp_path / "shard.bin"
+    path.write_bytes(b"forged law")
+    with pytest.raises(IntegrityError, match="shard.bin") as excinfo:
+        verify_sha256(path, "0" * 64, label="shard.bin")
+    assert "0" * 64 in str(excinfo.value)
+
+
+def test_verify_sha256_refuses_a_malformed_expected_hash(tmp_path: Path) -> None:
+    from openlaw.index.publish import IntegrityError, verify_sha256
+
+    path = tmp_path / "x"
+    path.write_bytes(b"x")
+    with pytest.raises(IntegrityError, match="64"):
+        verify_sha256(path, "abc", label="x")
+
+
+@pytest.mark.parametrize("revision", [None, "", "main", "master", "HEAD", "Main"])
+def test_an_unpinned_revision_is_refused(revision: str | None) -> None:
+    from openlaw.index.publish import IntegrityError, require_pinned_revision
+
+    with pytest.raises(IntegrityError, match="revision"):
+        require_pinned_revision(revision)
+
+
+def test_a_commit_or_tag_revision_is_accepted() -> None:
+    from openlaw.index.publish import require_pinned_revision
+
+    assert require_pinned_revision("a" * 40) == "a" * 40
+    assert require_pinned_revision("v2026.08") == "v2026.08"
+
+
+def test_load_corpus_lock_reads_revision_and_manifest_pins(tmp_path: Path) -> None:
+    import json
+
+    from openlaw.index.publish import load_corpus_lock
+
+    path = tmp_path / "corpus.lock.json"
+    path.write_text(json.dumps({"revision": "v1", "manifests": {"sc": "a" * 64}}))
+    lock = load_corpus_lock(path)
+    assert lock.revision == "v1"
+    assert lock.manifests == {"sc": "a" * 64}
+
+
+def test_load_corpus_lock_of_a_missing_file_is_empty(tmp_path: Path) -> None:
+    from openlaw.index.publish import load_corpus_lock
+
+    lock = load_corpus_lock(tmp_path / "absent.json")
+    assert lock.revision is None and lock.manifests == {}
+
+
+def test_load_corpus_lock_refuses_a_bad_pin(tmp_path: Path) -> None:
+    import json
+
+    from openlaw.index.publish import IntegrityError, load_corpus_lock
+
+    path = tmp_path / "corpus.lock.json"
+    path.write_text(json.dumps({"revision": None, "manifests": {"sc": "nothex"}}))
+    with pytest.raises(IntegrityError, match="sc"):
+        load_corpus_lock(path)

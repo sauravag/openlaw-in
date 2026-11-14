@@ -284,6 +284,47 @@ def test_the_manifest_describes_the_slice_and_its_shards(tmp_path: Path) -> None
     ]
 
 
+def test_the_manifest_records_each_shards_sha256(tmp_path: Path) -> None:
+    from openlaw.index.publish import sha256_file
+
+    options = _options(tmp_path, rows_per_shard=100)
+    client, _ = _qdrant_serving(total=150)
+    state = export_corpus.export_target(client, QDRANT, KARNATAKA, options, VERSION)
+
+    path = export_corpus.write_manifest(KARNATAKA, options, state, VERSION)
+    manifest = json.loads(path.read_text())
+
+    for shard in manifest["shards"]:
+        assert shard["sha256"] == sha256_file(path.parent / shard["name"])
+
+
+def test_the_manifest_hash_is_what_gets_pinned(tmp_path: Path) -> None:
+    from openlaw.index.publish import sha256_file
+
+    options = _options(tmp_path, rows_per_shard=100)
+    client, _ = _qdrant_serving(total=150)
+    state = export_corpus.export_target(client, QDRANT, KARNATAKA, options, VERSION)
+    path = export_corpus.write_manifest(KARNATAKA, options, state, VERSION)
+
+    line = export_corpus.pin_line(KARNATAKA, path)
+
+    assert sha256_file(path) in line
+    assert KARNATAKA.key in line
+
+
+def test_a_manifest_is_refused_for_a_shard_with_no_recorded_hash(tmp_path: Path) -> None:
+    """A resumed pre-hash checkpoint must not publish an unverifiable shard."""
+    options = _options(tmp_path, rows_per_shard=100)
+    client, _ = _qdrant_serving(total=150)
+    state = export_corpus.export_target(client, QDRANT, KARNATAKA, options, VERSION)
+    legacy = export_corpus.ShardRecord(name="shard-00000.parquet", rows=1, bytes=1)
+
+    with pytest.raises(ValueError, match="sha256"):
+        export_corpus.write_manifest(
+            KARNATAKA, options, replace_shards(state, (legacy,)), VERSION
+        )
+
+
 # --- the float16 gate ---------------------------------------------------------
 
 
@@ -342,3 +383,9 @@ def test_an_unknown_court_exits_without_touching_qdrant() -> None:
 
 def test_the_publishers_snapshot_cannot_be_exported() -> None:
     assert export_corpus.main(["--collections", "acts_india"]) == 2
+
+
+def replace_shards(state: Any, shards: tuple[Any, ...]) -> Any:
+    import dataclasses
+
+    return dataclasses.replace(state, shards=shards)

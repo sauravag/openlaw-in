@@ -51,6 +51,7 @@ from openlaw.index.publish import (  # noqa: E402
     read_checkpoint,
     resolve_targets,
     rows_to_table,
+    sha256_file,
     shard_name,
     write_checkpoint,
 )
@@ -91,6 +92,9 @@ class ShardRecord:
     name: str
     rows: int
     bytes: int
+    #: Empty only for shards recorded by a checkpoint that predates hashing;
+    #: `write_manifest` refuses to publish those.
+    sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -245,7 +249,12 @@ def flush_shard(
     name = shard_name(index)
     path = directory / name
     pq.write_table(rows_to_table(rows), path, compression=COMPRESSION)
-    return ShardRecord(name=name, rows=len(rows), bytes=path.stat().st_size)
+    return ShardRecord(
+        name=name,
+        rows=len(rows),
+        bytes=path.stat().st_size,
+        sha256=sha256_file(path),
+    )
 
 
 def advance(
@@ -347,7 +356,19 @@ def export_target(
 def write_manifest(
     target: ExportTarget, options: ExportOptions, state: ExportState, version: str
 ) -> Path:
-    """Write the per-target manifest `fetch_corpus.py` reads back."""
+    """Write the per-target manifest `fetch_corpus.py` reads back.
+
+    Every shard carries its SHA-256, which is what lets a fetcher prove the
+    bytes it downloaded are the bytes published. Refuses a shard without one
+    rather than publishing something no fetcher could verify.
+    """
+    unhashed = [shard.name for shard in state.shards if not shard.sha256]
+    if unhashed:
+        raise ValueError(
+            f"{target.key}: shard(s) {', '.join(unhashed)} have no sha256 "
+            "(recorded by an older checkpoint); re-run with --restart so "
+            "every shard is hashed"
+        )
     directory = target.shard_dir(options.out_dir)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "manifest.json"
@@ -368,6 +389,16 @@ def write_manifest(
         )
     )
     return path
+
+
+def pin_line(target: ExportTarget, manifest_path: Path) -> str:
+    """Return the `corpus.lock.json` line that pins this manifest.
+
+    The manifest's own hash is the one value that must reach operators
+    through git rather than through the download, so it is printed here for
+    the publisher to commit.
+    """
+    return f'    "{target.key}": "{sha256_file(manifest_path)}"'
 
 
 def report(target: ExportTarget, state: ExportState) -> None:
@@ -465,8 +496,9 @@ def main(argv: list[str] | None = None) -> int:
             state = export_target(
                 client, settings.qdrant_url, target, options, settings.corpus_version
             )
-            write_manifest(target, options, state, settings.corpus_version)
+            manifest = write_manifest(target, options, state, settings.corpus_version)
             report(target, state)
+            print(f"[Export] pin in corpus.lock.json -> manifests:\n{pin_line(target, manifest)}")
     return 0
 
 

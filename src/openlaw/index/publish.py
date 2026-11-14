@@ -38,6 +38,7 @@ Three decisions are load-bearing:
    `build_published_collection_payload` both refuse the name outright.
 """
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -419,3 +420,92 @@ def write_checkpoint(path: Path, state: Mapping[str, Any]) -> None:
     temporary = path.with_name(f"{path.name}.tmp")
     temporary.write_text(json.dumps(dict(state), indent=2, sort_keys=True))
     temporary.replace(path)
+
+
+# --- integrity: the git repository is the root of trust -----------------------
+
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+HASH_CHUNK_BYTES = 1024 * 1024
+
+#: Names that move. A revision spelled like one of these means "whatever is
+#: there today", which is exactly what a squatter or a compromised account
+#: controls. Compared case-insensitively.
+FLOATING_REVISIONS = frozenset({"main", "master", "head", "latest", "dev"})
+
+LOCK_FILE_NAME = "corpus.lock.json"
+
+
+class IntegrityError(ValueError):
+    """The downloaded corpus cannot be shown to be the one the repo pins.
+
+    Raised, never logged: a corpus that fails verification can forge both the
+    text presented as law and the government URL cited beside it, and the
+    citation validator cannot see either. Callers must let it stop the run.
+    """
+
+
+@dataclass(frozen=True)
+class CorpusLock:
+    """What the git repository pins about the corpus.
+
+    `manifests` maps a target key to the SHA-256 of that target's
+    `manifest.json`; the manifest in turn carries one SHA-256 per shard, so
+    the chain terminates in a file reviewed and versioned here rather than in
+    anything the download supplies.
+    """
+
+    revision: str | None
+    manifests: Mapping[str, str]
+
+
+def sha256_file(path: Path) -> str:
+    """Return the hex SHA-256 of the file at `path`, read in bounded chunks."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def require_sha256_hex(value: object, label: str) -> str:
+    """Return `value` if it is a lowercase 64-character hex digest, else raise."""
+    if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value):
+        raise IntegrityError(
+            f"{label}: expected a 64-character lowercase hex SHA-256, got {value!r}"
+        )
+    return value
+
+
+def verify_sha256(path: Path, expected: object, label: str) -> None:
+    """Raise `IntegrityError` unless the file at `path` hashes to `expected`."""
+    wanted = require_sha256_hex(expected, label)
+    actual = sha256_file(path)
+    if actual != wanted:
+        raise IntegrityError(
+            f"{label}: SHA-256 mismatch.\n"
+            f"      expected {wanted}\n"
+            f"      actual   {actual}"
+        )
+
+
+def require_pinned_revision(revision: str | None) -> str:
+    """Return `revision` if it names a fixed commit or tag, else raise."""
+    if not revision or revision.lower() in FLOATING_REVISIONS:
+        raise IntegrityError(
+            f"revision {revision!r} is not pinned: a branch name means "
+            "'whatever is there today'. Pass a commit hash or release tag "
+            f"with --revision (or OPENLAW_CORPUS_REVISION, or `revision` in "
+            f"{LOCK_FILE_NAME})."
+        )
+    return revision
+
+
+def load_corpus_lock(path: Path) -> CorpusLock:
+    """Return the lock file at `path`; an absent file pins nothing."""
+    if not path.exists():
+        return CorpusLock(revision=None, manifests={})
+    raw = json.loads(path.read_text())
+    manifests = dict(raw.get("manifests") or {})
+    for key, value in manifests.items():
+        require_sha256_hex(value, f"{path.name} manifest pin for {key}")
+    return CorpusLock(revision=raw.get("revision"), manifests=manifests)

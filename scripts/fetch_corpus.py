@@ -51,6 +51,16 @@ Minimum:    python scripts/fetch_corpus.py --collections acts_india_v1,sc_judgme
 One court:  python scripts/fetch_corpus.py --courts karnataka
 Plan only:  python scripts/fetch_corpus.py --courts karnataka --dry-run
 Resume:     python scripts/fetch_corpus.py        # same command, it continues
+
+TRUST. There is no default dataset repo: a Hugging Face name is not a root of
+trust, and whoever registers an unowned one controls both the text this
+system presents as law and the government URL cited beside it. Nothing here
+can detect that after the fact. So you must say where to download from
+(`--repo-id` / `OPENLAW_CORPUS_REPO_ID`) and which revision
+(`--revision` / `OPENLAW_CORPUS_REVISION` / `corpus.lock.json`), and the
+SHA-256 of each target's manifest is read from `corpus.lock.json` in this git
+repository. Every shard is then checked against the manifest. Any failure
+stops the run before one point is written to Qdrant.
 """
 
 import argparse
@@ -72,19 +82,39 @@ from openlaw.config import Settings, get_settings  # noqa: E402
 from openlaw.index.publish import (  # noqa: E402
     EMBEDDING_COMPATIBILITY_WARNING,
     PUBLISHED_COLLECTIONS,
+    LOCK_FILE_NAME,
     ExportTarget,
+    IntegrityError,
     build_published_collection_payload,
     court_code_filter,
+    load_corpus_lock,
     read_checkpoint,
     resolve_targets,
     row_to_point,
+    verify_sha256,
     write_checkpoint,
+)
+from openlaw.index.corpus_clobber import (  # noqa: E402,F401
+    Existing,
+    clobber_refusal,
+    inspect_collection,
+    refuse_to_clobber,
+)
+from openlaw.index.corpus_trust import (  # noqa: E402
+    REPO_ID_ENV,
+    REVISION_ENV,
+    resolve_trust,
+    shard_hashes,
+    verify_shard,
 )
 from openlaw.index.qdrant_http import build_index_client, call_with_retry  # noqa: E402
 
-#: Placeholder the README names. Override with `--repo-id` or
-#: `OPENLAW_CORPUS_REPO_ID`; there is no hardcoded account to trust.
-DEFAULT_REPO_ID = "openlaw-in/openlaw-corpus-v2026.08"
+# There is deliberately no default repo id. The project's Hugging Face
+# namespace is not registered yet, and guessing one would recreate the
+# squatting risk under a different name.
+# TODO: once the namespace is registered, document it in the README as the
+# *suggested* value -- never as a default this script trusts on its own.
+DEFAULT_LOCK_FILE = Path(__file__).resolve().parent.parent / LOCK_FILE_NAME
 MANIFEST_NAME = "manifest.json"
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_CACHE_DIR = Path("data/corpus_download")
@@ -154,20 +184,6 @@ def resolve_settings() -> CorpusSettings:
 
 
 @dataclass(frozen=True)
-class Existing:
-    """What a Qdrant collection already holds, before we write anything.
-
-    `matching` is whether any of those points belong to the slice being
-    fetched. `hc_judgments_v1` is shared across courts (see
-    `openlaw.corpus.high_courts`), so Karnataka's 1.4M points must not block
-    a later Delhi fetch -- but Delhi's own points must.
-    """
-
-    points: int
-    matching: bool
-
-
-@dataclass(frozen=True)
 class RestoreState:
     """Resumable progress for one target. Replaced, never mutated."""
 
@@ -187,106 +203,6 @@ class FetchOptions:
 
 EMPTY_STATE = RestoreState(shard_index=0, row_offset=0, points=0)
 
-
-# --- refusing to clobber ------------------------------------------------------
-
-
-def inspect_collection(
-    client: httpx.Client, qdrant_url: str, target: ExportTarget
-) -> Existing | None:
-    """Return what `target`'s collection already holds, or None if absent.
-
-    Read-only: a GET for the collection and, for a court-scoped target, one
-    single-point scroll under the `court_code` filter. A 404 means the
-    collection does not exist yet, which is the normal, safe case.
-    """
-    response = client.get(f"{qdrant_url}/collections/{target.collection}")
-    if response.status_code == COLLECTION_NOT_FOUND:
-        return None
-    response.raise_for_status()
-    points = int(response.json()["result"].get("points_count") or 0)
-    if target.court_code is None:
-        return Existing(points=points, matching=points > 0)
-    probe = client.post(
-        f"{qdrant_url}/collections/{target.collection}/points/scroll",
-        json={
-            "limit": 1,
-            "with_payload": False,
-            "with_vector": False,
-            "filter": court_code_filter(target.court_code),
-        },
-    )
-    probe.raise_for_status()
-    return Existing(points=points, matching=bool(probe.json()["result"]["points"]))
-
-
-def _court_scoped_hint(target: ExportTarget) -> str:
-    """Return the extra line a shared-collection refusal needs."""
-    if not target.court_code:
-        return ""
-    return (
-        f"      (that removes EVERY court in {target.collection}; to drop only "
-        f"court_code {target.court_code!r}, POST points/delete with a "
-        "court_code filter -- see "
-        "openlaw.index.hc_upsert.delete_hc_court_points)\n"
-    )
-
-
-def clobber_refusal(
-    target: ExportTarget,
-    existing: Existing | None,
-    resumable: bool,
-    qdrant_url: str = "$OPENLAW_QDRANT_URL",
-) -> str | None:
-    """Return why `target` must not be written, or None when it is safe.
-
-    Safe when the collection is absent, when it is empty, when the points in
-    it belong to a different court, or when this run's own checkpoint proves
-    those points came from an earlier, interrupted run of this same fetch.
-    Anything else is somebody's corpus and is not ours to overwrite.
-    """
-    if existing is None or not existing.matching or resumable:
-        return None
-    scope = f" (including court_code {target.court_code!r})" if target.court_code else ""
-    return (
-        f"{target.collection} already holds {existing.points:,} points{scope} "
-        f"and no checkpoint from this fetch explains them -- nothing was "
-        f"written.\n"
-        f"      To keep that corpus, drop {target.key} from --collections/"
-        f"--courts and re-run.\n"
-        f"      To replace it, delete it deliberately first:\n"
-        f"        curl -X DELETE "
-        f"'{qdrant_url}/collections/{target.collection}'\n"
-        + _court_scoped_hint(target)
-        + "      then re-run this command."
-    )
-
-
-def refuse_to_clobber(
-    client: httpx.Client,
-    qdrant_url: str,
-    targets: Sequence[ExportTarget],
-    resumable: frozenset[str],
-) -> None:
-    """Check every target before writing any of them, or exit explaining why.
-
-    Checked up front, as one gate, so a six-target fetch cannot write three
-    collections and then stop on the fourth -- which would leave a corpus
-    `/readyz` calls degraded for reasons nothing records.
-    """
-    refusals: list[str] = []
-    for target in targets:
-        existing = inspect_collection(client, qdrant_url, target)
-        refusal = clobber_refusal(
-            target, existing, target.key in resumable, qdrant_url
-        )
-        if refusal:
-            refusals.append(refusal)
-    if refusals:
-        raise SystemExit(
-            "[Fetch] REFUSING to overwrite an existing corpus:\n  - "
-            + "\n  - ".join(refusals)
-        )
 
 
 # --- creating the collection --------------------------------------------------
@@ -432,7 +348,7 @@ def validate_manifest(target: ExportTarget, manifest: dict[str, Any]) -> dict[st
 
 
 def build_downloader(
-    repo_id: str, revision: str | None, cache_dir: Path
+    repo_id: str, revision: str, cache_dir: Path
 ) -> Callable[[str], Path]:
     """Return a function downloading one repo path to a local file.
 
@@ -461,6 +377,52 @@ def build_downloader(
         )
 
     return download
+
+
+# --- integrity ----------------------------------------------------------------
+
+
+def load_pinned_manifest(
+    target: ExportTarget, download: Callable[[str], Path], pins: dict[str, str]
+) -> dict[str, Any]:
+    """Download `target`'s manifest and prove it is the one git pins.
+
+    The hash is checked on the raw bytes BEFORE they are parsed, so a hostile
+    manifest never reaches `json.loads` or any later logic.
+    """
+    pin = pins.get(target.key)
+    if pin is None:
+        raise IntegrityError(
+            f"{target.key}: {LOCK_FILE_NAME} has no manifest pin for this "
+            "target, so nothing ties the download to a hash reviewed in git. "
+            "Add the manifest SHA-256 printed by scripts/export_corpus.py to "
+            f"{LOCK_FILE_NAME} (under \"manifests\") from a source you trust."
+        )
+    path = download(repo_path(target, MANIFEST_NAME))
+    verify_sha256(path, pin, label=f"{repo_path(target, MANIFEST_NAME)} (manifest)")
+    return validate_manifest(target, json.loads(path.read_text()))
+
+
+def download_verified_shards(
+    target: ExportTarget,
+    manifest: dict[str, Any],
+    first: int,
+    download: Callable[[str], Path],
+) -> list[Path]:
+    """Download shards `first..` and return their paths, every one verified.
+
+    All of a target's shards are verified before the caller writes any of
+    them, so a forged shard 40 cannot be discovered after shards 0-39 are
+    already in Qdrant. See `openlaw.index.corpus_trust.verify_shard`.
+    """
+    hashes = shard_hashes(target.key, manifest)
+    names = shard_names(manifest)
+    return [
+        verify_shard(
+            target.key, name, download(repo_path(target, name)), hashes, set(names)
+        )
+        for name in names[first:]
+    ]
 
 
 # --- checkpoints --------------------------------------------------------------
@@ -560,9 +522,10 @@ def fetch_target(
             f"row {state.row_offset} ({state.points:,} points already in)"
         )
 
+    # Verify every remaining shard BEFORE the first write for this target.
+    shards = download_verified_shards(target, manifest, state.shard_index, download)
     create_collection(client, qdrant_url, target.collection)
-    for index in range(state.shard_index, len(names)):
-        shard = download(repo_path(target, names[index]))
+    for index, shard in enumerate(shards, start=state.shard_index):
         base = state.points - state.row_offset
         written = upsert_shard(
             client,
@@ -612,6 +575,29 @@ def split_list(value: str | None) -> list[str] | None:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _add_trust_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add the options that say where the corpus comes from and what to trust."""
+    parser.add_argument(
+        "--repo-id",
+        default=os.environ.get(REPO_ID_ENV),
+        help=f"REQUIRED (or set {REPO_ID_ENV}): Hugging Face dataset repo. No default.",
+    )
+    parser.add_argument(
+        "--revision",
+        default=os.environ.get(REVISION_ENV),
+        help=(
+            f"REQUIRED unless {LOCK_FILE_NAME} pins one (or set {REVISION_ENV}): "
+            "a commit hash or release tag. Branch names are refused."
+        ),
+    )
+    parser.add_argument(
+        "--lock-file",
+        type=Path,
+        default=DEFAULT_LOCK_FILE,
+        help=f"git-tracked pins: manifest SHA-256s and revision (default: {LOCK_FILE_NAME})",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Return the command-line parser.
 
@@ -625,12 +611,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=EMBEDDING_COMPATIBILITY_WARNING,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--repo-id",
-        default=os.environ.get("OPENLAW_CORPUS_REPO_ID", DEFAULT_REPO_ID),
-        help=f"Hugging Face dataset repo (default: {DEFAULT_REPO_ID})",
-    )
-    parser.add_argument("--revision", help="dataset revision, branch or tag")
+    _add_trust_arguments(parser)
     parser.add_argument(
         "--collections",
         help=f"comma-separated: {', '.join(PUBLISHED_COLLECTIONS)} (default: all)",
@@ -674,18 +655,21 @@ def fetch_all(
     download: Callable[[str], Path],
     options: FetchOptions,
     version: str,
+    manifest_pins: dict[str, str],
 ) -> None:
-    """Download and restore every target, in order.
+    """Verify every manifest, then download and restore each target in order.
 
-    Called only after `refuse_to_clobber` has cleared every target, so the
-    first write to Qdrant happens here and not before.
+    Called only after `refuse_to_clobber` has cleared every target. Every
+    manifest is checked against its git pin first, so a bad pin on the last
+    target is found before the first target writes anything.
     """
+    manifests = {
+        target.key: load_pinned_manifest(target, download, manifest_pins)
+        for target in targets
+    }
     for target in targets:
-        manifest = validate_manifest(
-            target, json.loads(download(repo_path(target, MANIFEST_NAME)).read_text())
-        )
         state = fetch_target(
-            client, qdrant_url, target, manifest, download, options, version
+            client, qdrant_url, target, manifests[target.key], download, options, version
         )
         print(f"[Fetch] {target.key}: DONE -- {state.points:,} points")
 
@@ -706,6 +690,14 @@ def main(argv: list[str] | None = None) -> int:
         print("[Fetch] --dry-run: nothing downloaded, nothing written.")
         return 0
 
+    try:
+        trust = resolve_trust(
+            args.repo_id, args.revision, load_corpus_lock(args.lock_file)
+        )
+    except IntegrityError as exc:
+        print(f"[Fetch] REFUSING to start -- {exc}")
+        return 2
+
     options = FetchOptions(
         checkpoint_dir=args.checkpoint_dir,
         batch_size=args.batch_size,
@@ -717,13 +709,23 @@ def main(argv: list[str] | None = None) -> int:
         print("[Fetch] --restart: checkpoints cleared")
 
     resumable = resumable_targets(targets, options.checkpoint_dir)
-    download = build_downloader(args.repo_id, args.revision, args.cache_dir)
+    download = build_downloader(trust.repo_id, trust.revision, args.cache_dir)
 
     with build_index_client(timeout=REQUEST_TIMEOUT) as client:
         refuse_to_clobber(client, qdrant_url, targets, resumable)
-        fetch_all(
-            client, qdrant_url, targets, download, options, settings.corpus_version
-        )
+        try:
+            fetch_all(
+                client,
+                qdrant_url,
+                targets,
+                download,
+                options,
+                settings.corpus_version,
+                trust.manifest_pins,
+            )
+        except IntegrityError as exc:
+            print(f"[Fetch] INTEGRITY FAILURE -- {exc}")
+            return 1
     print(
         "[Fetch] all done. `curl localhost:8000/readyz` reports `degraded` "
         "until acts_india_v1 and sc_judgments_v1 both hold vectors."

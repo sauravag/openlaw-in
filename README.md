@@ -349,6 +349,14 @@ would otherwise over-trust these paths.
   says. There is no entailment check anywhere in this pipeline, in either
   namespace. Pass separation stops uploaded text from steering a legal claim;
   nothing verifies a claim against its source.
+- **A corpus is only as trustworthy as who built it.** The validator proves a
+  cited chunk was retrieved this turn, never that the chunk's *content* is
+  genuine, so a poisoned corpus can forge both the law and the government
+  `source_url` beside it, and nothing here can detect that afterwards. That is
+  why `fetch_corpus.py` has no default repo, requires a pinned revision and
+  verifies every shard against hashes pinned in this repository
+  ([details](#verified-downloads-and-why-you-must-pin-one)). Build it yourself
+  if you cannot establish who published the download.
 - **Hindi safety text is implemented but unverified.** Every static Hindi
   string on the crisis, refusal and footer paths, the 21 Devanagari crisis
   patterns, and roughly ten new interface strings are machine-written and
@@ -449,7 +457,7 @@ anything. There are three honest paths, and the third one is a real answer:
 
 | | What you get | What it costs | Start with |
 |---|---|---|---|
-| **1. Download a prebuilt corpus** — the default path | A working, queryable corpus. Pick the slices you need. | Minutes to a few hours. **4.2 GiB** for the national minimum, **28 GiB** for everything. | `python scripts/fetch_corpus.py` |
+| **1. Download a prebuilt corpus** — the default path | A working, queryable corpus. Pick the slices you need. | Minutes to a few hours. **4.2 GiB** for the national minimum, **28 GiB** for everything. | `python scripts/fetch_corpus.py --repo-id ... --revision ...` ([verified](#verified-downloads-and-why-you-must-pin-one)) |
 | **2. Build it yourself from the upstream datasets** | The same corpus, provably, from the two source datasets. | **~30 days** of local compute for the four High Courts, plus a real Voyage API bill for the Supreme Court, plus ~**120 GB** of disk for raw datasets and index together. | [Corpus build](#corpus-build) |
 | **3. Run with no corpus at all** | The application, end to end, honestly degraded. `/readyz` reports `degraded` and every question returns `unanswerable` — never a fabricated citation. | Minutes. **No corpus download.** | `docker compose up -d` |
 
@@ -459,13 +467,13 @@ anything. There are three honest paths, and the third one is a real answer:
     docker compose up -d qdrant                 # Qdrant must be running first
 
     # the national minimum -- statutes + Supreme Court, binding everywhere
-    python scripts/fetch_corpus.py --collections acts_india_v1,sc_judgments_v1
+    python scripts/fetch_corpus.py --repo-id OWNER/NAME --revision <commit-or-tag> --collections acts_india_v1,sc_judgments_v1
 
     # add the High Court whose jurisdiction you are actually in
-    python scripts/fetch_corpus.py --courts karnataka
+    python scripts/fetch_corpus.py --repo-id OWNER/NAME --revision <commit-or-tag> --courts karnataka
 
     # see the plan and the download size without downloading anything
-    python scripts/fetch_corpus.py --dry-run
+    python scripts/fetch_corpus.py --dry-run   # needs no repo id
 
 Those three commands are the whole of step one. **No `.env` and no API keys
 are needed to download a corpus** — `fetch_corpus.py` needs only
@@ -481,10 +489,46 @@ an interrupted download resumes with the same command, and **refuses to
 overwrite a collection that already holds points** — it stops and tells you
 what to delete rather than destroying a corpus you built.
 
-The dataset repo id defaults to the placeholder
-`openlaw-in/openlaw-corpus-v2026.08` and is configurable with `--repo-id` or
-`OPENLAW_CORPUS_REPO_ID`. See [`docs/dataset-card.md`](docs/dataset-card.md)
-for the dataset's provenance, licences and limits.
+#### Verified downloads, and why you must pin one
+
+**An unverified corpus can forge both the law and its citation.** The answer
+pipeline proves a cited chunk was retrieved this turn; it has never proved
+the chunk's *text* is genuine. Whoever supplies the shards controls the
+statute wording **and** the `source_url` rendered beside it, so a forged
+provision can carry a real-looking `indiacode.nic.in` link and pass every
+check in this system. A citizen reading it has no way to tell. That is why
+`fetch_corpus.py` treats this git repository, not a Hugging Face name, as the
+root of trust:
+
+- **No default repo.** `--repo-id OWNER/NAME` (or `OPENLAW_CORPUS_REPO_ID`) is
+  required; the script refuses to start without it. The project namespace is
+  not registered yet, and an unowned name can be claimed by anyone.
+- **Pinned revision.** `--revision` (or `OPENLAW_CORPUS_REVISION`, or
+  `revision` in `corpus.lock.json`) must be a commit hash or release tag.
+  Branch names such as `main` are refused.
+- **Pinned manifests.** `corpus.lock.json` maps each target (for example
+  `sc_judgments_v1`) to the SHA-256 of its `manifest.json`. Take these values
+  from the publisher's release notes, check them in a reviewed commit, and
+  nothing in the download can change them. A target with no pin is refused.
+- **Verified shards.** Each manifest records a SHA-256 per shard.
+  `fetch_corpus.py` hashes every shard, refuses one the manifest does not
+  list, and does all of this for a target **before it writes any point to
+  Qdrant**.
+
+```
+python scripts/fetch_corpus.py --repo-id OWNER/NAME --revision <commit-or-tag> \
+    --collections acts_india_v1,sc_judgments_v1
+```
+
+**If it reports a hash mismatch or a missing pin, do not work around it.**
+Delete the cache directory (`data/corpus_download`), check that `--repo-id`
+and `--revision` are what you meant, and re-run. If it persists, the
+download is not the corpus your repository pins: do not ingest it, and report
+it to the maintainers. Publishers: `scripts/export_corpus.py` prints the
+manifest hash to add to `corpus.lock.json`.
+
+See [`docs/dataset-card.md`](docs/dataset-card.md) for the dataset's
+provenance, licences and limits.
 
 > ### ⚠️ These vectors only work with one embedder
 >
@@ -746,8 +790,8 @@ corpus. Be clear-eyed about what that means before you start:
    choose a corpus" above for the per-slice sizes):
 
        pip install -e ".[dev,local-nano,corpus]"
-       python scripts/fetch_corpus.py --collections acts_india_v1,sc_judgments_v1
-       python scripts/fetch_corpus.py --courts karnataka   # or your own jurisdiction
+       python scripts/fetch_corpus.py --repo-id OWNER/NAME --revision <commit-or-tag> --collections acts_india_v1,sc_judgments_v1
+       python scripts/fetch_corpus.py --repo-id OWNER/NAME --revision <commit-or-tag> --courts karnataka   # or your own jurisdiction
 
    **Or build it yourself** -- ~30 days of local compute for the four High
    Courts plus a paid Voyage API bill for the Supreme Court. These scripts

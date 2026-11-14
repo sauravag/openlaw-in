@@ -22,8 +22,10 @@ size_categories:
 
 > **Draft dataset card.** This is the text to publish as the README of the
 > Hugging Face dataset repo that `scripts/fetch_corpus.py` downloads from.
-> Replace `<your-org>/<your-repo>` with the real repo id, and set
-> `OPENLAW_CORPUS_REPO_ID` (or `scripts/fetch_corpus.py --repo-id`) to match.
+> Replace `<your-org>/<your-repo>` with the real repo id. There is no default
+> id in the code: operators must pass `--repo-id` / `OPENLAW_CORPUS_REPO_ID`
+> and a pinned `--revision`, and publishers must commit each manifest's
+> SHA-256 (printed by `scripts/export_corpus.py`) to `corpus.lock.json`.
 > Nothing in this repository uploads anything — publishing needs the
 > publisher's own Hugging Face credentials and is their decision.
 
@@ -206,9 +208,26 @@ cannot silently drop a field. Judgment payloads carry `chunk_id`, `case_id`,
 ```bash
 pip install -e ".[dev,local-nano,corpus]"     # in the OpenLaw.in repo
 docker compose up -d qdrant
-python scripts/fetch_corpus.py --collections acts_india_v1,sc_judgments_v1
-python scripts/fetch_corpus.py --courts karnataka
+python scripts/fetch_corpus.py --repo-id <your-org>/<your-repo> \
+    --revision <commit-or-tag> --collections acts_india_v1,sc_judgments_v1
+python scripts/fetch_corpus.py --repo-id <your-org>/<your-repo> \
+    --revision <commit-or-tag> --courts karnataka
 ```
+
+### Integrity: shards are verified, and you must pin a revision
+
+**An unverified corpus can forge both the law and its citation.** Whoever
+serves the shards controls the statute text and the `source_url` shown beside
+it; the answer pipeline only proves a chunk was retrieved, not that its text
+is genuine. So each target's `manifest.json` records a **SHA-256 per shard**,
+`fetch_corpus.py` verifies every shard against it, and the manifest's own
+SHA-256 is pinned in `corpus.lock.json` in the OpenLaw.in git repository, so
+the chain ends in git rather than in the download. Pin `--revision` to a
+commit hash or release tag (branch names are refused); a missing pin, an
+unlisted shard or any hash mismatch stops the run before anything is written
+to Qdrant. **On a mismatch:** do not ingest the download. Delete
+`data/corpus_download`, confirm the repo id and revision are the intended
+ones, re-run, and report it to the maintainers if it persists.
 
 `fetch_corpus.py` creates each collection with the correct geometry (1024-dim
 cosine, on-disk, int8-quantised, **`idf` on sparse**), upserts in batches,

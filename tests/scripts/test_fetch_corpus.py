@@ -64,9 +64,9 @@ def test_help_output_carries_the_embedder_warning() -> None:
     assert "DOES NOT RAISE AN ERROR" in help_text
 
 
-def test_the_repo_id_is_configurable_and_defaults_to_a_placeholder() -> None:
-    args = fetch_corpus.build_parser().parse_args([])
-    assert args.repo_id == fetch_corpus.DEFAULT_REPO_ID
+def test_the_repo_id_is_configurable_and_has_no_default(monkeypatch) -> None:
+    monkeypatch.delenv("OPENLAW_CORPUS_REPO_ID", raising=False)
+    assert fetch_corpus.build_parser().parse_args([]).repo_id is None
     override = fetch_corpus.build_parser().parse_args(["--repo-id", "me/mine"])
     assert override.repo_id == "me/mine"
 

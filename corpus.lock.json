@@ -1,0 +1,5 @@
+{
+  "_comment": "Root of trust for scripts/fetch_corpus.py. `revision` is a Hugging Face commit hash or release tag; `manifests` maps each target key to the SHA-256 of its manifest.json, as printed by scripts/export_corpus.py. Fill both from the publisher's release notes in a reviewed commit. Empty means fetch_corpus.py refuses to download.",
+  "revision": null,
+  "manifests": {}
+}
