@@ -27,6 +27,12 @@ rows are a fourth, independent store: never deleted by a document's own
 purge (by design -- an audit record must outlive its subject), aged out on
 the SAME 90-day window as the hallucination log instead.
 
+**In the default no-auth mode (`Settings.retention_enforced` false) the
+`documents` and `conversations` purges do nothing at all.** No row is written
+with an expiry in that mode, and the purge functions also refuse to run, so a
+self-hoster's uploads are not deleted by this script even if the database
+holds rows that carry an expiry from an earlier authenticated run.
+
 Purges SEVEN things in one run:
 
 - the hallucination-log JSONL file (`Settings.hallucination_log_path`).
@@ -78,7 +84,7 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from openlaw.answers.escalation import purge_stale_events
-from openlaw.config import get_settings
+from openlaw.config import Settings, get_settings
 from openlaw.db.retention import (
     purge_expired_conversations,
     purge_expired_documents,
@@ -88,7 +94,9 @@ from openlaw.db.retention import (
 from openlaw.db.session import engine_from_settings
 
 
-def _purge_database_stores(engine: Engine, dry_run: bool) -> tuple[int, int, int, int]:
+def _purge_database_stores(
+    engine: Engine, settings: Settings, dry_run: bool
+) -> tuple[int, int, int, int]:
     """Run all four database purges in one transaction.
 
     Commits on success unless `dry_run` is set, in which case the same
@@ -100,8 +108,8 @@ def _purge_database_stores(engine: Engine, dry_run: bool) -> tuple[int, int, int
     session = Session(engine)
     try:
         hallucination_removed = purge_stale_hallucination_log(session)
-        documents_removed = purge_expired_documents(session)
-        conversations_removed = purge_expired_conversations(session)
+        documents_removed = purge_expired_documents(session, settings)
+        conversations_removed = purge_expired_conversations(session, settings)
         audit_removed = purge_stale_document_audit(session)
         if dry_run:
             session.rollback()
@@ -144,11 +152,17 @@ def run_purge(dry_run: bool = False) -> None:
 
     engine = engine_from_settings(settings)
     hallucination_db, documents, conversations, audit = _purge_database_stores(
-        engine, dry_run
+        engine, settings, dry_run
     )
     print(f"{tag}hallucination_log table: removed {hallucination_db} row(s)")
-    print(f"{tag}documents table: removed {documents} row(s)")
-    print(f"{tag}conversations table: removed {conversations} row(s)")
+    if settings.retention_enforced:
+        print(f"{tag}documents table: removed {documents} row(s)")
+        print(f"{tag}conversations table: removed {conversations} row(s)")
+    else:
+        print(
+            f"{tag}documents and conversations: skipped "
+            "(OPENLAW_AUTH_ENABLED is false; nothing in this mode expires)"
+        )
     print(f"{tag}document_access_log table: removed {audit} row(s)")
 
 

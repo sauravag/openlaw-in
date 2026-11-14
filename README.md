@@ -121,6 +121,11 @@ outcome this is designed to prevent. Concretely:
   `now + Settings.anonymous_upload_ttl_hours` /
   `+ anonymous_conversation_ttl_hours` (both default **24 hours**) at write
   time, and both columns are indexed so an expired-row scan is cheap.
+- **With `OPENLAW_AUTH_ENABLED=false` (the default) nothing expires at all:**
+  every row is written with `expires_at IS NULL`, so there is nothing for the
+  purge to find, and `purge_expired_documents` / `purge_expired_conversations`
+  additionally return 0 without querying. The TTLs below apply only when
+  `OPENLAW_AUTH_ENABLED=true`.
 - Purging a conversation cascades to its messages and every document filed
   under it (and each of those documents' excerpts), regardless of that
   document's own `expires_at` — a conversation's lifetime bounds everything
@@ -295,6 +300,10 @@ stop deletions — turning the feature off must never trap somebody's FIR in
 storage they can no longer clear.
 
 ### Anonymous uploads expire in 24 hours, on purpose
+
+*(Only with `OPENLAW_AUTH_ENABLED=true`. In the default no-auth mode there is
+no account to keep a file in, so uploads and conversations are kept until you
+delete them.)*
 
 An anonymous upload and the conversation holding it get
 `now + OPENLAW_ANONYMOUS_UPLOAD_TTL_HOURS` (default 24) at write time; an

@@ -131,16 +131,19 @@ def owner_columns(owner: Owner) -> dict[str, str | None]:
     return {"user_id": None, "anon_token": owner.anon_token}
 
 
-def _anonymous_expiry(owner: Owner, ttl_hours: int) -> datetime | None:
+def _anonymous_expiry(owner: Owner, settings: Settings) -> datetime | None:
     """Return the TTL-bounded expiry for an anonymous `owner`, else `None`.
 
-    `None` for an authenticated owner: per the plan, authenticated history
-    persists until the person deletes it themselves (see `Conversation.
-    expires_at`'s docstring).
+    `None` for an authenticated owner (history persists until the person
+    deletes it) and for EVERY owner when `settings.retention_enforced` is
+    false (Mode A): no account exists to keep anything in, so an expiry
+    would only delete the operator's own work. The row is written with
+    `expires_at IS NULL`, so the purge cannot find it -- structurally, not
+    by a flag the purge checks.
     """
-    if owner.user_id is not None:
+    if owner.user_id is not None or not settings.retention_enforced:
         return None
-    return datetime.now(UTC) + timedelta(hours=ttl_hours)
+    return datetime.now(UTC) + timedelta(hours=settings.anonymous_conversation_ttl_hours)
 
 
 def find_owned_conversation(
@@ -182,7 +185,7 @@ def create_conversation(
     """
     conversation = Conversation(
         **owner_columns(owner),
-        expires_at=_anonymous_expiry(owner, settings.anonymous_conversation_ttl_hours),
+        expires_at=_anonymous_expiry(owner, settings),
     )
     session.add(conversation)
     session.flush()

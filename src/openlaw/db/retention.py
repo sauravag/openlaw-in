@@ -33,12 +33,37 @@ table -- see its own docstring for why audit rows are *not* kept forever
 either.
 """
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from openlaw.config import Settings
 from openlaw.db.models import Conversation, Document, DocumentAccessLog, HallucinationLog
+
+logger = logging.getLogger(__name__)
+
+
+def _is_nothing_to_expire(settings: Settings, store: str) -> bool:
+    """True (and logged) in Mode A, where no row is ever written with an expiry.
+
+    Belt and braces on top of the write path: `expires_at` is NULL for every
+    Mode A row, so the queries below could not match one anyway. This guard
+    exists for the row that WAS written with an expiry in a past Mode B run
+    and now sits in a database an operator has switched to Mode A -- that
+    operator promised themselves indefinite retention, and a cron job must
+    not quietly break it.
+    """
+    if settings.retention_enforced:
+        return False
+    logger.info(
+        "retention purge of %s skipped: OPENLAW_AUTH_ENABLED is false, so "
+        "nothing in this deployment expires",
+        store,
+    )
+    return True
+
 
 #: Default retention window in days, matching
 #: `openlaw.answers.escalation.DEFAULT_HALLUCINATION_LOG_RETENTION_DAYS` --
@@ -66,7 +91,7 @@ def purge_stale_hallucination_log(
     return result.rowcount or 0
 
 
-def purge_expired_documents(session: Session) -> int:
+def purge_expired_documents(session: Session, settings: Settings) -> int:
     """Delete `Document` rows whose `expires_at` has passed.
 
     `Document.expires_at.is_not(None)` makes an authenticated upload
@@ -80,9 +105,12 @@ def purge_expired_documents(session: Session) -> int:
     with it -- the encrypted excerpt ciphertext never needs a separate
     delete. `DocumentAccessLog` rows for a purged document are untouched;
     see the module docstring for why that is correct, not an oversight.
-    Returns the number of documents deleted (0 if none are stale). Flushes
+    Returns 0 without querying when `settings.retention_enforced` is false
+    (Mode A). Returns the number of documents deleted (0 if none are stale). Flushes
     but does not commit -- same contract as `purge_stale_hallucination_log`.
     """
+    if _is_nothing_to_expire(settings, "documents"):
+        return 0
     now = datetime.now(UTC)
     expired = (
         session.execute(
@@ -99,7 +127,7 @@ def purge_expired_documents(session: Session) -> int:
     return len(expired)
 
 
-def purge_expired_conversations(session: Session) -> int:
+def purge_expired_conversations(session: Session, settings: Settings) -> int:
     """Delete anonymous `Conversation` rows whose `expires_at` has passed.
 
     Same NULL-excludes-authenticated-rows reasoning as
@@ -113,6 +141,8 @@ def purge_expired_conversations(session: Session) -> int:
     Returns the number of conversations deleted. Flushes but does not
     commit -- same contract as the other purge functions in this module.
     """
+    if _is_nothing_to_expire(settings, "conversations"):
+        return 0
     now = datetime.now(UTC)
     expired = (
         session.execute(

@@ -154,7 +154,7 @@ def test_owner_requires_a_user_id_or_an_anon_token() -> None:
 
 def test_create_conversation_sets_an_expiry_for_an_anonymous_owner() -> None:
     session = _session()
-    settings = _settings(anonymous_conversation_ttl_hours=24)
+    settings = _settings(auth_enabled=True, anonymous_conversation_ttl_hours=24)
     before = datetime.now(UTC)
 
     conversation = create_conversation(session, Owner(None, "anon-tok"), settings)

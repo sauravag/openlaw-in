@@ -162,7 +162,7 @@ def test_store_document_raises_access_denied_for_a_mismatched_conversation() -> 
 
 def test_store_document_sets_an_expiry_for_an_anonymous_owner() -> None:
     session = _session()
-    settings = _settings(anonymous_upload_ttl_hours=24)
+    settings = _settings(auth_enabled=True, anonymous_upload_ttl_hours=24)
     conversation = _conversation(session, Owner(None, "anon-tok"), settings)
 
     document = store_document(
@@ -453,7 +453,7 @@ def test_listing_an_unknown_conversation_is_empty() -> None:
 
 def test_listing_carries_the_anonymous_expiry_and_omits_it_when_authenticated() -> None:
     session = _session()
-    settings = _settings()
+    settings = _settings(auth_enabled=True)
     anonymous = Owner(None, "token-a")
     anon_conversation = _conversation(session, anonymous, settings)
     store_document(

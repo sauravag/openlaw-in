@@ -55,6 +55,8 @@ def _configure(monkeypatch, tmp_path: Path) -> dict[str, Path]:
     monkeypatch.setenv("OPENLAW_VAQUILL_ROOT", str(tmp_path / "v"))
     monkeypatch.setenv("OPENLAW_KANOONGPT_ROOT", str(tmp_path / "k"))
     monkeypatch.setenv("OPENLAW_DATABASE_URL", f"sqlite:///{paths['db']}")
+    # Expiry exists only in the authenticated mode; Mode A is tested below.
+    monkeypatch.setenv("OPENLAW_AUTH_ENABLED", "true")
     monkeypatch.setenv("OPENLAW_HALLUCINATION_LOG_PATH", str(paths["hallucination"]))
     monkeypatch.setenv(
         "OPENLAW_CLASSIFIER_FAILURE_LOG_PATH", str(paths["classifier"])
@@ -300,3 +302,29 @@ def test_main_supports_the_dry_run_flag(monkeypatch, tmp_path: Path) -> None:
 
     with Session(engine) as session:
         assert session.query(Conversation).count() == 1
+
+
+def test_mode_a_run_purge_deletes_no_document_or_conversation(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """The developer's upload survives the cron job, even one carrying a stale expiry."""
+    paths = _configure(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENLAW_AUTH_ENABLED", "false")
+    get_settings.cache_clear()
+    engine = create_engine(f"sqlite:///{paths['db']}")
+    with Session(engine) as session:
+        conversation = Conversation(anon_token="anon-1", expires_at=_expired())
+        session.add(conversation)
+        session.flush()
+        session.add(
+            _document(conversation.id, anon_token="anon-1", expires_at=_expired())
+        )
+        session.add(Conversation(anon_token="anon-2", expires_at=None))
+        session.commit()
+
+    assert main() == 0
+
+    with Session(engine) as session:
+        assert session.query(Conversation).count() == 2
+        assert session.query(Document).count() == 1
+    assert "skipped" in capsys.readouterr().out

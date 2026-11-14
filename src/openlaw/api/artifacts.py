@@ -174,7 +174,9 @@ def _safe_filename(raw: str | None) -> str:
 
 def _retention_notice(owner: Owner, settings: Settings, language: str | None) -> str:
     """Return the retention sentence for `owner`, in `language`."""
-    if owner.user_id is not None:
+    if owner.user_id is not None or not settings.retention_enforced:
+        # Mode A has no expiry at all, so "stays until you delete it" is the
+        # true sentence for an anonymous-keyed owner too.
         pairs = _RETENTION_AUTHENTICATED
         return pairs.get(language or "en", pairs["en"])
     pairs = _RETENTION_ANONYMOUS

@@ -133,11 +133,19 @@ class AttachedDocuments:
     crisis_kinds: tuple[str | None, ...]
 
 
-def _anonymous_expiry(owner: Owner, ttl_hours: int) -> datetime | None:
-    """Return the TTL-bounded expiry for an anonymous `owner`, else `None`."""
-    if owner.user_id is not None:
+def _anonymous_expiry(owner: Owner, settings: Settings) -> datetime | None:
+    """Return the TTL-bounded expiry for an anonymous `owner`, else `None`.
+
+    `None` for an authenticated owner (history persists until the person
+    deletes it) and for EVERY owner when `settings.retention_enforced` is
+    false (Mode A): no account exists to keep anything in, so an expiry
+    would only delete the operator's own work. The row is written with
+    `expires_at IS NULL`, so the purge cannot find it -- structurally, not
+    by a flag the purge checks.
+    """
+    if owner.user_id is not None or not settings.retention_enforced:
         return None
-    return datetime.now(UTC) + timedelta(hours=ttl_hours)
+    return datetime.now(UTC) + timedelta(hours=settings.anonymous_upload_ttl_hours)
 
 
 def _find_owned_document(
@@ -210,7 +218,7 @@ def store_document(
         nonce=nonce,
         key_id=key_id,
         crisis_kind=crisis_kind.value if crisis_kind is not None else None,
-        expires_at=_anonymous_expiry(owner, settings.anonymous_upload_ttl_hours),
+        expires_at=_anonymous_expiry(owner, settings),
     )
     session.add(document)
 

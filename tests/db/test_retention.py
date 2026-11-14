@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from openlaw.config import Settings
 from openlaw.db.models import (
     Base,
     Conversation,
@@ -32,6 +33,13 @@ from openlaw.db.retention import (
     purge_stale_document_audit,
     purge_stale_hallucination_log,
 )
+
+
+#: Mode B (accounts): the only mode in which anything expires.
+_MODE_B = Settings(
+    _env_file=None, vaquill_root="/tmp/v", kanoongpt_root="/tmp/k", auth_enabled=True
+)
+_MODE_A = Settings(_env_file=None, vaquill_root="/tmp/v", kanoongpt_root="/tmp/k")
 
 
 def _session() -> Session:
@@ -116,7 +124,7 @@ def test_authenticated_document_is_never_purged_regardless_of_age() -> None:
     session.add(_document(conversation.id, user_id="user-1", expires_at=None))
     session.commit()
 
-    removed = purge_expired_documents(session)
+    removed = purge_expired_documents(session, _MODE_B)
     session.commit()
 
     assert removed == 0
@@ -142,7 +150,7 @@ def test_expired_anonymous_document_is_purged_and_its_audit_rows_survive() -> No
     session.commit()
     document_id = document.id
 
-    removed = purge_expired_documents(session)
+    removed = purge_expired_documents(session, _MODE_B)
     session.commit()
 
     assert removed == 1
@@ -178,7 +186,7 @@ def test_authenticated_document_of_identical_age_is_not_purged_alongside_an_expi
     )
     session.commit()
 
-    removed = purge_expired_documents(session)
+    removed = purge_expired_documents(session, _MODE_B)
     session.commit()
 
     assert removed == 1
@@ -194,9 +202,9 @@ def test_purging_documents_twice_in_a_row_is_idempotent() -> None:
     session.add(_document(conversation.id, anon_token="anon-1", expires_at=_expired()))
     session.commit()
 
-    first = purge_expired_documents(session)
+    first = purge_expired_documents(session, _MODE_B)
     session.commit()
-    second = purge_expired_documents(session)
+    second = purge_expired_documents(session, _MODE_B)
     session.commit()
 
     assert first == 1
@@ -211,7 +219,7 @@ def test_authenticated_conversation_is_never_purged() -> None:
     session.add(Conversation(user_id="user-1", expires_at=None))
     session.commit()
 
-    removed = purge_expired_conversations(session)
+    removed = purge_expired_conversations(session, _MODE_B)
     session.commit()
 
     assert removed == 0
@@ -228,7 +236,7 @@ def test_expired_anonymous_conversation_purges_its_documents_too() -> None:
     )  # not itself expired yet -- the conversation's lifetime still bounds it
     session.commit()
 
-    removed = purge_expired_conversations(session)
+    removed = purge_expired_conversations(session, _MODE_B)
     session.commit()
 
     assert removed == 1
@@ -279,3 +287,23 @@ def test_audit_purge_keeps_rows_within_the_window() -> None:
 
     assert removed == 0
     assert session.query(DocumentAccessLog).count() == 1
+
+
+# --- Plan 7 Task 2: Mode A purges nothing ---------------------------------
+
+
+def test_mode_a_purge_leaves_even_an_already_expired_row_alone() -> None:
+    """A row that carries an expiry from an earlier Mode B run survives Mode A."""
+    session = _session()
+    conversation = Conversation(anon_token="anon-1", expires_at=_expired())
+    session.add(conversation)
+    session.flush()
+    session.add(_document(conversation.id, anon_token="anon-1", expires_at=_expired()))
+    session.flush()
+
+    removed_documents = purge_expired_documents(session, _MODE_A)
+    removed_conversations = purge_expired_conversations(session, _MODE_A)
+
+    assert (removed_documents, removed_conversations) == (0, 0)
+    assert session.query(Document).count() == 1
+    assert session.query(Conversation).count() == 1

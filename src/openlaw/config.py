@@ -246,7 +246,8 @@ class Settings(BaseSettings):
     # Per-conversation document cap.
     max_documents_per_conversation: int = 3
     # How long an anonymous caller's uploaded document stays retrievable
-    # before it is purged.
+    # before it is purged. ONLY consulted when `retention_enforced` (Mode B);
+    # in Mode A nothing is written with an expiry at all.
     anonymous_upload_ttl_hours: int = 24
     # How long an anonymous caller's conversation stays retrievable before it
     # is purged.
@@ -256,6 +257,19 @@ class Settings(BaseSettings):
     # decision" reasoning as `hallucination_log_path` above, since document
     # content can be arbitrarily sensitive user-supplied material.
     document_audit_log_path: Path = Path("data/document_access.jsonl")
+
+    @property
+    def retention_enforced(self) -> bool:
+        """True when material not owned by an account expires.
+
+        False in Mode A: there is no account to migrate to, so an expiry is a
+        deletion with no remedy -- and Mode A promises indefinite retention.
+        `openlaw.db.conversations._anonymous_expiry` and
+        `openlaw.documents.store._anonymous_expiry` both consult this, so a
+        Mode A row is written with `expires_at IS NULL` and
+        `scripts/purge_retention.py` has nothing to find.
+        """
+        return self.auth_enabled
 
     @field_validator("quota_enabled", mode="before")
     @classmethod
