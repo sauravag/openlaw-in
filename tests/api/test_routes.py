@@ -56,6 +56,7 @@ def _settings(**overrides: object) -> Settings:
         "vaquill_root": "/tmp/v",
         "kanoongpt_root": "/tmp/k",
         "database_url": "sqlite://",
+        "auth_enabled": True,
         "quota_enabled": True,
         "anonymous_quota": 3,
         "monthly_quota": 2,

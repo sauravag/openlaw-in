@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -116,8 +116,32 @@ class Settings(BaseSettings):
     # service, bound to 127.0.0.1 only. See openlaw.db.models for what is and
     # is not stored.
     database_url: str = "postgresql+psycopg://openlaw:openlaw@localhost:5432/openlaw"
-    # Quota. Self-hosters set OPENLAW_QUOTA_ENABLED=false for unlimited use.
-    quota_enabled: bool = True
+    # Authentication mode (Plan 7 Task 1). FALSE is the default and the
+    # open-source experience: no login, no signup, no quota, no expiry, every
+    # feature available with zero Supabase setup. TRUE is what a public
+    # deployment runs.
+    #
+    # Mode A is NOT safe on a publicly reachable deployment: anyone who finds
+    # the URL gets unlimited model calls on the operator's API key, with NO
+    # spend cap of any kind available -- quota requires auth (see
+    # `_resolve_quota_enabled`), deliberately, because a cap with no sign-in
+    # has no next step to offer the person it refuses. That is unbounded
+    # spend, not a theoretical risk. Mode A is for local and trusted-network
+    # use; a public deployment wants auth_enabled=true.
+    #
+    # Must agree with the frontend's build-time NEXT_PUBLIC_OPENLAW_AUTH_ENABLED
+    # -- see `openlaw.api.auth_routes.auth_status` and Task 3 for how a
+    # disagreement is detected rather than left to confuse someone.
+    auth_enabled: bool = False
+    # Quota. Must be declared AFTER `auth_enabled` (the validators read it).
+    # Unset resolves to `auth_enabled`: off in the open-source mode, on for a
+    # public deployment. Auth ON leaves it freely configurable (a firm
+    # running logins internally may want no caps). Auth OFF with quota ON is
+    # rejected at startup, not ignored -- the owner's rule is "i will never
+    # run the no auth version publicly", so the cap-without-login state is
+    # made unrepresentable rather than offered as a knob: do NOT "fix" the
+    # missing option back in. This is NOT an alias for `auth_enabled`.
+    quota_enabled: bool = Field(default=None, validate_default=True)  # type: ignore[assignment]
     monthly_quota: int = 30
     anonymous_quota: int = 3
     # Supabase auth (email + Google). Left unset in self-hosted/dev use.
@@ -232,6 +256,29 @@ class Settings(BaseSettings):
     # decision" reasoning as `hallucination_log_path` above, since document
     # content can be arbitrarily sensitive user-supplied material.
     document_audit_log_path: Path = Path("data/document_access.jsonl")
+
+    @field_validator("quota_enabled", mode="before")
+    @classmethod
+    def _default_quota_to_auth_mode(cls, value: object, info: ValidationInfo) -> object:
+        """Unset quota follows the auth mode; an explicit value is kept."""
+        if value is None or value == "":
+            return bool(info.data.get("auth_enabled", False))
+        return value
+
+    @field_validator("quota_enabled", mode="after")
+    @classmethod
+    def _resolve_quota_enabled(cls, value: bool, info: ValidationInfo) -> bool:
+        """Reject quota without auth (one-directional; see the field comment)."""
+        if value and not info.data.get("auth_enabled", False):
+            raise ValueError(
+                "OPENLAW_QUOTA_ENABLED=true requires OPENLAW_AUTH_ENABLED=true: "
+                "a usage cap with no sign-in has nothing to offer the person it "
+                "refuses, so quota exists only in the authenticated mode. Either "
+                "set OPENLAW_QUOTA_ENABLED=false (open-source mode, no limits) "
+                "or set OPENLAW_AUTH_ENABLED=true (and the frontend's "
+                "NEXT_PUBLIC_OPENLAW_AUTH_ENABLED=true)."
+            )
+        return value
 
     @field_validator("nano_model_dir", mode="before")
     @classmethod

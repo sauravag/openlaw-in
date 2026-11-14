@@ -208,6 +208,7 @@ def test_env_example_agrees_with_compose_self_host_defaults() -> None:
     example_settings = Settings(_env_file=root / ".env.example")  # type: ignore[call-arg]
 
     for var, attr in [
+        ("OPENLAW_AUTH_ENABLED", "auth_enabled"),
         ("OPENLAW_QUOTA_ENABLED", "quota_enabled"),
         ("OPENLAW_COOKIE_SECURE", "cookie_secure"),
         # Plan 6 Task 18: before this, `api` was never given

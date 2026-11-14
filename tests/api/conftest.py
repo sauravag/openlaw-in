@@ -57,6 +57,7 @@ def api_settings(tmp_path: Path, **overrides: object) -> Settings:
         "vaquill_root": "/tmp/v",
         "kanoongpt_root": "/tmp/k",
         "database_url": f"sqlite:///{tmp_path / 'openlaw.sqlite'}",
+        "auth_enabled": True,
         "quota_enabled": True,
         "anonymous_quota": 10,
         "monthly_quota": 10,

@@ -262,6 +262,11 @@ services:
       # tests/test_config.py::test_env_example_agrees_with_compose_self_host_defaults
       # (Task 7 review, C2) -- `cp .env.example .env` must never silently
       # override this fallback.
+      # Open-source mode by default. WARNING: not safe on a publicly reachable
+      # deployment -- unlimited model calls on your API key, no spend cap
+      # possible without auth. Kept in lockstep with .env.example by the same
+      # test as OPENLAW_QUOTA_ENABLED below.
+      OPENLAW_AUTH_ENABLED: ${OPENLAW_AUTH_ENABLED:-false}
       OPENLAW_QUOTA_ENABLED: ${OPENLAW_QUOTA_ENABLED:-false}
       OPENLAW_MONTHLY_QUOTA: ${OPENLAW_MONTHLY_QUOTA:-30}
       OPENLAW_ANONYMOUS_QUOTA: ${OPENLAW_ANONYMOUS_QUOTA:-3}
