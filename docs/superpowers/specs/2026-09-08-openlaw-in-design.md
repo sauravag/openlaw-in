@@ -62,7 +62,7 @@ Two observations drive positioning:
 
 ## 3. Datasets
 
-Both datasets are held locally at `/Users/sauravagarwal/Engineering/datasets/`.
+Both datasets are held locally at `/path/to/datasets/`.
 
 ### 3.1 `vaquill/open-india-law` — the text layer (50 GB, CC BY 4.0)
 

@@ -22,8 +22,8 @@
 - **Immutability:** functions return new objects; never mutate inputs in place.
 - **TDD is mandatory:** write the failing test, watch it fail, implement minimally, watch it pass, commit. Minimum 80% coverage.
 - **Dataset paths (read-only, never modified):**
-  - vaquill: `/Users/sauravagarwal/Engineering/datasets/vaquill--open-india-law/snapshots/58ea6d8b6859f8039ee68dff5af636f787b02463/`
-  - KanoonGPT: `/Users/sauravagarwal/Engineering/datasets/indian-case-laws/structured/v1/`
+  - vaquill: `/path/to/datasets/vaquill--open-india-law/snapshots/58ea6d8b6859f8039ee68dff5af636f787b02463/`
+  - KanoonGPT: `/path/to/datasets/indian-case-laws/structured/v1/`
 
 ---
 
@@ -128,8 +128,8 @@ omit = ["scripts/*"]
 
 ```bash
 # Local dataset roots (read-only)
-OPENLAW_VAQUILL_ROOT=/Users/sauravagarwal/Engineering/datasets/vaquill--open-india-law/snapshots/58ea6d8b6859f8039ee68dff5af636f787b02463
-OPENLAW_KANOONGPT_ROOT=/Users/sauravagarwal/Engineering/datasets/indian-case-laws/structured/v1
+OPENLAW_VAQUILL_ROOT=/path/to/datasets/vaquill--open-india-law/snapshots/58ea6d8b6859f8039ee68dff5af636f787b02463
+OPENLAW_KANOONGPT_ROOT=/path/to/datasets/indian-case-laws/structured/v1
 
 # Qdrant
 OPENLAW_QDRANT_URL=http://localhost:6333

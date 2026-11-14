@@ -40,6 +40,14 @@ dev = ["pytest>=8.3", "pytest-cov>=6.0"]
 # Pinned exactly, not a range: nano's shipped remote code needed hand-patching
 # for transformers 5.x (see openlaw.retrieval._nano_compat) and is only known to
 # work with this combination. Bumping any of these needs re-verifying that patch.
+#
+# Downloading a prebuilt corpus (`scripts/fetch_corpus.py`) -- kept OPTIONAL
+# for the same reason: a deployment pointed at an existing Qdrant, or one
+# building the corpus locally from the raw datasets, never imports
+# huggingface_hub. `fetch_corpus.py` raises an actionable SystemExit naming
+# this exact command if it is missing. Already satisfied transitively by
+# `local-nano`, which pulls huggingface-hub for the model weights.
+corpus = ["huggingface-hub>=1.0"]
 local-nano = [
     "transformers==5.17.0",
     "sentence-transformers==6.1.0",

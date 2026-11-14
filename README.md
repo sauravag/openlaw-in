@@ -3,6 +3,14 @@
 Free, open-source legal aid for India. Every legal claim is backed by a citation
 that resolves to a government source document.
 
+**New here?** The one hard step is getting a corpus. Jump to
+[Step one: choose a corpus](#step-one-choose-a-corpus) — it is a three-way
+decision (download from 4 GiB up, build it yourself over weeks, or run with
+no corpus at all), and everything else in this file assumes you have made it.
+
+Licensed **Apache-2.0** (see [`LICENSE`](LICENSE)). The corpus it reads is
+not this project's own work — see **Data attribution** immediately below.
+
 ## Data attribution
 
 This project is built on two open datasets. **Attribution is a licence condition,
@@ -433,6 +441,122 @@ claim cites a `doc:` id, no uploaded text becomes a source card, the
 escalation footer is on every response, a cross-owner read is a 404 — never
 anything about model wording.
 
+## Step one: choose a corpus
+
+Everything below this line assumes a corpus exists. Getting one is the only
+genuinely hard step in running OpenLaw.in, so decide it before you install
+anything. There are three honest paths, and the third one is a real answer:
+
+| | What you get | What it costs | Start with |
+|---|---|---|---|
+| **1. Download a prebuilt corpus** — the default path | A working, queryable corpus. Pick the slices you need. | Minutes to a few hours. **4.2 GiB** for the national minimum, **28 GiB** for everything. | `python scripts/fetch_corpus.py` |
+| **2. Build it yourself from the upstream datasets** | The same corpus, provably, from the two source datasets. | **~30 days** of local compute for the four High Courts, plus a real Voyage API bill for the Supreme Court, plus ~**120 GB** of disk for raw datasets and index together. | [Corpus build](#corpus-build) |
+| **3. Run with no corpus at all** | The application, end to end, honestly degraded. `/readyz` reports `degraded` and every question returns `unanswerable` — never a fabricated citation. | Minutes. **No corpus download.** | `docker compose up -d` |
+
+### 1. Download a prebuilt corpus (recommended)
+
+    pip install -e ".[dev,local-nano,corpus]"
+    docker compose up -d qdrant                 # Qdrant must be running first
+
+    # the national minimum -- statutes + Supreme Court, binding everywhere
+    python scripts/fetch_corpus.py --collections acts_india_v1,sc_judgments_v1
+
+    # add the High Court whose jurisdiction you are actually in
+    python scripts/fetch_corpus.py --courts karnataka
+
+    # see the plan and the download size without downloading anything
+    python scripts/fetch_corpus.py --dry-run
+
+Those three commands are the whole of step one. **No `.env` and no API keys
+are needed to download a corpus** — `fetch_corpus.py` needs only
+`OPENLAW_QDRANT_URL` (default `http://localhost:6333`), and `docker compose
+up -d qdrant` on its own starts no service that wants a secret. You need
+`.env` and `OPENLAW_ANTHROPIC_API_KEY` to *answer questions*; see
+[Setup](#setup) once you have a corpus.
+
+`fetch_corpus.py` creates each collection with the right geometry (including
+the `idf` modifier on sparse vectors, without which hybrid search scores
+wrongly and silently), upserts in batches, checkpoints after every batch so
+an interrupted download resumes with the same command, and **refuses to
+overwrite a collection that already holds points** — it stops and tells you
+what to delete rather than destroying a corpus you built.
+
+The dataset repo id defaults to the placeholder
+`openlaw-in/openlaw-corpus-v2026.08` and is configurable with `--repo-id` or
+`OPENLAW_CORPUS_REPO_ID`. See [`docs/dataset-card.md`](docs/dataset-card.md)
+for the dataset's provenance, licences and limits.
+
+> ### ⚠️ These vectors only work with one embedder
+>
+> The dense vectors are **voyage-4-nano at 1024 dimensions**,
+> Matryoshka-truncated and renormalised. **Querying them with any other
+> embedder does not raise an error** — vector search always returns its
+> nearest neighbours, so a mismatched embedder returns confidently-ranked
+> near-garbage, silently, for every question. This project measured exactly
+> that: nano queries against `voyage-4-lite` documents scored **15.0% top-1**
+> and 31.7% top-10 (median rank 61 of 300).
+>
+> The shipped default (`OPENLAW_QUERY_EMBEDDER_BACKEND=local_nano`) is the
+> matching embedder and needs no API key. **Do not change it** unless you
+> have proved your replacement produces the same vector space. A legal-aid
+> answer built on mismatched retrieval cites the wrong law.
+
+#### Per-slice sizes, so you can choose
+
+Statutes and Supreme Court judgments bind across all of India and are the
+useful minimum. A High Court's judgments bind only within its own
+jurisdiction (`openlaw.retrieval.search` will not search a court you did not
+scope a query to), so take the one you are in and skip the rest — nobody
+building a tenant-rights tool in Bengaluru needs 2.8M Bombay judgments.
+
+| Slice | Points | Download | Qdrant on disk |
+|---|---|---|---|
+| `acts_india_v1` — legislation and regulator instruments | 961,136 | 2.6 GiB | 7.8 GB |
+| `sc_judgments_v1` — Supreme Court | 371,247 | 1.6 GiB | 4.6 GB |
+| `hc_judgments_v1/punjab-and-haryana` — Punjab, Haryana, Chandigarh UT | 1,845,344 | 5.5 GiB | ~17 GB |
+| `hc_judgments_v1/delhi` — NCT of Delhi | 1,053,138 | 3.9 GiB | ~10 GB |
+| `hc_judgments_v1/bombay` — Maharashtra, Goa, Dadra & Nagar Haveli, Daman & Diu | 2,788,379 | 9.4 GiB | ~26 GB |
+| `hc_judgments_v1/karnataka` — Karnataka | 1,467,133 | 5.5 GiB | ~14 GB |
+| **everything** | **8,486,377** | **28 GiB** | **79 GB** |
+
+Download sizes are zstd-compressed parquet with float16 dense vectors,
+extrapolated from a measured 3,000-point sample of each slice. The Qdrant
+figures are what the collections actually occupy once restored, and are the
+number that matters for provisioning your disk. Four of the 25 High Courts
+registered in `openlaw.corpus.high_courts` are built; the other 21 are
+queryable-but-empty and return nothing.
+
+### 2. Build it yourself
+
+Every script is here and the full sequence is in [Corpus build](#corpus-build)
+below. Be clear-eyed about the cost before you start: the four High Courts
+are ~7.15M chunks embedded locally with `voyage-4-nano`, which measured out
+to roughly **30 days** of wall-clock compute on one machine; `sc_judgments_v1`
+needs a paid `OPENLAW_VOYAGE_API_KEY` and is a real, non-refundable API bill;
+and you need the two upstream datasets on disk first (see `.env.example` for
+their own size and licences) on top of the 79 GB the finished index occupies.
+Path 1 exists precisely so that nobody has to repeat this.
+
+Publishing a corpus you built is `scripts/export_corpus.py` — see
+[`docs/dataset-card.md`](docs/dataset-card.md).
+
+### 3. Run with no corpus
+
+This is supported, not a broken state, and it is the fastest way to see
+whether this project is worth 28 GiB of your bandwidth:
+
+    cp .env.example .env     # set OPENLAW_ANTHROPIC_API_KEY
+    docker compose up -d
+    open http://localhost:8080
+
+The whole stack comes up. `GET /readyz` reports `status: "degraded"` because
+`acts_india_v1`/`sc_judgments_v1` hold no vectors, Compose therefore shows
+`api` as unhealthy rather than pretending it is fine, and every question
+comes back `is_answerable: false` with no sources. **It never fabricates a
+citation to fill the gap.** You can read the API, the frontend, the prompts,
+the validator and the red-team suite in this state, then come back to path 1
+when you want real answers.
+
 ## Setup
 
     cp .env.example .env
@@ -499,6 +623,13 @@ why leaving both unset is refused rather than defaulted.
 
 ## Corpus build
 
+**Most people should not run any of this.** `python scripts/fetch_corpus.py`
+downloads the finished corpus in minutes to hours -- see
+[Step one: choose a corpus](#step-one-choose-a-corpus). What follows is how
+the corpus was built, and is for someone reproducing it from the upstream
+datasets or onboarding a new High Court. It is ~30 days of local compute for
+the four courts plus a paid Voyage API bill.
+
     python scripts/make_fixtures.py            # test fixtures (once)
     python scripts/restore_acts_india.py       # 1,098,269 provisions (~11.2 GB) -> acts_india
     python scripts/build_sc_index.py           # 371,247 Supreme Court chunks -> sc_judgments_v1
@@ -525,6 +656,25 @@ git-ignored) so an interrupted multi-hour run resumes with `python scripts/build
 checkpoint, and `--limit N` stops after N chunks to prove the pipeline on a
 bounded slice.
 
+**Publishing a corpus you built.** `scripts/export_corpus.py` writes each
+collection -- and each High Court separately, filtered on `court_code` -- to
+zstd parquet shards suitable for a Hugging Face dataset, with dense vectors
+stored float16. It only ever READS Qdrant, checkpoints after every shard so a
+7M-point export resumes with the same command, and `--verify-fp16` measures
+float16 round-trip fidelity against a live sample before writing anything,
+refusing to export if the worst-case cosine similarity falls below a floor
+(measured across all three collections: worst case **0.9999995**, so float16
+costs nothing real and halves the download).
+
+    python scripts/export_corpus.py --out data/export --verify-fp16
+    python scripts/export_corpus.py --out data/export --courts karnataka
+    # then, with your own credentials -- this project does not run it for you:
+    huggingface-cli upload --repo-type dataset <your-org>/<your-repo> data/export .
+
+Draft the dataset README from [`docs/dataset-card.md`](docs/dataset-card.md),
+which carries the two upstream licences, the attribution they require, and
+the embedder-compatibility warning that **must** travel with these vectors.
+
 **Optional -- the knowledge graph.** Graph expansion is OFF by default
 (`OPENLAW_GRAPH_EXPANSION_ENABLED=false`, see `.env.example`) because live
 measurement showed it mostly adds filler at today's scale (see
@@ -543,19 +693,23 @@ whole *application* -- Postgres, Qdrant, Neo4j, database migrations, the API,
 and the web frontend -- in one command. It does **not** bring up a working
 corpus. Be clear-eyed about what that means before you start:
 
-- **The corpus is not downloadable and does not ship in an image.** It is
-  roughly **1.5 million vectors** (`acts_india_v1` + `sc_judgments_v1` +
-  `hc_judgments_v1`, see "Corpus build" above), built from the two datasets
-  under "Data attribution" by running this project's own scripts against
-  them. There is no shortcut -- building it takes **many hours** of
-  embedding (mostly network- and API-bound, not CPU-bound) and **tens of
-  gigabytes of disk** (the restored `acts_india` snapshot alone is ~11.2 GB;
-  budget for the built Qdrant collections on top of that). `docker compose
-  up` cannot ship this for the same reason it cannot ship a Wikipedia
-  mirror: it is somebody else's dataset, redistributed under CC BY
-  4.0/Apache-2.0 attribution terms this project honours by pointing at the
-  source, not by silently re-hosting a multi-GB derivative in a container
-  registry.
+- **The corpus does not ship in an image, but it is downloadable.** It is
+  **8.5 million vectors** across `acts_india_v1` + `sc_judgments_v1` +
+  `hc_judgments_v1`, occupying **79 GB** of Qdrant storage. Two ways to get
+  it, both covered in "Step one: choose a corpus" above:
+  **`python scripts/fetch_corpus.py`** downloads prebuilt shards from a
+  Hugging Face dataset (from 4.2 GiB for the national minimum up to 28 GiB
+  for everything) and is the path to take; building it yourself from the two
+  datasets under "Data attribution" is ~30 days of local compute plus a paid
+  Voyage API bill. `docker compose up` ships neither, for the same reason it
+  cannot ship a Wikipedia mirror: it is a derivative of somebody else's
+  dataset, redistributed under the CC BY 4.0 / Apache-2.0 attribution terms
+  this project honours in [`docs/dataset-card.md`](docs/dataset-card.md) —
+  not by silently baking a multi-GB derivative into a container registry.
+- **The downloaded vectors are embedder-locked.** They are voyage-4-nano at
+  1024 dimensions and a mismatched query embedder fails **silently**, at 15%
+  top-1 accuracy — see the warning box in "Step one" above before you touch
+  `OPENLAW_QUERY_EMBEDDER_BACKEND`.
 - **Until that build finishes, the service runs and tells you so.** The
   application comes up immediately and answers HTTP requests; every
   question it is asked before the corpus exists comes back `unanswerable`,
@@ -584,12 +738,23 @@ corpus. Be clear-eyed about what that means before you start:
    `OPENLAW_ANTHROPIC_API_KEY` is missing -- never a stack trace, never a
    service that starts and only fails on a real user's question.
 
-3. **Build the corpus** (separately from `docker compose up` -- see above;
-   this needs the Python environment on your host, not a container, since
-   these scripts read the raw HuggingFace dataset snapshots directly). The
-   two raw datasets (`OPENLAW_VAQUILL_ROOT`, `OPENLAW_KANOONGPT_ROOT`) are
-   NOT bundled anywhere -- see `.env.example` for exactly how to download
-   them, their licences, and their real disk cost before you start:
+3. **Get the corpus** (separately from `docker compose up` -- see above;
+   this needs the Python environment on your host, not a container).
+
+   **Either download it** -- minutes to hours, no raw datasets needed, no
+   Voyage key, and the path almost everyone should take (see "Step one:
+   choose a corpus" above for the per-slice sizes):
+
+       pip install -e ".[dev,local-nano,corpus]"
+       python scripts/fetch_corpus.py --collections acts_india_v1,sc_judgments_v1
+       python scripts/fetch_corpus.py --courts karnataka   # or your own jurisdiction
+
+   **Or build it yourself** -- ~30 days of local compute for the four High
+   Courts plus a paid Voyage API bill for the Supreme Court. These scripts
+   read the raw HuggingFace dataset snapshots directly, and the two raw
+   datasets (`OPENLAW_VAQUILL_ROOT`, `OPENLAW_KANOONGPT_ROOT`) are NOT
+   bundled anywhere -- see `.env.example` for exactly how to download them,
+   their licences, and their real disk cost before you start:
 
        pip install -e ".[dev,local-nano]"
        python scripts/make_fixtures.py
