@@ -53,6 +53,26 @@ curl -fsS http://localhost:7474 >/dev/null
 echo "[Selfhost] checking the reverse-proxy ingress is serving the frontend"
 curl -fsS http://localhost:8080/ >/dev/null
 
+# --- the auth mode must agree between frontend and backend -------------------
+#
+# NEXT_PUBLIC_OPENLAW_AUTH_ENABLED is inlined into the frontend at BUILD time;
+# OPENLAW_AUTH_ENABLED is read by the backend at RUN time, so the two can
+# silently disagree. The frontend's auth-status route asks the backend and
+# compares. "agrees":null means the backend could not be asked -- not a
+# mismatch, and already covered by the /health check above.
+echo "[Selfhost] checking the frontend build and backend agree on sign-in"
+auth_status="$(curl -fsS http://localhost:8080/api/openlaw/auth-status)"
+if printf '%s' "$auth_status" | grep -q '"agrees":false'; then
+  echo "[Selfhost] FAIL -- the frontend and backend disagree about sign-in:"
+  echo "[Selfhost]   ${auth_status}"
+  echo "[Selfhost]   OPENLAW_AUTH_ENABLED (backend) and"
+  echo "[Selfhost]   NEXT_PUBLIC_OPENLAW_AUTH_ENABLED (frontend build) must match."
+  echo "[Selfhost]   Fix: set both to the same value, then rebuild the frontend"
+  echo "[Selfhost]   (docker compose build web && docker compose up -d), or change"
+  echo "[Selfhost]   OPENLAW_AUTH_ENABLED to match how the frontend was built."
+  exit 1
+fi
+
 # --- the document upload surface (Plan 6 Task 18) ---------------------------
 #
 # NOTHING BELOW EVER PRINTS A KEY. The encryption-key check reports only

@@ -60,6 +60,7 @@ from openlaw.answers.routing import (
     referenced_providers,
 )
 from openlaw.api.app import create_app
+from openlaw.api.auth import _MIN_SECRET_LENGTH
 from openlaw.config import Settings, get_settings
 from openlaw.db.session import engine_from_settings, session_scope
 from openlaw.graph.connection import graph_driver
@@ -542,6 +543,37 @@ def _require_proxy_acknowledgement(settings: Settings) -> None:
     )
 
 
+def _require_auth_configuration(settings: Settings) -> None:
+    """Refuse to start in auth mode without a usable Supabase configuration.
+
+    `auth_enabled=true` with no project URL or signing secret is not a
+    degraded mode: nobody could sign in, the backend could not verify a token
+    if one arrived, and quota is on -- a product that refuses everyone. Names
+    every variable at fault and never prints a value (a too-short secret is
+    reported by length requirement only).
+    """
+    if not settings.auth_enabled:
+        return
+    problems: list[str] = []
+    if not (settings.supabase_url or "").strip():
+        problems.append("OPENLAW_SUPABASE_URL is not set")
+    secret = settings.supabase_jwt_secret or ""
+    if not secret:
+        problems.append("OPENLAW_SUPABASE_JWT_SECRET is not set")
+    elif len(secret) < _MIN_SECRET_LENGTH:
+        problems.append(
+            f"OPENLAW_SUPABASE_JWT_SECRET is shorter than {_MIN_SECRET_LENGTH} "
+            "characters"
+        )
+    if not problems:
+        return
+    raise RuntimeError(
+        f"OPENLAW_AUTH_ENABLED=true but {'; '.join(problems)}. Set them from "
+        "your Supabase project (Settings > API), or set "
+        "OPENLAW_AUTH_ENABLED=false to run without accounts."
+    )
+
+
 def _require_database_reachable(engine: Engine) -> None:
     """Fail fast when the configured database cannot actually be reached.
 
@@ -581,6 +613,7 @@ def production_app() -> FastAPI:
     """
     settings = _require_settings()
     _require_proxy_acknowledgement(settings)
+    _require_auth_configuration(settings)
     engine = engine_from_settings(settings)
     _require_database_reachable(engine)
 

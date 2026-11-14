@@ -246,6 +246,20 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
             "हटाएँ, या नई बातचीत शुरू करें।"
         ),
     },
+    # Returned by a sign-in route when the frontend was built with sign-in
+    # but the backend runs without auth (or the reverse). A configuration
+    # error, but the person still needs to be told the truth in plain words
+    # and handed a helpline: the anonymous product keeps working.
+    "auth_unavailable": {
+        "en": (
+            "Signing in is not available on this service right now. You can "
+            "still ask your question without an account."
+        ),
+        "hi": (
+            "इस सेवा पर अभी साइन इन उपलब्ध नहीं है। आप बिना खाते के अपना सवाल "
+            "अब भी पूछ सकते हैं।"
+        ),
+    },
     # Returned for a conversation or document the caller does not own, AND
     # for one that does not exist -- deliberately the same response, so the
     # reply cannot be used to enumerate real ids (see `openlaw.db
@@ -272,6 +286,7 @@ REFUSAL_STATUS: dict[str, int] = {
     "uploads_disabled": 422,
     "too_many_documents": 422,
     "not_found": 404,
+    "auth_unavailable": 503,
 }
 
 #: `openlaw.documents.extract.ExtractionError.reason` -> refusal key. The

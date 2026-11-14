@@ -63,6 +63,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from openlaw.api.artifacts import router as artifacts_router
+from openlaw.api.auth_routes import router as auth_router
 from openlaw.api.refusal import crisis_extras, refusal_detail
 from openlaw.api.routes import router
 from openlaw.config import Settings
@@ -201,6 +202,10 @@ def create_app(
     # is what makes "every terminal response carries help" hold for the
     # upload paths too without a second implementation of it.
     app.include_router(artifacts_router)
+    # Unconditional: `/auth/status` answering `false` in Mode A is how a
+    # frontend built with sign-in detects a mismatched backend. Routes that
+    # only make sense with accounts are registered only when auth is on.
+    app.include_router(auth_router)
 
     _register_anonymous_token_middleware(app)
     _register_error_handlers(app)
