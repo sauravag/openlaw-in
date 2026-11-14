@@ -126,6 +126,14 @@ outcome this is designed to prevent. Concretely:
   purge to find, and `purge_expired_documents` / `purge_expired_conversations`
   additionally return 0 without querying. The TTLs below apply only when
   `OPENLAW_AUTH_ENABLED=true`.
+- **"No limits" in that mode means no limit that polices a stranger.** The
+  per-IP burst limiter is not applied, nothing expires, there is no quota, and
+  up to 25 documents may be filed per conversation (3 in the authenticated
+  mode). Still bounded, because context windows and memory are finite and not
+  because of policy: `OPENLAW_MAX_UPLOAD_BYTES` (10 MiB) and
+  `OPENLAW_MAX_DOCUMENT_PAGES` (20), the page cap being also the citation unit.
+  The 90-day hallucination-log and audit-log purges still run (diagnostics,
+  not your documents).
 - Purging a conversation cascades to its messages and every document filed
   under it (and each of those documents' excerpts), regardless of that
   document's own `expires_at` — a conversation's lifetime bounds everything

@@ -231,7 +231,7 @@ def _require_room_for_another_document(
         .select_from(Document)
         .where(Document.conversation_id == conversation_id)
     ).scalar_one()
-    if held >= settings.max_documents_per_conversation:
+    if held >= settings.effective_max_documents_per_conversation:
         raise_refusal("too_many_documents", "", None, language)
 
 

@@ -89,3 +89,41 @@ def test_retention_copy_never_promises_a_deletion_that_will_not_happen(
 
     assert ("deleted automatically" in notice) is mentions_deletion
     assert ("stays until you delete it" in notice) is not mentions_deletion
+
+
+@pytest.mark.parametrize(("auth_enabled", "enforced"), [(False, False), (True, True)])
+def test_burst_limiter_runs_only_in_mode_b(auth_enabled: bool, enforced: bool) -> None:
+    assert _settings(auth_enabled).burst_limit_enforced is enforced
+
+
+def test_mode_a_allows_more_documents_per_conversation_than_mode_b() -> None:
+    mode_a = _settings(False).effective_max_documents_per_conversation
+    mode_b = _settings(True).effective_max_documents_per_conversation
+
+    assert mode_b == 3
+    assert mode_a == 25
+
+
+def test_mode_a_never_lowers_an_operator_configured_document_cap() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        vaquill_root="/tmp/v",
+        kanoongpt_root="/tmp/k",
+        max_documents_per_conversation=100,
+    )
+    assert settings.effective_max_documents_per_conversation == 100
+
+
+def test_mode_a_route_is_never_burst_limited() -> None:
+    from fastapi.testclient import TestClient
+
+    from tests.api.test_routes import _client, _settings as route_settings
+
+    client = _client(settings=route_settings(auth_enabled=False, quota_enabled=False))
+    now = __import__("time").monotonic()
+    client.app.state.rate_limit_hits["testclient"] = [now] * 1000  # type: ignore[attr-defined]
+
+    response = client.post("/ask", json={"question": "what is bail?"})
+
+    assert response.status_code != 429
+    assert isinstance(client, TestClient)

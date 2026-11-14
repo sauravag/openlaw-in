@@ -9,6 +9,12 @@ from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
+#: Mode A documents-per-conversation. A real case file (notice, reply,
+#: orders, receipts, correspondence) runs to a few dozen papers; excerpt
+#: selection keeps each prompt bounded regardless of how many are filed.
+MODE_A_MAX_DOCUMENTS_PER_CONVERSATION = 25
+
+
 class Settings(BaseSettings):
     """Configuration read from the environment or a local .env file."""
 
@@ -270,6 +276,33 @@ class Settings(BaseSettings):
         `scripts/purge_retention.py` has nothing to find.
         """
         return self.auth_enabled
+
+    @property
+    def burst_limit_enforced(self) -> bool:
+        """True when the per-IP burst limiter runs.
+
+        An abuse control for a public deployment (Mode B). Mode A is local /
+        trusted-network use only, where it merely interrupts a developer
+        testing in a loop, so it is not applied at all rather than raised.
+        """
+        return self.auth_enabled
+
+    @property
+    def effective_max_documents_per_conversation(self) -> int:
+        """Documents allowed per conversation.
+
+        `max_documents_per_conversation` (default 3) is a policy number sized
+        for a stranger on the internet. Mode A is the operator analysing
+        their own case file, so it gets `MODE_A_MAX_DOCUMENTS_PER_CONVERSATION`
+        (or the configured value if that is higher). This is not a technical
+        bound: only the page and byte caps are, and those apply in both modes.
+        """
+        if self.auth_enabled:
+            return self.max_documents_per_conversation
+        return max(
+            self.max_documents_per_conversation,
+            MODE_A_MAX_DOCUMENTS_PER_CONVERSATION,
+        )
 
     @field_validator("quota_enabled", mode="before")
     @classmethod

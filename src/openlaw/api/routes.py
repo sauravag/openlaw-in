@@ -603,9 +603,10 @@ def metered_caller(
     `_raise_quota_exceeded`) rather than returning a refusal for a caller to
     remember to check.
     """
-    _check_rate_limit(
-        request, _client_key(request, settings), question, state, language, settings
-    )
+    if settings.burst_limit_enforced:
+        _check_rate_limit(
+            request, _client_key(request, settings), question, state, language, settings
+        )
 
     authenticated = _authenticated_decision(
         session_factory, settings, authorization, cost
