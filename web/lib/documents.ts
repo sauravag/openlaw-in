@@ -1,3 +1,4 @@
+import { AUTH_ENABLED } from './authMode'
 import { getFallbackHelplineSet } from './fallbackHelplines'
 import { getStrings } from './strings'
 import type {
@@ -49,9 +50,9 @@ const BYTES_PER_MEGABYTE = 1_048_576
 /** The size cap as the whole number of megabytes the copy quotes. */
 export const MAX_UPLOAD_MEGABYTES = Math.floor(MAX_UPLOAD_BYTES / BYTES_PER_MEGABYTE)
 
-/** Where an anonymous reader goes to keep their upload. Mirrors
- * `Settings.signup_url`'s default. */
-export const SIGN_IN_PATH = '/signup'
+/** Where an anonymous reader goes to keep their upload. `null` in Mode A,
+ * where there are no accounts and so nothing to link to. */
+export const SIGN_IN_PATH: string | null = AUTH_ENABLED ? '/signup' : null
 
 /** One attached document, as the interface needs it. */
 export interface AttachedDocument {

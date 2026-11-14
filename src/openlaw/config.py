@@ -199,10 +199,10 @@ class Settings(BaseSettings):
     # an easy-to-miss comment into a state the service will not run in
     # unnoticed. See `openlaw.api.deps._require_proxy_acknowledgement`.
     no_reverse_proxy: bool = False
-    # Where a quota/rate-limit refusal tells the caller to sign up. Relative
-    # by default so it works unmodified in dev; a real deployment should
-    # override it with the frontend's actual URL.
-    signup_url: str = "/signup"
+    # Set this to the frontend's real signup page; left unset, refusals omit
+    # the link rather than pointing at a 404. Only ever emitted when
+    # `auth_enabled` is on (see `routes._signup_url`).
+    signup_url: str | None = None
     # Anonymous-quota cookie `Secure` flag (Task 4 review, low finding,
     # dispatched to Task 5 -- `openlaw.api.app._ensure_anonymous_token`).
     # Cannot be unconditional: a `Secure` cookie is dropped by every browser

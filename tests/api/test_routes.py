@@ -1069,3 +1069,63 @@ def test_anonymous_cookie_omits_secure_for_plain_http_local_development() -> Non
     response = client.post("/ask", json={"question": "q"})
 
     assert "secure" not in response.headers["set-cookie"].lower()
+
+
+# --- Task 4: the signup link exists only where an account does -------------
+
+
+_MODE_A_NO_SIGNUP = {"auth_enabled": False, "quota_enabled": False, "signup_url": "https://openlaw.in/signup"}
+
+
+def _assert_no_signup_offer(body: dict[str, object]) -> None:
+    assert body.get("signup_url") is None
+    assert body.get("signup_required") is not True
+
+
+def test_signup_url_defaults_to_none() -> None:
+    assert Settings(
+        vaquill_root="/tmp/v", kanoongpt_root="/tmp/k", database_url="sqlite://"
+    ).signup_url is None
+
+
+def test_mode_a_rate_limit_refusal_body_carries_no_signup_offer_but_keeps_help() -> None:
+    from fastapi import HTTPException
+
+    from openlaw.api.routes import _raise_rate_limited
+
+    settings = _settings(**_MODE_A_NO_SIGNUP)
+    with pytest.raises(HTTPException) as excinfo:
+        _raise_rate_limited(None, "q", None, "en", settings, 5)  # type: ignore[arg-type]
+
+    body = excinfo.value.detail
+    _assert_no_signup_offer(body)
+    assert body["escalation_footer"]
+
+
+def test_mode_a_quota_refusal_body_carries_no_signup_offer_but_keeps_help() -> None:
+    from fastapi import HTTPException
+
+    from openlaw.api.routes import _raise_quota_exceeded
+
+    settings = _settings(**_MODE_A_NO_SIGNUP)
+    with pytest.raises(HTTPException) as excinfo:
+        _raise_quota_exceeded("q", None, "en", True, settings)
+
+    body = excinfo.value.detail
+    _assert_no_signup_offer(body)
+    assert body["escalation_footer"]
+    assert body["helplines"] is not None
+
+
+def test_mode_a_validation_refusal_carries_no_signup_offer() -> None:
+    client = _client(settings=_settings(**_MODE_A_NO_SIGNUP))
+    response = client.post("/ask", json={})
+    assert response.status_code == 422
+    assert "signup" not in response.text
+
+
+def test_mode_b_refusal_omits_link_when_signup_url_unconfigured() -> None:
+    client = _client(settings=_settings(anonymous_quota=0))
+    body = client.post("/ask", json={"question": "q"}).json()
+    assert body["signup_required"] is True
+    assert body["signup_url"] is None

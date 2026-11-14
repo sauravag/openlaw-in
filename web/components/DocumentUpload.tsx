@@ -109,12 +109,14 @@ export default function DocumentUpload({
           {!isSignedIn && (
             <p className="text-sm leading-relaxed text-paper-ink">
               {strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)}{' '}
-              <a
-                href={SIGN_IN_PATH}
-                className="font-semibold text-brand underline decoration-2 underline-offset-4"
-              >
-                {strings.signInCta}
-              </a>
+              {SIGN_IN_PATH && (
+                <a
+                  href={SIGN_IN_PATH}
+                  className="font-semibold text-brand underline decoration-2 underline-offset-4"
+                >
+                  {strings.signInCta}
+                </a>
+              )}
             </p>
           )}
           {/* Needed only for the no-JavaScript path -- with scripts running,

@@ -234,6 +234,15 @@ def _prune_rate_limit_hits(hits: dict[str, list[float]], window_start: float) ->
             del hits[existing_key]
 
 
+def _signup_url(settings: Settings) -> str | None:
+    """The signup link a refusal may carry: Mode B only, and only if configured.
+
+    Mode A has no accounts, so a signup link there would be a next step that
+    does not exist.
+    """
+    return settings.signup_url if settings.auth_enabled else None
+
+
 def _raise_rate_limited(
     request: Request, question: str, state: str | None, language: str | None,
     settings: Settings, retry_after_seconds: int,
@@ -255,7 +264,7 @@ def _raise_rate_limited(
         crisis_response=crisis,
         helplines=helplines,
         quota_reset_at=None,
-        signup_url=settings.signup_url,
+        signup_url=_signup_url(settings),
     )
     raise HTTPException(
         status_code=429,
@@ -312,12 +321,12 @@ def _raise_quota_exceeded(
     body = QuotaExceeded(
         detail=refusal_detail("quota_exceeded", language),
         quota_remaining=0,
-        signup_required=signup_required,
+        signup_required=signup_required and settings.auth_enabled,
         escalation_footer=footer,
         crisis_response=crisis,
         helplines=helplines,
         quota_reset_at=reset_date.isoformat(),
-        signup_url=settings.signup_url,
+        signup_url=_signup_url(settings),
     )
     raise HTTPException(
         status_code=429,

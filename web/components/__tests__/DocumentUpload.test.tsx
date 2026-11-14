@@ -55,13 +55,13 @@ describe('DocumentUpload', () => {
     ).toBeInTheDocument()
   })
 
-  it('tells an anonymous visitor their document expires, and offers the one fix', () => {
+  it('tells an anonymous visitor their document expires, and offers no sign-in link in Mode A, where there is no account to make', () => {
     setup({ isSignedIn: false })
     const strings = getStrings('en')
     expect(
       screen.getByText(strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)),
     ).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: strings.signInCta })).toHaveAttribute('href', '/signup')
+    expect(screen.queryByRole('link', { name: strings.signInCta })).not.toBeInTheDocument()
   })
 
   it('does not warn a signed-in reader about an expiry that will not happen', () => {

@@ -49,6 +49,11 @@ describe('RefusalNotice', () => {
     )
   })
 
+  it('does not show a signup link when signup_url is null, even if signup is required', () => {
+    render(<RefusalNotice data={{ ...baseRefusal, signup_url: null }} language="en" />)
+    expect(screen.queryByRole('link', { name: /account/i })).not.toBeInTheDocument()
+  })
+
   it('does not show a signup link when signup is not required', () => {
     render(<RefusalNotice data={{ ...baseRefusal, signup_required: false }} language="en" />)
     expect(screen.queryByRole('link', { name: /account/i })).not.toBeInTheDocument()
