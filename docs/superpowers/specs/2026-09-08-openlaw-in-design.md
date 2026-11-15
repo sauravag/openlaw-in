@@ -615,15 +615,35 @@ Next.js (web)  ──►  FastAPI (Python)  ──►  Qdrant   (vectors)
 - **Postgres:** users, quota counters, conversations, hallucination log.
 - **Qdrant:** vectors, self-hosted, with payload filters for court, year, jurisdiction
   and `in_force`.
-- **Auth:** Supabase — Postgres plus email and Google OAuth in one dependency.
+- **Auth:** Supabase (GoTrue), email magic links only (amended, see "Two build modes").
 - **Deployment:** Docker Compose covering all three datastores, so self-hosting remains
   a single command.
 
+### Two build modes (amended 2026-11, Plan 7)
+
+The product has **two modes**, chosen by `OPENLAW_AUTH_ENABLED`. Do not write a
+later plan that assumes a single mode.
+
+- **Mode A (default, `false`):** no accounts, no sign-in, no quota, nothing
+  expires. Zero Supabase setup. Local and trusted-network use only: on a public
+  URL it gives anyone unlimited model calls on the operator's API key.
+- **Mode B (`true`):** Supabase magic-link sign-in, quota, and retention
+  (anonymous data expires after 24 hours; signed-in data is kept until deleted).
+  This is what a public deployment runs.
+
+**Quota requires auth, by decision.** `OPENLAW_QUOTA_ENABLED=true` with auth off
+is a startup error; unset quota follows the auth mode. The owner will never run
+Mode A publicly, so a cap with no sign-in (nothing to offer the person it
+refuses) was removed rather than offered as a knob. Its absence is deliberate.
+The frontend flag `NEXT_PUBLIC_OPENLAW_AUTH_ENABLED` is inlined at build time
+and must match; a disagreement is detected and sign-in refuses.
+
 ### Access and quota
 
-- Anonymous: 3 questions before signup, to remove friction.
-- Signed in (email or Google): 30 questions/month, resetting.
-- Self-hosted: quota disabled by configuration flag.
+- Mode B anonymous: 3 questions before signup, to remove friction.
+- Mode B signed in (email magic link; Google OAuth is not offered): 30
+  questions/month, resetting.
+- Mode A (self-hosted default): no quota exists.
 
 Metering ships in v1. It is cheap to build early and painful to retrofit.
 
