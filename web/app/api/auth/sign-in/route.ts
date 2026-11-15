@@ -1,5 +1,6 @@
 import { readBoundedBody } from "@/lib/auth/boundedBody";
-import { authRefusal, normalizeLanguage, signInSentResponse, type AuthLanguage, type AuthRefusalKind } from "@/lib/auth/authRefusal";
+import { authRefusal, signInSentResponse, type AuthLanguage, type AuthRefusalKind } from "@/lib/auth/authRefusal";
+import { hintLanguage, isFormPost, parseFormInput } from "@/lib/auth/formInput";
 import { requestOtp } from "@/lib/auth/gotrue";
 import { readGotrueConfig } from "@/lib/auth/gotrueConfig";
 import { challengeFor, createVerifier } from "@/lib/auth/pkce";
@@ -18,32 +19,6 @@ const MAX_EMAIL_LENGTH = 254;
 const DEFAULT_RETRY_AFTER_SECONDS = 60;
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-interface SignInInput {
-  readonly email: unknown;
-  readonly language: AuthLanguage;
-}
-
-/** `email` and `language` from JSON or the no-JavaScript form; null if unparseable. */
-function parseInput(text: string, contentType: string): SignInInput | null {
-  if (contentType.includes("application/x-www-form-urlencoded")) {
-    const form = new URLSearchParams(text);
-    return { email: form.get("email"), language: normalizeLanguage(form.get("language")) };
-  }
-  try {
-    const data: unknown = JSON.parse(text);
-    if (typeof data !== "object" || data === null) return null;
-    const record = data as Record<string, unknown>;
-    return { email: record.email, language: normalizeLanguage(record.language) };
-  } catch {
-    return null;
-  }
-}
-
-/** A no-JavaScript form post must land on a page, never on a JSON body. */
-function isFormPost(request: Request): boolean {
-  return (request.headers.get("content-type") ?? "").includes("application/x-www-form-urlencoded");
-}
-
 /** Refuses as JSON, or as a 303 to `/signup?error=` for a form post. */
 type Refuse = (
   kind: Exclude<AuthRefusalKind, "sent">,
@@ -58,12 +33,6 @@ function refuserFor(request: Request): Refuse {
     return (_kind, code, language) => signupErrorRedirect(code, language);
   }
   return (kind, _code, language, status, headers) => authRefusal(kind, language, status, headers);
-}
-
-/** Language for errors raised before the body is read (limiter, size cap). */
-function hintLanguage(request: Request): AuthLanguage {
-  const accept = request.headers.get("accept-language")?.trim().toLowerCase() ?? "";
-  return normalizeLanguage(accept.startsWith("hi") ? "hi" : "en");
 }
 
 function validEmail(value: unknown): string | null {
@@ -115,9 +84,11 @@ export async function POST(request: Request): Promise<Response> {
   const body = await readBoundedBody(request);
   if (body.kind === "too_large") return refuse("too_large", "too_large", hint, 413);
   const input =
-    body.kind === "ok" ? parseInput(body.text, request.headers.get("content-type") ?? "") : null;
+    body.kind === "ok"
+      ? parseFormInput(body.text, request.headers.get("content-type") ?? "", ["email"])
+      : null;
   const language = input?.language ?? hint;
-  const email = input ? validEmail(input.email) : null;
+  const email = input ? validEmail(input.fields.email) : null;
   if (email === null) return refuse("invalid_email", "invalid_email", language, 400);
 
   // `agrees === null` (backend unreachable) does not block: GoTrue is a

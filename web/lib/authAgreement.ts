@@ -1,3 +1,4 @@
+import { backendBaseUrl } from "./apiUrl";
 import { AUTH_ENABLED } from "./authMode";
 import { getFallbackHelplineSet } from "./fallbackHelplines";
 import { getStrings } from "./strings";
@@ -45,9 +46,7 @@ export function resetMismatchLog(): void {
 }
 
 function apiBase(options: AgreementOptions): string {
-  return (
-    options.apiUrl ?? process.env.OPENLAW_API_URL ?? "http://127.0.0.1:8000"
-  );
+  return backendBaseUrl(options.apiUrl);
 }
 
 function logMismatchOnce(backend: boolean, frontend: boolean): void {

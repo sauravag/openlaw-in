@@ -1,6 +1,7 @@
-import { authRefusal, normalizeLanguage, type AuthLanguage, type AuthRefusalKind } from "@/lib/auth/authRefusal";
+import { authRefusal, type AuthLanguage, type AuthRefusalKind } from "@/lib/auth/authRefusal";
 import { readBoundedBody } from "@/lib/auth/boundedBody";
 import { isDeleteConfirmed } from "@/lib/auth/deleteConfirmation";
+import { hintLanguage, isFormPost, parseFormInput } from "@/lib/auth/formInput";
 import { revokeSession } from "@/lib/auth/gotrue";
 import { readGotrueConfig } from "@/lib/auth/gotrueConfig";
 import { accountDeleteErrorRedirect, signupRedirect, type AccountDeleteErrorCode } from "@/lib/auth/authRedirects";
@@ -22,40 +23,12 @@ const BAD_GATEWAY = 502;
 /** Challenge a bare 401 from the backend means "sign in again", not "retry". */
 const BEARER_CHALLENGE = { "WWW-Authenticate": "Bearer" };
 
-interface DeleteInput {
-  readonly confirmation: unknown;
-  readonly language: AuthLanguage;
-}
-
-/** `confirmation` and `language` from JSON or a form; null if unparseable. */
-function parseInput(text: string, contentType: string): DeleteInput | null {
-  if (contentType.includes("application/x-www-form-urlencoded")) {
-    const form = new URLSearchParams(text);
-    return {
-      confirmation: form.get("confirmation"),
-      language: normalizeLanguage(form.get("language")),
-    };
-  }
-  try {
-    const data: unknown = JSON.parse(text);
-    if (typeof data !== "object" || data === null) return null;
-    const record = data as Record<string, unknown>;
-    return { confirmation: record.confirmation, language: normalizeLanguage(record.language) };
-  } catch {
-    return null;
-  }
-}
-
 type Refuse = (
   kind: DeleteRefusalKind,
   language: AuthLanguage,
   status: number,
   headers?: Record<string, string>,
 ) => Response;
-
-function isFormPost(request: Request): boolean {
-  return (request.headers.get("content-type") ?? "").includes("application/x-www-form-urlencoded");
-}
 
 type DeleteRefusalKind = Exclude<AuthRefusalKind, "sent" | "invalid_email" | "rate_limited" | "failed" | "too_large">;
 
@@ -67,11 +40,6 @@ const FORM_CODE: Record<DeleteRefusalKind, AccountDeleteErrorCode | null> = {
   delete_too_large: "too_large",
   delete_conflict: "conflict",
 };
-
-function hintLanguage(request: Request): AuthLanguage {
-  const accept = request.headers.get("accept-language")?.trim().toLowerCase() ?? "";
-  return accept.startsWith("hi") ? "hi" : "en";
-}
 
 /** Whether the backend confirmed the sign-in identity is gone. Anything
  * unparseable counts as NOT removed: never claim what was not confirmed. */
@@ -115,10 +83,12 @@ export async function POST(request: Request): Promise<Response> {
   const body = await readBoundedBody(request);
   if (body.kind === "too_large") return refuse("delete_too_large", hint, PAYLOAD_TOO_LARGE);
   const input =
-    body.kind === "ok" ? parseInput(body.text, request.headers.get("content-type") ?? "") : null;
+    body.kind === "ok"
+      ? parseFormInput(body.text, request.headers.get("content-type") ?? "", ["confirmation"])
+      : null;
   const language = input?.language ?? hint;
   // Before the session or the backend: a wrong word must cost nothing.
-  if (input === null || !isDeleteConfirmed(input.confirmation, language)) {
+  if (input === null || !isDeleteConfirmed(input.fields.confirmation, language)) {
     return refuse("confirmation_required", language, BAD_REQUEST);
   }
 

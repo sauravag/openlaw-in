@@ -1,10 +1,11 @@
 import "server-only";
 
+import { ANON_COOKIE_NAME } from "@/lib/anonCookie";
+import { backendBaseUrl } from "@/lib/apiUrl";
 import { sessionFromCookieHeader, stripAuthCookies } from "@/lib/auth/sessionCookie";
 import { AUTH_ENABLED } from "@/lib/authMode";
 import { isCrossSiteWrite } from "@/lib/csrf";
 
-const DEFAULT_API_URL = "http://127.0.0.1:8000";
 const BAD_GATEWAY = 502;
 const BAD_REQUEST = 400;
 const FORBIDDEN = 403;
@@ -132,7 +133,7 @@ export async function proxyToBackend(
   if (hasDotSegment(backendPath)) {
     return Response.json({ detail: "Bad request." }, { status: BAD_REQUEST });
   }
-  const base = (process.env.OPENLAW_API_URL ?? DEFAULT_API_URL).replace(/\/+$/, "");
+  const base = backendBaseUrl();
   const search = new URL(request.url).search;
   const hasBody = request.method !== "GET" && request.method !== "HEAD";
 
@@ -164,8 +165,6 @@ export async function proxyToBackend(
     headers: buildResponseHeaders(upstream, new URL(base).origin),
   });
 }
-
-const ANON_COOKIE_NAME = "openlaw_anon_id";
 
 /**
  * The single `openlaw_anon_id=<value>` pair from a Cookie header, byte for
@@ -205,7 +204,7 @@ async function sendToBackend(
   { bearer, inboundCookieHeader, timeoutMs = BACKEND_POST_TIMEOUT_MS }: PostToBackendOptions,
 ): Promise<Response> {
   if (hasDotSegment(backendPath)) throw new Error("invalid backend path");
-  const base = (process.env.OPENLAW_API_URL ?? DEFAULT_API_URL).replace(/\/+$/, "");
+  const base = backendBaseUrl();
   const source = new Headers();
   const anonCookie = anonCookieOnly(inboundCookieHeader);
   if (anonCookie) source.set("cookie", anonCookie);
