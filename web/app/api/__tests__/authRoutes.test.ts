@@ -471,7 +471,10 @@ describe("GET /api/auth/callback", () => {
   describe("account migration", () => {
     const withCookies = "openlaw_pkce=verifier-value; openlaw_anon_id=anon-1";
     const migrationOutcomes: Array<[string, () => void]> = [
-      ["a non-2xx backend response", () => backendFetch.mockResolvedValue(new Response("x", { status: 503 }))],
+      ...[401, 409, 503].map((status): [string, () => void] => [
+        `a ${status} backend response`,
+        () => backendFetch.mockResolvedValue(new Response("x", { status })),
+      ]),
       ["a network error", () => backendFetch.mockRejectedValue(new TypeError("fetch failed"))],
       [
         "a timeout",
@@ -511,7 +514,8 @@ describe("GET /api/auth/callback", () => {
 
         expect(response.status).toBe(303);
         expect(response.headers.get("location")).toBe("/?migration=failed");
-        expect(sets.some((c) => c.name === "openlaw_session")).toBe(true);
+        const session = sets.find((c) => c.name === "openlaw_session");
+        expect(session?.options.httpOnly).toBe(true);
         const writes = sets.filter((c) => c.name === "openlaw_pkce");
         expect(writes[writes.length - 1].options.maxAge).toBe(0);
         expect(errors).toHaveBeenCalled();
@@ -534,6 +538,21 @@ describe("GET /api/auth/callback", () => {
       await callback(callbackRequest());
 
       expect(cancel).toHaveBeenCalled();
+    });
+
+    it("still redirects to / when cancelling the body throws after a 200", async () => {
+      cookieHeader = withCookies;
+      const response = new Response("{}", { status: 200 });
+      vi.spyOn(response.body!, "cancel").mockRejectedValue(new TypeError("cancel failed"));
+      backendFetch.mockResolvedValue(response);
+      const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const { callback } = await load(true);
+
+      const result = await callback(callbackRequest());
+
+      expect(result.headers.get("location")).toBe("/");
+      expect(JSON.stringify(errors.mock.calls)).toContain("TypeError");
+      errors.mockRestore();
     });
 
     it("does not call the backend when the code exchange fails", async () => {

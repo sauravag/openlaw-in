@@ -184,7 +184,7 @@ function anonCookieOnly(cookieHeader: string | null): string | null {
 export interface PostToBackendOptions {
   /** Access token held in memory by the caller (not read from any cookie). */
   bearer: string;
-  /** The inbound `Cookie` header; only non-auth cookies are forwarded. */
+  /** The inbound `Cookie` header; only the `openlaw_anon_id` cookie is forwarded. */
   inboundCookieHeader: string | null;
   timeoutMs?: number;
 }

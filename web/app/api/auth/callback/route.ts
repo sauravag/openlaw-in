@@ -14,6 +14,15 @@ const EXPIRED = "/signup?error=expired";
 const MIGRATION_FAILED = "/?migration=failed";
 const MIGRATE_PATH = "/account/migrate";
 
+/** Frees the connection. A failure here is logged and never decides the outcome. */
+async function releaseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch (error) {
+    console.error("[Auth] could not release migration response", error instanceof Error ? error.name : "unknown");
+  }
+}
+
 /**
  * Moves this browser's anonymous material into the new account. Never throws
  * and never fails sign-in: any failure is logged (no tokens) and reported as
@@ -28,8 +37,7 @@ async function migrateAnonymousMaterial(
       bearer: accessToken,
       inboundCookieHeader,
     });
-    // Release the connection; the body is never needed.
-    await response.body?.cancel();
+    await releaseBody(response);
     if (response.ok) return true;
     console.error("[Auth] account migration refused, status", response.status);
   } catch (error) {
