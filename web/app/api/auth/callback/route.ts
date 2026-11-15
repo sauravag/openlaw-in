@@ -29,7 +29,10 @@ export async function GET(request: Request): Promise<Response> {
   if (!AUTH_ENABLED) return notFound();
   // The callback has no language of its own; the mismatch body is English.
   const agreement = await checkAuthAgreement();
-  if (agreement.agrees === false) return authUnavailableResponse("en");
+  if (agreement.agrees === false) {
+    await clearVerifier();
+    return authUnavailableResponse("en");
+  }
 
   const code = new URL(request.url).searchParams.get("code");
   const verifier = await readVerifier();

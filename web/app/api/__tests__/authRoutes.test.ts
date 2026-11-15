@@ -54,6 +54,7 @@ async function load(authEnabled: boolean): Promise<Routes> {
   vi.stubEnv("NEXT_PUBLIC_OPENLAW_AUTH_ENABLED", authEnabled ? "true" : "false");
   vi.stubEnv("OPENLAW_SUPABASE_URL", "https://project.supabase.test");
   vi.stubEnv("OPENLAW_SUPABASE_ANON_KEY", "anon-key");
+  vi.stubEnv("OPENLAW_SITE_URL", "https://openlaw.example");
   const [signIn, callback, signOut, session] = await Promise.all([
     import("../auth/sign-in/route"),
     import("../auth/callback/route"),
@@ -109,6 +110,9 @@ describe("Mode A (auth disabled)", () => {
 
     expect(responses.map((r) => r.status)).toEqual([404, 404, 404, 404]);
     expect(requestOtp).not.toHaveBeenCalled();
+    expect(exchangeCode).not.toHaveBeenCalled();
+    expect(revokeSession).not.toHaveBeenCalled();
+    expect(checkAuthAgreement).not.toHaveBeenCalled();
     expect(sets).toHaveLength(0);
   });
 });
@@ -124,7 +128,7 @@ describe("POST /api/auth/sign-in", () => {
     const otp = requestOtp.mock.calls[0][1];
     expect(otp.identifier).toBe("person@example.com");
     expect(otp.method).toBe("email");
-    expect(otp.redirectTo).toBe("http://localhost:3000/api/auth/callback");
+    expect(otp.redirectTo).toBe("https://openlaw.example/api/auth/callback");
     expect(typeof otp.codeChallenge).toBe("string");
     const verifier = sets.find((c) => c.name === "openlaw_pkce");
     expect(verifier?.options.httpOnly).toBe(true);
@@ -269,6 +273,113 @@ describe("POST /api/auth/sign-in", () => {
     expect(requestOtp).toHaveBeenCalledTimes(1);
   });
 
+  describe("OPENLAW_SITE_URL (magic-link redirect_to)", () => {
+    it("returns 503 with helplines and never calls requestOtp when unset", async () => {
+      const { signIn } = await load(true);
+      vi.stubEnv("OPENLAW_SITE_URL", "");
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await signIn(jsonPost({ email: "a@example.com" }));
+
+      expect(response.status).toBe(503);
+      expectHelp(await response.json());
+      expect(requestOtp).not.toHaveBeenCalled();
+      expect(JSON.stringify(errorSpy.mock.calls)).toContain("OPENLAW_SITE_URL");
+      errorSpy.mockRestore();
+    });
+
+    it.each([
+      "javascript:alert(1)",
+      "ftp://openlaw.example",
+      "https://user:pw@openlaw.example",
+      "https://openlaw.example/?a=b",
+      "https://openlaw.example/#frag",
+      "not a url",
+    ])("returns 503 and never calls requestOtp for invalid value %s", async (value) => {
+      const { signIn } = await load(true);
+      vi.stubEnv("OPENLAW_SITE_URL", value);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const response = await signIn(jsonPost({ email: "a@example.com" }));
+
+      expect(response.status).toBe(503);
+      expectHelp(await response.json());
+      expect(requestOtp).not.toHaveBeenCalled();
+      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(value);
+      errorSpy.mockRestore();
+    });
+
+    it("uses the configured URL (with path, no trailing slash) whatever the Host header", async () => {
+      const { signIn } = await load(true);
+      vi.stubEnv("OPENLAW_SITE_URL", "https://openlaw.example/app/");
+
+      const response = await signIn(
+        jsonPost({ email: "a@example.com" }, { ...SAME_ORIGIN, host: "evil.example" }),
+      );
+
+      expect(response.status).toBe(202);
+      expect(requestOtp.mock.calls[0][1].redirectTo).toBe(
+        "https://openlaw.example/app/api/auth/callback",
+      );
+    });
+  });
+
+  describe("request body cap", () => {
+    it("returns 413 with helplines for an oversized Content-Length without reading it", async () => {
+      const { signIn } = await load(true);
+      const request = jsonPost({ email: "a@example.com" }, {
+        ...SAME_ORIGIN,
+        "content-length": "999999",
+      });
+
+      const response = await signIn(request);
+
+      expect(response.status).toBe(413);
+      expectHelp(await response.json());
+      expect(requestOtp).not.toHaveBeenCalled();
+    });
+
+    it("returns 413 when the actual body exceeds the cap despite a small Content-Length", async () => {
+      const { signIn } = await load(true);
+      const request = new Request("http://localhost:3000/api/auth/sign-in", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...SAME_ORIGIN },
+        body: JSON.stringify({ email: "a@example.com", pad: "x".repeat(10_000) }),
+      });
+
+      const response = await signIn(request);
+
+      expect(response.status).toBe(413);
+      expect(requestOtp).not.toHaveBeenCalled();
+    });
+
+    it("runs the limiter before reading the body", async () => {
+      const { signIn } = await load(true);
+      for (let i = 0; i < 10; i += 1) await signIn(jsonPost({ email: "a@example.com" }));
+      const request = jsonPost({ email: "a@example.com" });
+      const text = vi.spyOn(request, "text");
+      const json = vi.spyOn(request, "json");
+
+      const response = await signIn(request);
+
+      expect(response.status).toBe(429);
+      expect(text).not.toHaveBeenCalled();
+      expect(json).not.toHaveBeenCalled();
+    });
+  });
+
+  it("counts invalid-email attempts against the limiter", async () => {
+    const { signIn } = await load(true);
+    for (let i = 0; i < 10; i += 1) {
+      expect((await signIn(jsonPost({ email: "nope" }))).status).toBe(400);
+    }
+
+    const response = await signIn(jsonPost({ email: "valid@example.com" }));
+
+    expect(response.status).toBe(429);
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
   describe("per-IP limiter", () => {
     const fromIp = (ip: string | null) =>
       jsonPost(
@@ -324,6 +435,11 @@ describe("POST /api/auth/sign-in", () => {
 });
 
 describe("GET /api/auth/callback", () => {
+  const expectVerifierCleared = () => {
+    const writes = sets.filter((c) => c.name === "openlaw_pkce");
+    expect(writes.length).toBeGreaterThan(0);
+    expect(writes[writes.length - 1].options.maxAge).toBe(0);
+  };
   const callbackRequest = (query = "code=abc123") =>
     new Request(`http://localhost:3000/api/auth/callback?${query}`);
 
@@ -376,6 +492,7 @@ describe("GET /api/auth/callback", () => {
 
     expect(response.headers.get("location")).toBe("/signup?error=failed");
     expect(exchangeCode).not.toHaveBeenCalled();
+    expectVerifierCleared();
   });
 
   it("treats a missing code as failed without calling GoTrue", async () => {
@@ -386,6 +503,7 @@ describe("GET /api/auth/callback", () => {
 
     expect(response.headers.get("location")).toBe("/signup?error=failed");
     expect(exchangeCode).not.toHaveBeenCalled();
+    expectVerifierCleared();
   });
 
   it("returns the unavailable response on a mode mismatch", async () => {
@@ -397,6 +515,7 @@ describe("GET /api/auth/callback", () => {
 
     expect(response.status).toBe(503);
     expect(exchangeCode).not.toHaveBeenCalled();
+    expectVerifierCleared();
   });
 
   it("still exchanges when the backend is unreachable (agrees null)", async () => {

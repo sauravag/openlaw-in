@@ -25,6 +25,7 @@ import type { RefusalData } from "@/lib/types";
 export type AuthRefusalKind =
   | "invalid_email"
   | "rate_limited"
+  | "too_large"
   | "failed"
   | "sent";
 
@@ -32,6 +33,10 @@ const DETAIL: Record<AuthRefusalKind, Record<"en" | "hi", string>> = {
   invalid_email: {
     en: "That does not look like an email address. Please check it and try again.",
     hi: "यह ईमेल पता सही नहीं लग रहा। कृपया जांच कर दोबारा कोशिश करें।",
+  },
+  too_large: {
+    en: "That request was too large. Please enter just your email address.",
+    hi: "यह अनुरोध बहुत बड़ा था। कृपया केवल अपना ईमेल पता दर्ज करें।",
   },
   rate_limited: {
     en: "Too many sign-in attempts. Please wait a little and try again. You can still ask your question without an account.",

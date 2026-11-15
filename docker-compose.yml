@@ -362,6 +362,14 @@ services:
       # header comment, verified) -- a runtime environment variable here
       # would be silently inert and is actively misleading to leave in.
     restart: unless-stopped
+    # Runtime (not build-time) settings for the Mode B sign-in routes
+    # (web/app/api/auth/*). Unset values keep Mode A unaffected; in Mode B,
+    # sign-in answers 503 until the first three are set.
+    environment:
+      OPENLAW_SUPABASE_URL: ${OPENLAW_SUPABASE_URL:-}
+      OPENLAW_SUPABASE_ANON_KEY: ${OPENLAW_SUPABASE_ANON_KEY:-}
+      OPENLAW_SITE_URL: ${OPENLAW_SITE_URL:-}
+      OPENLAW_COOKIE_SECURE: ${OPENLAW_COOKIE_SECURE:-false}
     # `service_started`, deliberately not `service_healthy`: `api`'s
     # healthcheck above is tied to a POPULATED corpus, which will not exist
     # yet on a fresh self-host (binding requirement 6 -- the application
