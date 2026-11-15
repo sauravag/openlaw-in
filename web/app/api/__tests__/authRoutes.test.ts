@@ -475,25 +475,43 @@ describe("POST /api/auth/sign-in (no-JavaScript form post)", () => {
     expect(location(response)).toBe("/signup?sent=1&language=hi");
   });
 
-  it("redirects identically whether or not the address can receive mail", async () => {
+  it("redirects identically for an existing and a brand-new address", async () => {
     const { signIn } = await load(true);
-    const first = await signIn(formPost({ email: "known@example.com" }));
-    requestOtp.mockResolvedValue({ kind: "sent" });
-    const second = await signIn(formPost({ email: "unknown@example.com" }));
+    // GoTrue answers differently per address; the redirect must not.
+    requestOtp.mockImplementation(async (_config, otp) =>
+      otp.identifier === "existing@example.com"
+        ? { kind: "sent" as const, existingUser: true }
+        : { kind: "sent" as const, createdUser: true },
+    );
+    const existing = await signIn(formPost({ email: "existing@example.com", language: "hi" }));
+    const created = await signIn(formPost({ email: "brand-new@example.com", language: "hi" }));
 
-    expect(location(first)).toBe(location(second));
-    expect(first.status).toBe(second.status);
+    expect(requestOtp).toHaveBeenCalledTimes(2);
+    expect(existing.status).toBe(created.status);
+    expect(location(existing)).toBe(location(created));
+    expect([...existing.headers].sort()).toEqual([...created.headers].sort());
   });
 
-  it.each([
-    ["an invalid email", { email: "not-an-email" }, "invalid_email"],
-  ])("redirects to /signup?error=%s code for %s", async (_label, fields, code) => {
+  it("answers a JSON caller identically for an existing and a brand-new address", async () => {
+    const { signIn } = await load(true);
+    requestOtp.mockImplementation(async (_config, otp) =>
+      otp.identifier === "existing@example.com"
+        ? { kind: "sent" as const, existingUser: true }
+        : { kind: "sent" as const, createdUser: true },
+    );
+    const existing = await signIn(jsonPost({ email: "existing@example.com" }));
+    const created = await signIn(jsonPost({ email: "brand-new@example.com" }));
+
+    expect(await existing.text()).toBe(await created.text());
+  });
+
+  it("redirects an invalid email to the invalid_email code, calling nothing", async () => {
     const { signIn } = await load(true);
 
-    const response = await signIn(formPost(fields));
+    const response = await signIn(formPost({ email: "not-an-email" }));
 
     expect(response.status).toBe(303);
-    expect(location(response)).toBe(`/signup?error=${code}`);
+    expect(location(response)).toBe("/signup?error=invalid_email");
     expect(requestOtp).not.toHaveBeenCalled();
   });
 

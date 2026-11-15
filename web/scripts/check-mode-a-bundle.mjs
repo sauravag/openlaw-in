@@ -1,17 +1,34 @@
 #!/usr/bin/env node
-// Fails if the Mode A (NEXT_PUBLIC_OPENLAW_AUTH_ENABLED unset) client bundle
-// contains any sign-in internals. Run after `npm run build`.
+// Fails if the Mode A (NEXT_PUBLIC_OPENLAW_AUTH_ENABLED unset) build ships
+// sign-in internals to browsers. Run after `npm run build`.
 //
-// Scope: `.next/static` ONLY -- what ships to browsers. Server chunks under
-// `.next/server` legitimately contain the auth Route Handlers' code (they exist
-// in the build and return 404 at runtime in Mode A), so they are not checked.
+// Scope: what a browser can receive.
+//   - `.next/static`: client JS/CSS chunks.
+//   - `.next/server/app/**` prerendered output (*.html, *.rsc, *.body), which is
+//     served as-is. Route-handler JS under `.next/server/app/api` is EXCLUDED:
+//     the auth Route Handlers legitimately contain their code (they return 404
+//     at runtime in Mode A), and server chunks never reach the client.
+//
+// `AUTH_ENABLED` is a compile-time literal (`next.config.ts` always defines
+// `NEXT_PUBLIC_OPENLAW_AUTH_ENABLED`), so with the flag off the minifier drops
+// every sign-in branch and `/signup` is absent from browser output too; it is a
+// sentinel so a regression in either shows up here.
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const FORBIDDEN = ["/auth/v1/otp", "openlaw_session", "openlaw_pkce"];
-const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const staticDir = process.argv[2] ?? join(root, ".next", "static");
+export const FORBIDDEN = [
+  "/auth/v1/otp",
+  "openlaw_session",
+  "openlaw_pkce",
+  "/api/auth/sign-in",
+  "/api/auth/sign-out",
+  "/account/delete",
+  "/signup",
+];
+
+const STATIC_EXTENSIONS = /\.(js|css|html|json|txt|map)$/;
+const PRERENDER_EXTENSIONS = /\.(html|rsc|body)$/;
 
 function* files(dir) {
   for (const name of readdirSync(dir)) {
@@ -21,26 +38,53 @@ function* files(dir) {
   }
 }
 
-let scanned = 0;
-const hits = [];
-try {
-  for (const path of files(staticDir)) {
-    if (!/\.(js|css|html|json|txt|map)$/.test(path)) continue;
+/** Files a browser can receive under `nextDir` (a `.next` directory). */
+function* clientReachableFiles(nextDir) {
+  for (const path of files(join(nextDir, "static"))) {
+    if (STATIC_EXTENSIONS.test(path)) yield path;
+  }
+  const appDir = join(nextDir, "server", "app");
+  const apiDir = join(appDir, "api") + sep;
+  for (const path of files(appDir)) {
+    if (path.startsWith(apiDir)) continue;
+    if (PRERENDER_EXTENSIONS.test(path)) yield path;
+  }
+}
+
+/** Returns `{ scanned, hits }`; throws if the directory cannot be read. */
+export function scan(nextDir) {
+  let scanned = 0;
+  const hits = [];
+  for (const path of clientReachableFiles(nextDir)) {
     scanned += 1;
     const text = readFileSync(path, "utf8");
-    for (const needle of FORBIDDEN) if (text.includes(needle)) hits.push(`${path}: ${needle}`);
+    for (const needle of FORBIDDEN) {
+      if (text.includes(needle)) hits.push(`${relative(nextDir, path)}: ${needle}`);
+    }
   }
-} catch (error) {
-  console.error(`check-mode-a-bundle: cannot read ${staticDir} (run \`npm run build\` first): ${error.message}`);
-  process.exit(2);
+  return { scanned, hits };
 }
-if (scanned === 0) {
-  console.error(`check-mode-a-bundle: no files found under ${staticDir}`);
-  process.exit(2);
+
+function main() {
+  const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
+  const nextDir = process.argv[2] ?? join(root, ".next");
+  let result;
+  try {
+    result = scan(nextDir);
+  } catch (error) {
+    console.error(`check-mode-a-bundle: cannot read ${nextDir} (run \`npm run build\` first): ${error.message}`);
+    process.exit(2);
+  }
+  if (result.scanned === 0) {
+    console.error(`check-mode-a-bundle: no files found under ${nextDir}`);
+    process.exit(2);
+  }
+  if (result.hits.length > 0) {
+    console.error("check-mode-a-bundle: auth strings found in browser-reachable output:");
+    for (const hit of result.hits) console.error(`  ${hit}`);
+    process.exit(1);
+  }
+  console.log(`check-mode-a-bundle: OK (${result.scanned} files scanned, none contain ${FORBIDDEN.join(", ")})`);
 }
-if (hits.length > 0) {
-  console.error("check-mode-a-bundle: auth strings found in the client bundle:");
-  for (const hit of hits) console.error(`  ${hit}`);
-  process.exit(1);
-}
-console.log(`check-mode-a-bundle: OK (${scanned} files scanned, none contain ${FORBIDDEN.join(", ")})`);
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) main();

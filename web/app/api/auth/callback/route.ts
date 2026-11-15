@@ -1,5 +1,6 @@
 import { exchangeCode } from "@/lib/auth/gotrue";
 import { readGotrueConfig } from "@/lib/auth/gotrueConfig";
+import { signupErrorRedirect } from "@/lib/auth/authRedirects";
 import { notFound, redirectTo } from "@/lib/auth/routeHelpers";
 import { clearVerifier, readVerifier, writeSession } from "@/lib/auth/session";
 import { authUnavailableResponse, checkAuthAgreement } from "@/lib/authAgreement";
@@ -9,8 +10,6 @@ import { postToBackend } from "@/lib/backend";
 export const dynamic = "force-dynamic";
 
 const MAX_CODE_LENGTH = 512;
-const FAILED = "/signup?error=failed";
-const EXPIRED = "/signup?error=expired";
 const MIGRATION_FAILED = "/?migration=failed";
 const MIGRATE_PATH = "/account/migrate";
 
@@ -74,23 +73,23 @@ export async function GET(request: Request): Promise<Response> {
   // A missing verifier is a stale tab or a CSRF attempt: handled alike.
   if (!code || code.length > MAX_CODE_LENGTH || !verifier) {
     await clearVerifier();
-    return redirectTo(FAILED);
+    return signupErrorRedirect("failed");
   }
 
   const outcome = await exchange(code, verifier);
   // The verifier is single-use whatever happened, so clear it on every path.
   // (Writes only below: the cookie jar cannot be read back in this request.)
   await clearVerifier();
-  if (outcome.kind === "expired") return redirectTo(EXPIRED);
+  if (outcome.kind === "expired") return signupErrorRedirect("expired");
   if (outcome.kind !== "session") {
     console.error("[Auth] code exchange failed:", outcome.detail);
-    return redirectTo(FAILED);
+    return signupErrorRedirect("failed");
   }
   try {
     await writeSession(outcome);
   } catch (error) {
     console.error("[Auth] could not store session", error instanceof Error ? error.message : "unknown");
-    return redirectTo(FAILED);
+    return signupErrorRedirect("failed");
   }
   const migrated = await migrateAnonymousMaterial(
     outcome.accessToken,

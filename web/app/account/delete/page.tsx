@@ -3,7 +3,7 @@ import AuthHelplineBlock from '@/components/AuthHelplineBlock'
 import { DELETE_CONFIRMATION_WORD } from '@/lib/auth/deleteConfirmation'
 import { readSession } from '@/lib/auth/session'
 import { AUTH_ENABLED } from '@/lib/authMode'
-import { getStrings } from '@/lib/strings'
+import { getStrings, type StringKey } from '@/lib/strings'
 
 // Depends on the session cookie and the query string.
 export const dynamic = 'force-dynamic'
@@ -11,6 +11,15 @@ export const dynamic = 'force-dynamic'
 const DELETE_ENDPOINT = '/api/auth/delete-account'
 
 type SearchParams = Record<string, string | string[] | undefined>
+
+/** Which sentence each known `?error=` code speaks. Anything else is `failed`. */
+const ERROR_COPY: Readonly<Record<string, StringKey>> = {
+  confirmation_required: 'accountDeleteConfirmationRequired',
+  failed: 'accountDeleteFailed',
+  too_large: 'accountDeleteTooLarge',
+  conflict: 'accountDeleteConflict',
+}
+const GENERIC_ERROR_COPY: StringKey = 'accountDeleteFailed'
 
 function firstValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value
@@ -21,7 +30,11 @@ function firstValue(value: string | string[] | undefined): string | undefined {
  * not be erased BEFORE the form, then asks for a typed word: a mis-tap cannot
  * satisfy it. A real form post (no JavaScript needed); the route checks the
  * word server-side and redirects to `/?account=deleted&identity=...`.
- * Signed-out visitors are sent to sign in, since there is nothing to delete.
+ * A refused form post comes back as `?error=<code>`: each known code renders its
+ * localised copy in an alert, an unknown code renders the generic failure, and
+ * the code is never echoed. Signed-out visitors are sent to `/signup`, since
+ * there is nothing to delete; signing in returns them to `/` (no `next=`
+ * parameter, so no open-redirect surface).
  */
 export default async function DeleteAccountPage({ searchParams }: { searchParams: Promise<SearchParams> }) {
   if (!AUTH_ENABLED) notFound()
@@ -31,11 +44,23 @@ export default async function DeleteAccountPage({ searchParams }: { searchParams
     redirect(language === 'hi' ? '/signup?language=hi' : '/signup')
   }
   const strings = getStrings(language)
+  const errorCode = firstValue(params.error)
+  const errorKey =
+    errorCode === undefined
+      ? null
+      : Object.hasOwn(ERROR_COPY, errorCode)
+        ? ERROR_COPY[errorCode]
+        : GENERIC_ERROR_COPY
   const word = DELETE_CONFIRMATION_WORD[language]
 
   return (
     <main lang={language} className="mx-auto w-full max-w-xl px-4 py-8">
       <h1 className="text-2xl font-bold text-brand-ink">{strings.deleteAccountHeading}</h1>
+      {errorKey !== null && (
+        <p role="alert" className="mt-4 rounded-xl border-2 border-paper-edge bg-paper p-4 text-base leading-relaxed text-ink">
+          {strings[errorKey]}
+        </p>
+      )}
       <ul className="mt-4 flex list-disc flex-col gap-2 pl-5 text-base leading-relaxed text-ink">
         <li>{strings.deleteAccountWillErase}</li>
         <li>{strings.deleteAccountLogKept}</li>

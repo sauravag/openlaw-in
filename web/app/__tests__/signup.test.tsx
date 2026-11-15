@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getFallbackHelplineSet } from '@/lib/fallbackHelplines'
 import { getStrings } from '@/lib/strings'
+import { expectNoEnglishStrings } from '@/test-utils/noEnglish'
 
 const mode = vi.hoisted(() => ({ enabled: true }))
 vi.mock('@/lib/authMode', () => ({
@@ -79,10 +80,18 @@ describe('/signup', () => {
     expect(screen.queryByText(getStrings('en').authLinkSent)).toBeNull()
   })
 
+  it.each(['sent', 'error'] as const)('renders the Hindi %s state with no English string', async (state) => {
+    const params: Record<string, string> = state === 'sent' ? { sent: '1', language: 'hi' } : { error: 'rate_limited', language: 'hi' }
+    const { container } = await renderPage(params)
+
+    expectNoEnglishStrings(container.textContent ?? '')
+  })
+
   it('renders Hindi with a Hindi lang attribute and no English dictionary copy', async () => {
     const { container } = await renderPage({ language: 'hi' })
 
     expect(container.querySelector('main')).toHaveAttribute('lang', 'hi')
+    expectNoEnglishStrings(container.textContent ?? '')
     expect(container.innerHTML).not.toContain(getStrings('en').signInIntro)
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(getStrings('hi').signInHeading)
   })
@@ -90,6 +99,8 @@ describe('/signup', () => {
   it('is a 404 in Mode A', async () => {
     mode.enabled = false
 
-    await expect(SignupPage({ searchParams: Promise.resolve({}) })).rejects.toThrow()
+    await expect(SignupPage({ searchParams: Promise.resolve({}) })).rejects.toMatchObject({
+      digest: 'NEXT_HTTP_ERROR_FALLBACK;404',
+    })
   })
 })

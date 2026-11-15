@@ -3,6 +3,7 @@ import type { ReactElement } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DELETE_CONFIRMATION_WORD, isDeleteConfirmed } from '@/lib/auth/deleteConfirmation'
 import { getStrings } from '@/lib/strings'
+import { expectNoEnglishStrings } from '@/test-utils/noEnglish'
 
 const mode = vi.hoisted(() => ({ enabled: true }))
 vi.mock('@/lib/authMode', () => ({
@@ -73,20 +74,65 @@ describe('/account/delete', () => {
   it('renders Hindi copy with no English dictionary sentence', async () => {
     const { container } = await renderPage({ language: 'hi' })
 
-    expect(container.innerHTML).not.toContain(getStrings('en').deleteAccountWillErase)
+    expectNoEnglishStrings(container.textContent ?? '')
     expect(screen.getByRole('button')).toHaveTextContent(getStrings('hi').deleteAccountSubmit)
   })
 
-  it('sends a signed-out visitor to sign in', async () => {
+  it.each([
+    [{}, '/signup'],
+    [{ language: 'hi' }, '/signup?language=hi'],
+  ])('sends a signed-out visitor (%j) to %s', async (params, location) => {
     readSession.mockResolvedValue(null)
 
-    await expect(DeleteAccountPage({ searchParams: Promise.resolve({}) })).rejects.toThrow()
+    await expect(
+      DeleteAccountPage({ searchParams: Promise.resolve(params) }),
+    ).rejects.toMatchObject({ digest: expect.stringContaining(`NEXT_REDIRECT;replace;${location};`) })
+  })
+
+  it.each([
+    ['confirmation_required', 'accountDeleteConfirmationRequired'],
+    ['failed', 'accountDeleteFailed'],
+    ['too_large', 'accountDeleteTooLarge'],
+    ['conflict', 'accountDeleteConflict'],
+  ] as const)('renders the localised copy for ?error=%s, with helplines and the form', async (code, key) => {
+    for (const language of ['en', 'hi'] as const) {
+      const { container, unmount } = await renderPage({ error: code, language })
+
+      expect(screen.getByRole('alert')).toHaveTextContent(getStrings(language)[key])
+      expect(container.querySelector('form')).not.toBeNull()
+      expect(screen.getByRole('link', { name: /112/ })).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it.each(['<script>alert(1)</script>', 'constructor', '__proto__', 'nonsense'])(
+    'renders the generic failure for unknown code %s and never echoes it',
+    async (code) => {
+      const { container } = await renderPage({ error: code })
+
+      expect(screen.getByRole('alert')).toHaveTextContent(getStrings('en').accountDeleteFailed)
+      expect(container.innerHTML).not.toContain(code)
+    },
+  )
+
+  it('renders no alert without an error code', async () => {
+    await renderPage()
+
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('renders a Hindi error with no English string', async () => {
+    const { container } = await renderPage({ error: 'conflict', language: 'hi' })
+
+    expectNoEnglishStrings(container.textContent ?? '')
   })
 
   it('is a 404 in Mode A and never reads the session', async () => {
     mode.enabled = false
 
-    await expect(DeleteAccountPage({ searchParams: Promise.resolve({}) })).rejects.toThrow()
+    await expect(DeleteAccountPage({ searchParams: Promise.resolve({}) })).rejects.toMatchObject({
+      digest: 'NEXT_HTTP_ERROR_FALLBACK;404',
+    })
     expect(readSession).not.toHaveBeenCalled()
   })
 })

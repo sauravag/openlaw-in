@@ -165,6 +165,11 @@ export interface UIStrings {
   deleteAccountCancel: string;
 }
 
+/** The `UIStrings` keys whose value is a plain sentence (not a formatter function). */
+export type StringKey = {
+  [K in keyof UIStrings]: UIStrings[K] extends string ? K : never;
+}[keyof UIStrings];
+
 const EN: UIStrings = {
   tagline: "Free answers about Indian law, with the government source attached.",
   intro:

@@ -296,3 +296,129 @@ describe("POST /api/auth/delete-account", () => {
     expect(sets).toHaveLength(0);
   });
 });
+
+describe("POST /api/auth/delete-account (no-JavaScript form post)", () => {
+  function formPost(
+    fields: Record<string, string>,
+    headers: Record<string, string> = SAME_ORIGIN,
+    extra: Record<string, string> = {},
+  ): Request {
+    return new Request("http://localhost:3000/api/auth/delete-account", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", ...headers, ...extra },
+      body: new URLSearchParams(fields),
+    });
+  }
+
+  const location = (response: Response): string | null => response.headers.get("location");
+
+  it("redirects a wrong word to ?error=confirmation_required, calling nothing", async () => {
+    const handler = await load(true);
+
+    const response = await handler(formPost({ confirmation: "yes", language: "en" }));
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/account/delete?error=confirmation_required");
+    expect(backendFetch).not.toHaveBeenCalled();
+  });
+
+  it("carries Hindi through the redirect", async () => {
+    const handler = await load(true);
+
+    const response = await handler(formPost({ confirmation: "yes", language: "hi" }));
+
+    expect(location(response)).toBe("/account/delete?error=confirmation_required&language=hi");
+  });
+
+  it("redirects a cross-site form post to ?error=failed, calling nothing", async () => {
+    const handler = await load(true);
+
+    const response = await handler(
+      formPost({ confirmation: "DELETE" }, { "sec-fetch-site": "cross-site" }),
+    );
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/account/delete?error=failed");
+    expect(backendFetch).not.toHaveBeenCalled();
+  });
+
+  it("redirects an oversized body to ?error=too_large", async () => {
+    const handler = await load(true);
+
+    const response = await handler(
+      formPost({ confirmation: "DELETE" }, SAME_ORIGIN, { "content-length": "999999" }),
+    );
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/account/delete?error=too_large");
+    expect(backendFetch).not.toHaveBeenCalled();
+  });
+
+  it("sends a missing session to /signup", async () => {
+    cookieHeader = "";
+    const handler = await load(true);
+
+    const response = await handler(formPost({ confirmation: "DELETE" }));
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/signup");
+  });
+
+  it("sends a backend 401 to /signup (Hindi kept), keeping the session", async () => {
+    backendFetch.mockImplementation(async () => new Response("{}", { status: 401 }));
+    const handler = await load(true);
+
+    const response = await handler(formPost({ confirmation: "हटाएं", language: "hi" }));
+
+    expect(location(response)).toBe("/signup?language=hi");
+    expect(sessionCleared()).toBe(false);
+  });
+
+  it("redirects a backend 409 to ?error=conflict", async () => {
+    backendFetch.mockImplementation(async () => new Response("{}", { status: 409 }));
+    const handler = await load(true);
+
+    const response = await handler(formPost({ confirmation: "DELETE" }));
+
+    expect(location(response)).toBe("/account/delete?error=conflict");
+    expect(sessionCleared()).toBe(false);
+  });
+
+  it("redirects a backend 5xx to ?error=failed, keeping the session", async () => {
+    backendFetch.mockImplementation(async () => new Response("{}", { status: 500 }));
+    const handler = await load(true);
+
+    const response = await handler(formPost({ confirmation: "DELETE" }));
+
+    expect(location(response)).toBe("/account/delete?error=failed");
+    expect(sessionCleared()).toBe(false);
+  });
+
+  it("redirects an unreachable backend to ?error=failed", async () => {
+    backendFetch.mockImplementation(async () => {
+      throw new Error("down");
+    });
+    const handler = await load(true);
+
+    const response = await handler(formPost({ confirmation: "DELETE" }));
+
+    expect(location(response)).toBe("/account/delete?error=failed");
+  });
+
+  it("keeps the success redirect unchanged", async () => {
+    const handler = await load(true);
+
+    const response = await handler(formPost({ confirmation: "DELETE" }));
+
+    expect(location(response)).toBe("/?account=deleted&identity=removed");
+  });
+
+  it("keeps JSON callers on JSON refusals", async () => {
+    const handler = await load(true);
+
+    const response = await handler(post({ confirmation: "yes" }));
+
+    expect(response.status).toBe(400);
+    expect(location(response)).toBeNull();
+  });
+});

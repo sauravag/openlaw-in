@@ -1,8 +1,9 @@
-import { authRefusal, normalizeLanguage, type AuthLanguage } from "@/lib/auth/authRefusal";
+import { authRefusal, normalizeLanguage, type AuthLanguage, type AuthRefusalKind } from "@/lib/auth/authRefusal";
 import { readBoundedBody } from "@/lib/auth/boundedBody";
 import { isDeleteConfirmed } from "@/lib/auth/deleteConfirmation";
 import { revokeSession } from "@/lib/auth/gotrue";
 import { readGotrueConfig } from "@/lib/auth/gotrueConfig";
+import { accountDeleteErrorRedirect, signupRedirect, type AccountDeleteErrorCode } from "@/lib/auth/authRedirects";
 import { notFound, redirectTo } from "@/lib/auth/routeHelpers";
 import { clearSession, readSession } from "@/lib/auth/session";
 import { AUTH_ENABLED } from "@/lib/authMode";
@@ -45,6 +46,28 @@ function parseInput(text: string, contentType: string): DeleteInput | null {
   }
 }
 
+type Refuse = (
+  kind: DeleteRefusalKind,
+  language: AuthLanguage,
+  status: number,
+  headers?: Record<string, string>,
+) => Response;
+
+function isFormPost(request: Request): boolean {
+  return (request.headers.get("content-type") ?? "").includes("application/x-www-form-urlencoded");
+}
+
+type DeleteRefusalKind = Exclude<AuthRefusalKind, "sent" | "invalid_email" | "rate_limited" | "failed" | "too_large">;
+
+/** The `/account/delete?error=` code a refusal kind lands on for a form post. */
+const FORM_CODE: Record<DeleteRefusalKind, AccountDeleteErrorCode | null> = {
+  confirmation_required: "confirmation_required",
+  sign_in_required: null, // goes to /signup, not an error on this page
+  delete_failed: "failed",
+  delete_too_large: "too_large",
+  delete_conflict: "conflict",
+};
+
 function hintLanguage(request: Request): AuthLanguage {
   const accept = request.headers.get("accept-language")?.trim().toLowerCase() ?? "";
   return accept.startsWith("hi") ? "hi" : "en";
@@ -75,23 +98,33 @@ async function revokeSessionBestEffort(accessToken: string): Promise<void> {
 
 export async function POST(request: Request): Promise<Response> {
   if (!AUTH_ENABLED) return notFound();
-  if (isCrossSiteWrite(request)) {
-    return Response.json({ detail: "Forbidden." }, { status: 403 });
-  }
+  const isForm = isFormPost(request);
   const hint = hintLanguage(request);
+  // A form post must land on a page, never on a JSON body.
+  const refuse: Refuse = isForm
+    ? (kind, language) => {
+        const code = FORM_CODE[kind];
+        return code === null ? signupRedirect(language) : accountDeleteErrorRedirect(code, language);
+      }
+    : (kind, language, status, headers) => authRefusal(kind, language, status, headers);
+  if (isCrossSiteWrite(request)) {
+    return isForm
+      ? accountDeleteErrorRedirect("failed", hint)
+      : Response.json({ detail: "Forbidden." }, { status: 403 });
+  }
   const body = await readBoundedBody(request);
-  if (body.kind === "too_large") return authRefusal("delete_too_large", hint, PAYLOAD_TOO_LARGE);
+  if (body.kind === "too_large") return refuse("delete_too_large", hint, PAYLOAD_TOO_LARGE);
   const input =
     body.kind === "ok" ? parseInput(body.text, request.headers.get("content-type") ?? "") : null;
   const language = input?.language ?? hint;
   // Before the session or the backend: a wrong word must cost nothing.
   if (input === null || !isDeleteConfirmed(input.confirmation, language)) {
-    return authRefusal("confirmation_required", language, BAD_REQUEST);
+    return refuse("confirmation_required", language, BAD_REQUEST);
   }
 
   const session = await readSession();
   if (!session) {
-    return authRefusal("sign_in_required", language, UNAUTHORIZED, BEARER_CHALLENGE);
+    return refuse("sign_in_required", language, UNAUTHORIZED, BEARER_CHALLENGE);
   }
 
   let upstream: Response;
@@ -102,18 +135,18 @@ export async function POST(request: Request): Promise<Response> {
     });
   } catch (error) {
     console.error("[Auth] account deletion call failed", error instanceof Error ? error.name : "unknown");
-    return authRefusal("delete_failed", language, BAD_GATEWAY);
+    return refuse("delete_failed", language, BAD_GATEWAY);
   }
   if (upstream.status === UNAUTHORIZED) {
-    return authRefusal("sign_in_required", language, UNAUTHORIZED, BEARER_CHALLENGE);
+    return refuse("sign_in_required", language, UNAUTHORIZED, BEARER_CHALLENGE);
   }
   if (upstream.status === CONFLICT) {
-    return authRefusal("delete_conflict", language, CONFLICT);
+    return refuse("delete_conflict", language, CONFLICT);
   }
   if (!upstream.ok) {
     // The session stays: the person must be able to retry.
     console.error("[Auth] account deletion refused, status", upstream.status);
-    return authRefusal("delete_failed", language, BAD_GATEWAY);
+    return refuse("delete_failed", language, BAD_GATEWAY);
   }
 
   const removed = await identityRemoved(upstream);

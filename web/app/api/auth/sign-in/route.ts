@@ -5,7 +5,7 @@ import { readGotrueConfig } from "@/lib/auth/gotrueConfig";
 import { challengeFor, createVerifier } from "@/lib/auth/pkce";
 import { clientKey, signInLimiter } from "@/lib/auth/rateLimit";
 import { notFound } from "@/lib/auth/routeHelpers";
-import { signupErrorRedirect, signupSentRedirect, type SignupErrorCode } from "@/lib/auth/signupRedirect";
+import { signupErrorRedirect, signupSentRedirect, type SignupErrorCode } from "@/lib/auth/authRedirects";
 import { writeVerifier, clearVerifier } from "@/lib/auth/session";
 import { authUnavailableResponse, checkAuthAgreement } from "@/lib/authAgreement";
 import { AUTH_ENABLED } from "@/lib/authMode";

@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getStrings } from '@/lib/strings'
+import { expectNoEnglishStrings } from '@/test-utils/noEnglish'
 
 const mode = vi.hoisted(() => ({ enabled: true }))
 vi.mock('@/lib/authMode', () => ({
@@ -42,7 +43,7 @@ describe('AccountBar', () => {
   })
 
   it('renders Hindi copy and carries the language into its links', () => {
-    render(<AccountBar signedIn email="person@example.com" language="hi" />)
+    const { container } = render(<AccountBar signedIn email="person@example.com" language="hi" />)
 
     const hi = getStrings('hi')
     expect(screen.getByRole('button', { name: hi.signOutButton })).toBeInTheDocument()
@@ -50,7 +51,15 @@ describe('AccountBar', () => {
       'href',
       '/account/delete?language=hi',
     )
-    expect(screen.queryByText('Sign out')).toBeNull()
+    expectNoEnglishStrings(container.textContent ?? '')
+    expect(container.textContent).not.toContain('Signed in as')
+  })
+
+  it('renders the signed-out link in Hindi with no English string', () => {
+    const { container } = render(<AccountBar signedIn={false} email={null} language="hi" />)
+
+    expectNoEnglishStrings(container.textContent ?? '')
+    expect(screen.getByRole('link')).toHaveAttribute('href', '/signup?language=hi')
   })
 
   it('renders nothing at all in Mode A, signed in or out', () => {

@@ -2,7 +2,7 @@ import { notFound } from 'next/navigation'
 import AuthHelplineBlock from '@/components/AuthHelplineBlock'
 import SignInForm from '@/components/SignInForm'
 import { AUTH_ENABLED } from '@/lib/authMode'
-import { getStrings, type UIStrings } from '@/lib/strings'
+import { getStrings, type StringKey } from '@/lib/strings'
 
 // Reads the query string on every request.
 export const dynamic = 'force-dynamic'
@@ -10,7 +10,7 @@ export const dynamic = 'force-dynamic'
 type SearchParams = Record<string, string | string[] | undefined>
 
 /** Which sentence each known `?error=` code speaks. Anything else is `failed`. */
-const ERROR_COPY: Readonly<Record<string, keyof UIStrings>> = {
+const ERROR_COPY: Readonly<Record<string, StringKey>> = {
   expired: 'authLinkExpired',
   failed: 'authFailed',
   rate_limited: 'authRateLimited',
@@ -18,14 +18,14 @@ const ERROR_COPY: Readonly<Record<string, keyof UIStrings>> = {
   too_large: 'authRequestTooLarge',
   unavailable: 'authUnavailable',
 }
-const GENERIC_ERROR_COPY: keyof UIStrings = 'authFailed'
+const GENERIC_ERROR_COPY: StringKey = 'authFailed'
 
 function firstValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value
 }
 
 /** The sentence for `code`; an unknown code never reaches the page. */
-function errorCopy(code: string): keyof UIStrings {
+function errorCopy(code: string): StringKey {
   return Object.hasOwn(ERROR_COPY, code) ? ERROR_COPY[code] : GENERIC_ERROR_COPY
 }
 
@@ -53,7 +53,7 @@ export default async function SignupPage({ searchParams }: { searchParams: Promi
       <h1 className="text-2xl font-bold text-brand-ink">{strings.signInHeading}</h1>
       {message !== null && (
         <p role={errorCode !== undefined ? 'alert' : 'status'} className="mt-4 rounded-xl border-2 border-paper-edge bg-paper p-4 text-base leading-relaxed text-ink">
-          {message as string}
+          {message}
         </p>
       )}
       {!isSent && (

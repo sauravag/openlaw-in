@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getStrings } from '@/lib/strings'
+import { expectNoEnglishStrings } from '@/test-utils/noEnglish'
 
 const mode = vi.hoisted(() => ({ enabled: true }))
 vi.mock('@/lib/authMode', () => ({
@@ -44,15 +45,13 @@ describe('SignInForm', () => {
     expect(hidden).toHaveAttribute('value', language)
   })
 
-  it('renders no English string from the dictionary in the Hindi tree', () => {
+  it('renders no English dictionary string in the Hindi tree', () => {
     const { container } = render(<SignInForm language="hi" />)
-    const en = getStrings('en')
 
-    const text = container.innerHTML
-    for (const english of [en.signInEmailLabel, en.signInSubmit]) {
-      expect(text).not.toContain(english)
-    }
+    expectNoEnglishStrings(container.textContent ?? '')
+    expectNoEnglishStrings(container.innerHTML)
     expect(screen.getByRole('button')).toHaveTextContent(getStrings('hi').signInSubmit)
+    expect(screen.getByPlaceholderText(getStrings('hi').signInEmailPlaceholder)).toBeInTheDocument()
   })
 
   it('renders nothing in Mode A', () => {
