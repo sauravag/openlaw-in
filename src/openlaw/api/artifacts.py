@@ -143,6 +143,20 @@ _RETENTION_AUTHENTICATED: dict[str, str] = {
 }
 
 
+def _require_uuid(value: str, field: str) -> None:
+    """Refuse a malformed id with the same 404 an unknown one gets.
+
+    `validated_uuid` raises a bare `ValueError`, which a route turns into an
+    unhandled 500 (found live: `DELETE /documents/None`). A malformed id
+    names nothing the caller owns, so it gets exactly the answer a
+    well-formed id the caller does not own gets -- no extra signal.
+    """
+    try:
+        validated_uuid(value, field)
+    except ValueError:
+        raise_refusal("not_found")
+
+
 def upload_quota_cost(page_count: int) -> int:
     """Return what a `page_count`-page upload costs in quota units.
 
@@ -296,7 +310,7 @@ def _resolve_conversation(
     with session_factory() as session:
         if conversation_id is None:
             return create_conversation(session, owner, settings).id
-        validated_uuid(conversation_id, "conversation_id")
+        _require_uuid(conversation_id, "conversation_id")
         conversation = find_owned_conversation(session, conversation_id, owner)
         if conversation is None:
             raise_refusal("not_found", "", None, language)
@@ -432,7 +446,7 @@ def remove_document(
     """
     settings: Settings = request.app.state.settings
     session_factory: Callable = request.app.state.session_factory
-    validated_uuid(document_id, "document_id")
+    _require_uuid(document_id, "document_id")
 
     owner = caller_owner(request, settings, session_factory, authorization)
     with session_factory() as session:
@@ -471,7 +485,7 @@ def read_conversation(
     """
     settings: Settings = request.app.state.settings
     session_factory: Callable = request.app.state.session_factory
-    validated_uuid(conversation_id, "conversation_id")
+    _require_uuid(conversation_id, "conversation_id")
 
     owner = caller_owner(request, settings, session_factory, authorization)
     with session_factory() as session:
@@ -613,7 +627,7 @@ def remove_conversation(
     """
     settings: Settings = request.app.state.settings
     session_factory: Callable = request.app.state.session_factory
-    validated_uuid(conversation_id, "conversation_id")
+    _require_uuid(conversation_id, "conversation_id")
 
     owner = caller_owner(request, settings, session_factory, authorization)
     with session_factory() as session:

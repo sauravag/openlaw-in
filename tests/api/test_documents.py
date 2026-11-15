@@ -154,6 +154,36 @@ def test_an_unknown_document_id_is_a_404_not_a_500(client: TestClient) -> None:
     _assert_carries_help(response.json())
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("delete", "/documents/None"),
+        ("delete", "/documents/not-a-uuid"),
+        ("get", "/conversations/not-a-uuid"),
+        ("delete", "/conversations/not-a-uuid"),
+    ],
+)
+def test_a_malformed_path_id_is_a_404_not_a_500(
+    client: TestClient, method: str, path: str
+) -> None:
+    """Found live: `DELETE /documents/None` raised an unhandled ValueError.
+    A malformed id names nothing the caller owns -- the same 404 an unknown
+    one gets, with help."""
+    response = getattr(client, method)(path)
+
+    assert response.status_code == 404
+    _assert_carries_help(response.json())
+
+
+def test_a_malformed_conversation_id_on_upload_is_a_404(tmp_path: Path) -> None:
+    client = build_client(tmp_path)
+
+    response = upload(client, conversation_id="not-a-uuid", headers=bearer())
+
+    assert response.status_code == 404
+    _assert_carries_help(response.json())
+
+
 def test_a_non_uuid_document_id_is_rejected_at_the_boundary(client: TestClient) -> None:
     response = client.post(
         "/ask", json={"question": "hello?", "document_ids": ["../../etc/passwd"]}
