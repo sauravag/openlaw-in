@@ -75,6 +75,7 @@ ROUTE_SURFACE = [
     ("POST", "/ask", True, True),
     ("POST", "/documents", True, True),
     ("DELETE", "/documents/does-not-exist", True, True),
+    ("GET", "/conversations", False, True),
     ("GET", "/conversations/does-not-exist", True, True),
     ("DELETE", "/conversations/does-not-exist", True, True),
 ]

@@ -38,6 +38,10 @@ vi.mock("@/lib/api", async () => {
     deleteDocument: vi.fn(),
     deleteConversation: vi.fn(),
     readConversation: vi.fn(),
+    listConversations: vi.fn(async () => ({
+      kind: "list" as const,
+      data: { conversations: [], next_offset: null },
+    })),
   };
 });
 

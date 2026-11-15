@@ -140,6 +140,7 @@ export interface UIStrings {
   signInRequired: string;
   accountDeleteSignInRequired: string;
   accountEmailConflict: string;
+  conversationsSignInRequired: string;
   authInvalidEmail: string;
   authRequestTooLarge: string;
   accountDeleteConfirmationRequired: string;
@@ -165,6 +166,13 @@ export interface UIStrings {
   deleteAccountInstruction: (word: string) => string;
   deleteAccountSubmit: string;
   deleteAccountCancel: string;
+  /** "Your conversations" (final review H1b): a signed-in owner's own list. */
+  yourConversationsHeading: string;
+  conversationListItem: (startedOn: string, documentCount: number) => string;
+  openConversationButton: string;
+  currentConversationLabel: string;
+  /** Final review H1a: a kept conversation the lapsed session cannot show. */
+  sessionEndedNotice: string;
 }
 
 /** The `UIStrings` keys whose value is a plain sentence (not a formatter function). */
@@ -270,6 +278,7 @@ const EN: UIStrings = {
   signInRequired: "We could not confirm your sign-in, so your earlier conversations were not moved to your account. Please sign in again.",
   accountDeleteSignInRequired: "We could not confirm your sign-in, so nothing was deleted. Please sign in again.",
   accountEmailConflict: "This email is already linked to another account, so your earlier conversations were not moved. They are still in this browser until they expire.",
+  conversationsSignInRequired: "Sign in to see your conversations. You can still ask your question without an account.",
   authInvalidEmail: "That does not look like an email address. Please check it and try again.",
   authRequestTooLarge: "That request was too large. Please enter just your email address.",
   accountDeleteConfirmationRequired: "Your account was not deleted. To confirm, type the word shown (DELETE) exactly.",
@@ -292,6 +301,12 @@ const EN: UIStrings = {
   deleteAccountInstruction: (word) => `To confirm, type the word ${word} below.`,
   deleteAccountSubmit: "Delete my account permanently",
   deleteAccountCancel: "No, keep my account",
+  yourConversationsHeading: "Your conversations",
+  conversationListItem: (startedOn, documentCount) =>
+    `Started ${startedOn} \u00b7 ${documentCount === 1 ? "1 document" : `${documentCount} documents`}`,
+  openConversationButton: "Open",
+  currentConversationLabel: "Open now",
+  sessionEndedNotice: "Your session has ended, so this conversation is not shown. Sign in to see it again.",
 };
 
 const HI: UIStrings = {
@@ -392,6 +407,7 @@ const HI: UIStrings = {
   signInRequired: "हम आपके साइन इन की पुष्टि नहीं कर सके, इसलिए आपकी पहले की बातचीत आपके खाते में नहीं ले जाई गई। कृपया फिर से साइन इन करें।",
   accountDeleteSignInRequired: "हम आपके साइन इन की पुष्टि नहीं कर सके, इसलिए कुछ भी नहीं हटाया गया। कृपया फिर से साइन इन करें।",
   accountEmailConflict: "यह ईमेल पहले से किसी दूसरे खाते से जुड़ा है, इसलिए आपकी पहले की बातचीत नहीं ले जाई गई। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि समाप्त नहीं हो जाती।",
+  conversationsSignInRequired: "अपनी बातचीत देखने के लिए साइन इन करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
   authInvalidEmail: "यह ईमेल पता सही नहीं लग रहा। कृपया जांच कर दोबारा कोशिश करें।",
   authRequestTooLarge: "यह अनुरोध बहुत बड़ा था। कृपया केवल अपना ईमेल पता दर्ज करें।",
   accountDeleteConfirmationRequired: "आपका खाता नहीं हटाया गया। पुष्टि के लिए दिखाया गया शब्द (हटाएं) ठीक वैसे ही लिखें।",
@@ -414,6 +430,12 @@ const HI: UIStrings = {
   deleteAccountInstruction: (word) => `पुष्टि के लिए नीचे शब्द ${word} लिखें।`,
   deleteAccountSubmit: "मेरा खाता हमेशा के लिए हटाएं",
   deleteAccountCancel: "नहीं, मेरा खाता रहने दें",
+  yourConversationsHeading: "आपकी बातचीत",
+  conversationListItem: (startedOn, documentCount) =>
+    `${startedOn} को शुरू \u00b7 ${documentCount} दस्तावेज़`,
+  openConversationButton: "खोलें",
+  currentConversationLabel: "अभी खुली है",
+  sessionEndedNotice: "आपका सत्र समाप्त हो गया है, इसलिए यह बातचीत नहीं दिख रही। इसे फिर से देखने के लिए साइन इन करें।",
 };
 
 export function getStrings(language: Language["code"] | string): UIStrings {

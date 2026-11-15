@@ -28,6 +28,17 @@ import type {
  * should not outlive the browser tab on a shared or borrowed phone. */
 export const CONVERSATION_STORAGE_KEY = 'openlaw.conversation_id'
 
+/** Set beside the id when it was stored while signed in (Mode B): such a
+ * conversation is account-owned and "kept", so a failed read after the session
+ * lapsed must not throw the pointer away (final review H1a). */
+export const CONVERSATION_KEPT_STORAGE_KEY = 'openlaw.conversation_kept'
+
+/** The remembered conversation, and whether it was stored while signed in. */
+export interface StoredConversation {
+  id: string
+  storedWhileSignedIn: boolean
+}
+
 /**
  * What came back for one turn.
  *
@@ -130,9 +141,24 @@ export function readStoredConversationId(): string | null {
   }
 }
 
-export function storeConversationId(conversationId: string): void {
+/** The stored pointer with its signed-in flag; an id with no flag (stored by
+ * an older build) reads as anonymous, the conservative answer. */
+export function readStoredConversation(): StoredConversation | null {
+  const id = readStoredConversationId()
+  if (id === null) return null
+  try {
+    const kept = window.sessionStorage.getItem(CONVERSATION_KEPT_STORAGE_KEY) === '1'
+    return { id, storedWhileSignedIn: kept }
+  } catch {
+    return { id, storedWhileSignedIn: false }
+  }
+}
+
+export function storeConversationId(conversationId: string, storedWhileSignedIn = false): void {
   try {
     window.sessionStorage.setItem(CONVERSATION_STORAGE_KEY, conversationId)
+    if (storedWhileSignedIn) window.sessionStorage.setItem(CONVERSATION_KEPT_STORAGE_KEY, '1')
+    else window.sessionStorage.removeItem(CONVERSATION_KEPT_STORAGE_KEY)
   } catch {
     // Not being able to remember the id across a reload is a degraded
     // experience, never a failure worth telling the reader about.
@@ -142,6 +168,7 @@ export function storeConversationId(conversationId: string): void {
 export function forgetStoredConversationId(): void {
   try {
     window.sessionStorage.removeItem(CONVERSATION_STORAGE_KEY)
+    window.sessionStorage.removeItem(CONVERSATION_KEPT_STORAGE_KEY)
   } catch {
     // As above.
   }

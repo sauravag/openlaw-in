@@ -288,6 +288,19 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
             "कृपया फिर से साइन इन करें।"
         ),
     },
+    # `GET /conversations` (Mode B) without a verified bearer. Listing "your
+    # conversations" has no anonymous meaning, so the person is told to sign
+    # in, and that asking a question still works without one.
+    "conversations_sign_in_required": {
+        "en": (
+            "Sign in to see your conversations. You can still ask your "
+            "question without an account."
+        ),
+        "hi": (
+            "अपनी बातचीत देखने के लिए साइन इन करें। आप बिना खाते के अपना सवाल "
+            "अब भी पूछ सकते हैं।"
+        ),
+    },
     # `POST /account/migrate` when the verified email already belongs to a
     # different account. Signing in again cannot help, so this must not say so;
     # the earlier material is still in this browser until it expires.
@@ -408,6 +421,7 @@ REFUSAL_STATUS: dict[str, int] = {
     "sign_in_required": 401,
     "account_email_conflict": 409,
     "account_delete_sign_in_required": 401,
+    "conversations_sign_in_required": 401,
     # Task 12. Statuses mirror what the frontend's analogous responses use;
     # the two success-shaped keys (`auth_link_sent`, `account_deleted`) are
     # carried in a 2xx body, not raised.

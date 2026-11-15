@@ -38,6 +38,8 @@ EXISTING_AUTH_KEYS = (
     "sign_in_required",
     "account_delete_sign_in_required",
     "account_email_conflict",
+    # Final review H1b: `GET /conversations` without a verified bearer.
+    "conversations_sign_in_required",
 )
 ALL_KEYS = BRIEF_KEYS + EXISTING_AUTH_KEYS
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")

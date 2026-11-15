@@ -101,6 +101,9 @@ describe("proxy surface is enumerated", () => {
     "api/openlaw/ask/route.ts",
     "api/openlaw/auth-status/route.ts",
     "api/openlaw/conversations/[conversationId]/route.ts",
+    // Final review H1b: GET-only list of a signed-in owner's conversations
+    // (a bare 404 in Mode A).
+    "api/openlaw/conversations/route.ts",
     "api/openlaw/documents/[documentId]/route.ts",
     "api/openlaw/documents/route.ts",
   ];

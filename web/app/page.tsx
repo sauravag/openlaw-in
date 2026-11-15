@@ -6,21 +6,22 @@ import ConversationThread from "@/components/ConversationThread";
 import CrisisAlert from "@/components/CrisisAlert";
 import DocumentList from "@/components/DocumentList";
 import DocumentUpload from "@/components/DocumentUpload";
-import HelplineList from "@/components/HelplineList";
 import LanguageSelector from "@/components/LanguageSelector";
 import RedirectNotice from "@/components/RedirectNotice";
 import RefusalNotice from "@/components/RefusalNotice";
+import SessionEndedNotice from "@/components/SessionEndedNotice";
+import StandingHelplines from "@/components/StandingHelplines";
 import WelcomeGuide from "@/components/WelcomeGuide";
+import YourConversations from "@/components/YourConversations";
 import { AUTH_ENABLED } from "@/lib/authMode";
 import { askQuestion, readConversation, deleteConversation } from "@/lib/api";
-import { getFallbackHelplineSet } from "@/lib/fallbackHelplines";
-import { DEFAULT_LANGUAGE, LANGUAGES, type Language } from "@/lib/languages";
+import { DEFAULT_LANGUAGE, type Language } from "@/lib/languages";
+import { useRestoreFromQueryString, useScrollIntoViewOnChange } from "@/lib/pageEffects";
 import { getStrings } from "@/lib/strings";
 import {
   appendTurn,
   forgetStoredConversationId,
   latestTurn,
-  readStoredConversationId,
   replayedTurn,
   storeConversationId,
   turnCrisis,
@@ -32,8 +33,10 @@ import {
   type Retention,
   type AttachedDocument,
 } from "@/lib/documents";
+import { useConversationList } from "@/lib/useConversationList";
 import { useDocuments } from "@/lib/useDocuments";
 import { useRedirectNotice } from "@/lib/useRedirectNotice";
+import { useRestoreConversation } from "@/lib/useRestoreConversation";
 import { useSession } from "@/lib/useSession";
 
 type Status = "idle" | "loading" | "error";
@@ -44,114 +47,6 @@ const QUESTION_MAX_LENGTH = 2000;
  * line up on it, and no line of legal prose runs wider than the eye can
  * track comfortably on a phone. */
 const COLUMN = "mx-auto w-full max-w-xl px-4";
-
-function isLanguageCode(value: string | null): value is Language["code"] {
-  return LANGUAGES.some((language) => language.code === value);
-}
-
-/**
- * Restore `question`/`language` from the URL query string on mount.
- *
- * Task 6 review, M5: the form's `method="get"` fallback (below) means a
- * submit that happens before React has hydrated -- or with JavaScript off
- * entirely -- performs a real browser GET to `?question=...&language=...`
- * rather than silently discarding what was typed. This is the other half of
- * that fallback: on load, pull those values back out of the URL so the
- * question is not lost even though it was never actually answered. Runs
- * once, client-side only (`window` is unavailable during the server
- * render), and clears the query string afterwards so a page refresh does
- * not keep re-populating the form from a stale URL.
- */
-function useRestoreFromQueryString(
-  setQuestion: (value: string) => void,
-  setLanguage: (value: Language["code"]) => void,
-) {
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const restoredQuestion = params.get("question");
-    const restoredLanguage = params.get("language");
-    if (!restoredQuestion && !restoredLanguage) return;
-
-    if (restoredQuestion) setQuestion(restoredQuestion);
-    if (isLanguageCode(restoredLanguage)) setLanguage(restoredLanguage);
-    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
-    // Runs once on mount only -- setQuestion/setLanguage are stable setters.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-}
-
-/**
- * Bring back the conversation this browser tab was in the middle of.
- *
- * The id lives in `sessionStorage` (see `lib/thread.ts` for why not
- * `localStorage`), and the turns themselves come from
- * `GET /conversations/{id}`, never from storage -- a transcript cached in the
- * browser could outlive the deletion of the real one, and the authoritative
- * answer to "does this still exist, and is it yours?" belongs to the server.
- *
- * A refusal is the ORDINARY case, not an error: an anonymous conversation
- * expires after `Settings.anonymous_upload_ttl_hours`, and the cookie that
- * identified its owner can be cleared at any time. The stored id is forgotten
- * and the page simply starts fresh; nothing is put in front of the reader,
- * who did nothing wrong.
- */
-function useRestoreConversation(
-  language: Language["code"],
-  onRestored: (
-    conversationId: string,
-    turns: ThreadTurn[],
-    documents: AttachedDocument[],
-  ) => void,
-) {
-  useEffect(() => {
-    const storedId = readStoredConversationId();
-    if (storedId === null) return;
-
-    let isStale = false;
-    void readConversation({ conversationId: storedId, language }).then((outcome) => {
-      if (isStale) return;
-      if (outcome.kind !== "conversation") {
-        forgetStoredConversationId();
-        return;
-      }
-      onRestored(
-        outcome.data.conversation_id,
-        outcome.data.turns.map(replayedTurn),
-        (outcome.data.documents ?? []).map(attachedFromConversationCard),
-      );
-    });
-    return () => {
-      isStale = true;
-    };
-    // Runs once on mount: a language change must not re-fetch the thread, and
-    // `onRestored` is a stable closure over setState calls.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-}
-
-/**
- * Scroll and move focus to `ref`'s element whenever `dependency` changes.
- *
- * Task 6 review, H2: requirement 4 is "reachable without scrolling past
- * legal analysis," and DOM order alone does not satisfy that on a phone --
- * the form itself pushes the result ~440-520px down. A sighted user gets no
- * signal that anything appeared unless the viewport actually moves. The
- * element focused is the result wrapper, whose FIRST child is the crisis
- * box whenever there is one, so focus lands above the legal content rather
- * than after it.
- */
-function useScrollIntoViewOnChange(
-  ref: React.RefObject<HTMLElement | null>,
-  dependency: unknown,
-) {
-  useEffect(() => {
-    if (dependency === null || dependency === undefined) return;
-    ref.current?.focus();
-    ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    // `ref` is a stable object; only re-run when the tracked value changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dependency]);
-}
 
 /**
  * The conversation interface (Task 6, extended to a thread by Plan 6 Task 17).
@@ -198,13 +93,18 @@ export default function HomePage() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [isSessionEnded, setIsSessionEnded] = useState(false);
   const strings = getStrings(language);
   const turnCounter = useRef(0);
+  // Must run before `useRestoreFromQueryString`, which may rewrite the URL.
+  const redirectNotice = useRedirectNotice();
+  const session = useSession();
 
-  /** Remember the conversation the server attached this turn or upload to. */
+  /** Remember the conversation the server attached this turn or upload to,
+   * and whether it was stored while signed in (so a later lapse keeps it). */
   function rememberConversation(id: string) {
     setConversationId(id);
-    storeConversationId(id);
+    storeConversationId(id, AUTH_ENABLED && session.signedIn);
   }
 
   const attachments = useDocuments({
@@ -213,9 +113,6 @@ export default function HomePage() {
     onConversationStarted: rememberConversation,
   });
 
-  // Must run before `useRestoreFromQueryString`, which may rewrite the URL.
-  const redirectNotice = useRedirectNotice();
-  const session = useSession();
   // Referenced as `AUTH_ENABLED` directly so Mode A's build folds this to
   // "none" and drops every account branch.
   // Ground truth wins: a document that carries an expiry never sits under a
@@ -240,17 +137,42 @@ export default function HomePage() {
   async function handleFileChosen(file: File) {
     await attachments.attachFile(file, refreshSession);
   }
+  /** Show a conversation the server gave back. The documents are the ones
+   * it says are still attached, so the per-document delete control survives a
+   * reload -- see `ConversationView.documents`. */
+  function showConversation(
+    restoredId: string,
+    restoredTurns: ThreadTurn[],
+    restoredDocuments: AttachedDocument[],
+  ) {
+    setConversationId(restoredId);
+    setTurns(restoredTurns);
+    setIsSessionEnded(false);
+    attachments.restore(restoredDocuments);
+  }
   useRestoreFromQueryString(setQuestion, setLanguage);
-  useRestoreConversation(
-    language,
-    (restoredId, restoredTurns, restoredDocuments) => {
-      setConversationId(restoredId);
-      setTurns(restoredTurns);
-      // The documents the server says are still attached, so the per-document
-      // delete control survives a reload -- see `ConversationView.documents`.
-      attachments.restore(restoredDocuments);
-    },
-  );
+  useRestoreConversation(language, {
+    onRestored: showConversation,
+    onSessionEnded: () => setIsSessionEnded(true),
+    checkSession: refreshSession,
+  });
+  const ownConversations = useConversationList(session.signedIn, language, conversationId);
+
+  /** Open one of the signed-in person's own conversations from the list. */
+  async function handleOpenConversation(id: string) {
+    const outcome = await readConversation({ conversationId: id, language });
+    if (outcome.kind === "refused") {
+      setStatus("error");
+      setErrorMessage(outcome.data.detail);
+      return;
+    }
+    showConversation(
+      outcome.data.conversation_id,
+      outcome.data.turns.map(replayedTurn),
+      (outcome.data.documents ?? []).map(attachedFromConversationCard),
+    );
+    storeConversationId(outcome.data.conversation_id, true);
+  }
 
   // Task 6 review, H3: screen readers must pronounce Hindi content with a
   // Hindi voice, not the `lang="en"` the server-rendered shell starts with.
@@ -373,6 +295,15 @@ export default function HomePage() {
 
       <main className={`${COLUMN} flex flex-1 flex-col gap-8 py-6 sm:py-8`}>
         <RedirectNotice notice={redirectNotice} language={language} />
+        {AUTH_ENABLED && isSessionEnded && <SessionEndedNotice language={language} />}
+        {AUTH_ENABLED && (
+          <YourConversations
+            conversations={ownConversations}
+            currentId={conversationId}
+            language={language}
+            onOpen={(id) => void handleOpenConversation(id)}
+          />
+        )}
 
         {/* What this is, first: a first-time visitor should understand the
          * product before being shown a wall of emergency numbers. Rendered
@@ -399,26 +330,7 @@ export default function HomePage() {
          * `app/__tests__/page.test.tsx`'s coverage of the initial,
          * pre-interaction render.
          */}
-        <section
-          aria-label={strings.helplineHeading}
-          className="rounded-2xl border border-brand-soft bg-brand-soft p-4 sm:p-5"
-        >
-          <h2 className="flex items-center gap-2 text-base font-bold text-brand-ink">
-            <svg
-              aria-hidden="true"
-              viewBox="0 0 20 20"
-              className="h-5 w-5 shrink-0"
-              fill="currentColor"
-            >
-              <path d="M6.6 2.3a1.3 1.3 0 0 0-1.7-.1L3.5 3.4C2.7 4.1 2.5 5.3 3 6.4a19.4 19.4 0 0 0 10.6 10.6c1.1.5 2.3.3 3-.5l1.2-1.4a1.3 1.3 0 0 0-.1-1.7l-2.2-2a1.3 1.3 0 0 0-1.7 0l-1 .8a15.6 15.6 0 0 1-5-5l.8-1a1.3 1.3 0 0 0 0-1.7l-2-2.2Z" />
-            </svg>
-            {strings.helplineHeading}
-          </h2>
-          <p className="mt-1 text-sm text-muted">{strings.helplineNote}</p>
-          <div className="mt-3">
-            <HelplineList helplines={getFallbackHelplineSet(language).helplines} />
-          </div>
-        </section>
+        <StandingHelplines language={language} />
 
         <noscript>
           <p className="rounded-xl border border-line bg-tint p-4 text-sm text-ink">

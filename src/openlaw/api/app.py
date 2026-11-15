@@ -64,6 +64,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from openlaw.api.artifacts import router as artifacts_router
 from openlaw.api.auth_routes import migration_router, router as auth_router
+from openlaw.api.conversation_list import router as conversation_list_router
 from openlaw.api.refusal import crisis_extras, refusal_detail
 from openlaw.api.routes import router
 from openlaw.config import Settings
@@ -208,6 +209,8 @@ def create_app(
     app.include_router(auth_router)
     if settings.auth_enabled:
         app.include_router(migration_router)
+        # "Your conversations" has no meaning without accounts (review H1b).
+        app.include_router(conversation_list_router)
 
     _register_anonymous_token_middleware(app)
     _register_error_handlers(app)

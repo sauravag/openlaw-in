@@ -237,3 +237,19 @@ export interface ConversationViewData {
    * `isConversationView` in `lib/api.ts`. */
   documents?: ConversationDocumentCardData[]
 }
+
+/** One of a signed-in owner's conversations, metadata only. Mirrors
+ * `openlaw.api.conversation_list.ConversationListItem`. */
+export interface ConversationListItemData {
+  id: string
+  created_at: string
+  updated_at: string
+  document_count: number
+}
+
+/** One page of `GET /conversations`. Mirrors
+ * `openlaw.api.conversation_list.ConversationList`. */
+export interface ConversationListData {
+  conversations: ConversationListItemData[]
+  next_offset: number | null
+}
