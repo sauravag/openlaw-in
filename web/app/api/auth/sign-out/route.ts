@@ -1,7 +1,7 @@
 import { revokeSession } from "@/lib/auth/gotrue";
 import { readGotrueConfig } from "@/lib/auth/gotrueConfig";
 import { notFound, redirectTo } from "@/lib/auth/routeHelpers";
-import { clearSession, readSession } from "@/lib/auth/session";
+import { clearAnonymousCookie, clearSession, readSession } from "@/lib/auth/session";
 import { AUTH_ENABLED } from "@/lib/authMode";
 import { isCrossSiteWrite } from "@/lib/csrf";
 
@@ -24,7 +24,9 @@ export async function POST(request: Request): Promise<Response> {
     }
   }
   // Unconditional: a GoTrue outage must not leave someone signed in on a
-  // shared or cybercafe device.
+  // shared or cybercafe device, nor hand the next person this browser's
+  // anonymous identity (final review M3).
   await clearSession();
+  await clearAnonymousCookie();
   return redirectTo("/");
 }

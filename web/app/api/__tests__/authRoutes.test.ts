@@ -833,6 +833,41 @@ describe("POST /api/auth/sign-out", () => {
     expect(sets.find((c) => c.name === "openlaw_session")?.options.maxAge).toBe(0);
   });
 
+  // Final review M3: the next person on a shared device must not inherit
+  // this browser's anonymous identity (and so its anonymous uploads).
+  it.each([
+    ["signed in", () => signedIn],
+    ["with no session", () => ""],
+  ])("expires openlaw_anon_id with the backend's attributes (%s)", async (_label, cookie) => {
+    cookieHeader = `openlaw_anon_id=anon-1; ${cookie()}`;
+    const { signOut } = await load(true);
+
+    await signOut(jsonPost({}));
+
+    const anon = sets.find((c) => c.name === "openlaw_anon_id");
+    expect(anon?.value).toBe("");
+    expect(anon?.options).toMatchObject({ maxAge: 0, httpOnly: true, sameSite: "lax", path: "/", secure: true });
+  });
+
+  it("expires openlaw_anon_id even when revokeSession throws", async () => {
+    cookieHeader = signedIn;
+    revokeSession.mockRejectedValue(new Error("gotrue down"));
+    const { signOut } = await load(true);
+
+    await signOut(jsonPost({}));
+
+    expect(sets.find((c) => c.name === "openlaw_anon_id")?.options.maxAge).toBe(0);
+  });
+
+  it("drops Secure from the expiry only when OPENLAW_COOKIE_SECURE=false, as the backend does", async () => {
+    vi.stubEnv("OPENLAW_COOKIE_SECURE", "false");
+    const { signOut } = await load(true);
+
+    await signOut(jsonPost({}));
+
+    expect(sets.find((c) => c.name === "openlaw_anon_id")?.options.secure).toBe(false);
+  });
+
   it("returns 403 for a cross-site POST and does not sign anyone out", async () => {
     cookieHeader = signedIn;
     const { signOut } = await load(true);

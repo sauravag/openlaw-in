@@ -2,6 +2,8 @@ import "server-only";
 
 import { cookies, headers } from "next/headers";
 
+import { ANON_COOKIE_NAME } from "@/lib/anonCookie";
+
 import {
   readCookieValue,
   PKCE_COOKIE_NAME,
@@ -78,6 +80,18 @@ export async function writeSession(session: StoredSession): Promise<void> {
 export async function clearSession(): Promise<void> {
   const jar = await cookies();
   jar.set(SESSION_COOKIE_NAME, "", { ...baseOptions(), maxAge: 0, expires: new Date(0) });
+}
+
+/**
+ * Expires the backend's anonymous-identity cookie (final review M3), with the
+ * attributes `openlaw.api.app` sets it with: HttpOnly, SameSite=Lax, Path=/,
+ * Secure unless `OPENLAW_COOKIE_SECURE=false`. On sign-out this hands the next
+ * person on a shared device a fresh anonymous identity instead of the last
+ * one's, so material uploaded while a session had lapsed cannot follow them.
+ */
+export async function clearAnonymousCookie(): Promise<void> {
+  const jar = await cookies();
+  jar.set(ANON_COOKIE_NAME, "", { ...baseOptions(), maxAge: 0, expires: new Date(0) });
 }
 
 // NOTE: `headers()` reflects the inbound request only; it does not see a
