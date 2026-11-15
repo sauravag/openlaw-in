@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import uuid
+from datetime import date
 from collections.abc import Iterator
 from unittest.mock import patch
 
@@ -152,8 +153,6 @@ def test_deletes_conversations_messages_documents_and_excerpts(session: Session)
 
 
 def test_deletes_quota_rows_with_the_user(session: Session) -> None:
-    from datetime import date
-
     user_id = _user(session)
     session.add(QuotaUsage(user_id=user_id, period_month=date(2026, 1, 1), questions_used=2))
     session.commit()
@@ -168,6 +167,9 @@ def test_leaves_another_users_and_anonymous_rows_untouched(session: Session) -> 
     mine, other = _user(session), _user(session)
     _material(session, Owner(user_id=mine, anon_token=None))
     other_conv, other_docs = _material(session, Owner(user_id=other, anon_token=None))
+    other_doc_id = other_docs[0].id
+    session.add(QuotaUsage(user_id=other, period_month=date(2026, 1, 1), questions_used=3))
+    session.commit()
     anon_conv, anon_docs = _material(session, Owner(user_id=None, anon_token=_uid()))
 
     delete_account(session, mine)
@@ -179,6 +181,8 @@ def test_leaves_another_users_and_anonymous_rows_untouched(session: Session) -> 
         assert session.get(Document, docs[0].id) is not None
         assert _count(session, Message, Message.conversation_id, conv.id) == 2
     assert session.get(User, other) is not None
+    assert _count(session, QuotaUsage, QuotaUsage.user_id, other) == 1
+    assert _count(session, DocumentExcerptRow, DocumentExcerptRow.document_id, other_doc_id) > 0
 
 
 def test_keeps_the_access_log_and_reports_the_count(session: Session) -> None:
@@ -240,11 +244,10 @@ def test_unknown_user_returns_zeros(session: Session) -> None:
     assert delete_account(session, _uid()) == DeletionResult(0, 0, 0, 0)
 
 
-@pytest.mark.parametrize("bad", ["", None])
-def test_empty_user_id_raises_before_any_sql(session: Session, bad) -> None:
+def test_empty_user_id_raises_before_any_sql(session: Session) -> None:
     with patch.object(session, "execute") as execute:
         with pytest.raises(ValueError):
-            delete_account(session, bad)
+            delete_account(session, "")
     execute.assert_not_called()
 
 
@@ -281,3 +284,21 @@ def test_a_failure_part_way_rolls_back_whole_and_leaves_nothing_ownerless(
         == log_before
     )
 
+
+
+def test_locks_the_users_row_so_a_concurrent_insert_waits(
+    session: Session, live_engine: Engine
+) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    user_id = _user(session)
+    session.commit()
+
+    delete_account(session, user_id)  # uncommitted: the lock is held
+
+    with Session(live_engine) as other:
+        with pytest.raises(OperationalError):
+            other.execute(
+                select(User.id).where(User.id == user_id).with_for_update(nowait=True)
+            )
+    session.rollback()

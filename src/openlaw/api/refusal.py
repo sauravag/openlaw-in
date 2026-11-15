@@ -274,6 +274,18 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
             "खाते में नहीं ले जाई गई। कृपया फिर से साइन इन करें।"
         ),
     },
+    # `DELETE /account` for a missing, invalid or expired bearer. Unlike the
+    # migration copy above, it must say nothing was deleted.
+    "account_delete_sign_in_required": {
+        "en": (
+            "We could not confirm your sign-in, so nothing was deleted. "
+            "Please sign in again."
+        ),
+        "hi": (
+            "हम आपके साइन इन की पुष्टि नहीं कर सके, इसलिए कुछ भी नहीं हटाया गया। "
+            "कृपया फिर से साइन इन करें।"
+        ),
+    },
     # `POST /account/migrate` when the verified email already belongs to a
     # different account. Signing in again cannot help, so this must not say so;
     # the earlier material is still in this browser until it expires.
@@ -320,6 +332,7 @@ REFUSAL_STATUS: dict[str, int] = {
     # 503, which would read as "the server is down" to proxies and monitors.
     "sign_in_required": 401,
     "account_email_conflict": 409,
+    "account_delete_sign_in_required": 401,
 }
 
 #: `openlaw.documents.extract.ExtractionError.reason` -> refusal key. The

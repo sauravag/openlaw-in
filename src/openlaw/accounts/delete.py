@@ -106,6 +106,10 @@ def delete_account(session: Session, user_id: str) -> DeletionResult:
     if not user_id:
         raise ValueError("user_id must be non-empty")
     owner = Owner(user_id=user_id, anon_token=None)
+    # Lock the users row first: a child insert by this same user takes a
+    # FOR KEY SHARE lock on it, so a concurrent insert either committed before
+    # this point (and is counted and audited below) or waits for this commit.
+    session.execute(select(User.id).where(User.id == user_id).with_for_update())
 
     document_ids = _delete_documents(session, owner)
     conversation_ids = list(

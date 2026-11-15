@@ -1,6 +1,8 @@
 import { authRefusal, normalizeLanguage, type AuthLanguage } from "@/lib/auth/authRefusal";
 import { readBoundedBody } from "@/lib/auth/boundedBody";
 import { isDeleteConfirmed } from "@/lib/auth/deleteConfirmation";
+import { revokeSession } from "@/lib/auth/gotrue";
+import { readGotrueConfig } from "@/lib/auth/gotrueConfig";
 import { notFound, redirectTo } from "@/lib/auth/routeHelpers";
 import { clearSession, readSession } from "@/lib/auth/session";
 import { AUTH_ENABLED } from "@/lib/authMode";
@@ -14,6 +16,7 @@ const ACCOUNT_PATH = "/account";
 const BAD_REQUEST = 400;
 const UNAUTHORIZED = 401;
 const PAYLOAD_TOO_LARGE = 413;
+const CONFLICT = 409;
 const BAD_GATEWAY = 502;
 /** Challenge a bare 401 from the backend means "sign in again", not "retry". */
 const BEARER_CHALLENGE = { "WWW-Authenticate": "Bearer" };
@@ -58,6 +61,18 @@ async function identityRemoved(response: Response): Promise<boolean> {
   }
 }
 
+/** Best-effort, like sign-out: the cookie is cleared regardless. The identity
+ * may already be gone at GoTrue, in which case this simply fails quietly. */
+async function revokeSessionBestEffort(accessToken: string): Promise<void> {
+  const config = readGotrueConfig();
+  if (config === null) return;
+  try {
+    await revokeSession(config, accessToken);
+  } catch (error) {
+    console.error("[Auth] revokeSession threw", error instanceof Error ? error.name : "unknown");
+  }
+}
+
 export async function POST(request: Request): Promise<Response> {
   if (!AUTH_ENABLED) return notFound();
   if (isCrossSiteWrite(request)) {
@@ -65,7 +80,7 @@ export async function POST(request: Request): Promise<Response> {
   }
   const hint = hintLanguage(request);
   const body = await readBoundedBody(request);
-  if (body.kind === "too_large") return authRefusal("too_large", hint, PAYLOAD_TOO_LARGE);
+  if (body.kind === "too_large") return authRefusal("delete_too_large", hint, PAYLOAD_TOO_LARGE);
   const input =
     body.kind === "ok" ? parseInput(body.text, request.headers.get("content-type") ?? "") : null;
   const language = input?.language ?? hint;
@@ -92,6 +107,9 @@ export async function POST(request: Request): Promise<Response> {
   if (upstream.status === UNAUTHORIZED) {
     return authRefusal("sign_in_required", language, UNAUTHORIZED, BEARER_CHALLENGE);
   }
+  if (upstream.status === CONFLICT) {
+    return authRefusal("delete_conflict", language, CONFLICT);
+  }
   if (!upstream.ok) {
     // The session stays: the person must be able to retry.
     console.error("[Auth] account deletion refused, status", upstream.status);
@@ -99,6 +117,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const removed = await identityRemoved(upstream);
+  await revokeSessionBestEffort(session.accessToken);
   await clearSession();
   return redirectTo(`/?account=deleted&identity=${removed ? "removed" : "remains"}`);
 }

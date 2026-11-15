@@ -37,7 +37,8 @@ def remove_supabase_identity(
 ) -> bool:
     """Delete `user_id`'s Supabase identity; True only if it is now gone.
 
-    Never raises: any failure (no key, no URL, network error, error status)
+    Never raises: any failure (no key, no URL, network error, a malformed
+    key or URL, error status)
     returns False so the caller can say plainly that it was NOT removed.
     `client` is for tests; production builds a bounded one.
     """
@@ -56,7 +57,7 @@ def remove_supabase_identity(
         else:
             with httpx.Client(timeout=ADMIN_TIMEOUT_SECONDS) as owned:
                 response = owned.delete(url, headers=headers)
-    except httpx.HTTPError as error:
+    except Exception as error:  # noqa: BLE001 -- must never undo a committed erasure
         logger.warning("identity removal failed: %s", type(error).__name__)
         return False
     if not _is_removed(response.status_code):

@@ -19,6 +19,9 @@ vi.mock("next/headers", () => ({
   headers: async () => new Headers(cookieHeader ? { cookie: cookieHeader } : {}),
 }));
 
+const revokeSession = vi.fn();
+vi.mock("@/lib/auth/gotrue", () => ({ revokeSession }));
+
 const backendFetch = vi.fn<typeof fetch>();
 const NOW_SECONDS = Math.floor(Date.now() / 1000);
 const SAME_ORIGIN = { "sec-fetch-site": "same-origin" };
@@ -43,6 +46,8 @@ async function load(authEnabled: boolean): Promise<Handler> {
   vi.resetModules();
   vi.stubEnv("NEXT_PUBLIC_OPENLAW_AUTH_ENABLED", authEnabled ? "true" : "false");
   vi.stubEnv("OPENLAW_API_URL", "http://backend.test");
+  vi.stubEnv("OPENLAW_SUPABASE_URL", "https://project.supabase.test");
+  vi.stubEnv("OPENLAW_SUPABASE_ANON_KEY", "anon-key");
   return (await import("../auth/delete-account/route")).POST;
 }
 
@@ -60,6 +65,7 @@ const sessionCleared = (): boolean =>
 beforeEach(() => {
   sets.length = 0;
   cookieHeader = SIGNED_IN;
+  revokeSession.mockReset().mockResolvedValue(undefined);
   backendFetch
     .mockReset()
     .mockImplementation(async () =>
@@ -226,6 +232,67 @@ describe("POST /api/auth/delete-account", () => {
     const response = await handler(post({ confirmation: "DELETE" }));
 
     expect(response.status).toBe(401);
+    expect(sets).toHaveLength(0);
+  });
+
+  it("accepts the chandrabindu spelling of the Hindi word", async () => {
+    const handler = await load(true);
+
+    const response = await handler(post({ confirmation: "हटाएँ", language: "hi" }));
+
+    expect(response.status).toBe(303);
+    expect(backendFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("revokes the session at GoTrue before clearing it, on success", async () => {
+    const handler = await load(true);
+
+    await handler(post({ confirmation: "DELETE" }));
+
+    expect(revokeSession).toHaveBeenCalledTimes(1);
+    expect(revokeSession.mock.calls[0][1]).toBe("access-token-secret");
+    expect(sessionCleared()).toBe(true);
+  });
+
+  it("still clears the session and redirects when revokeSession throws", async () => {
+    revokeSession.mockRejectedValue(new Error("gotrue down"));
+    const handler = await load(true);
+
+    const response = await handler(post({ confirmation: "DELETE" }));
+
+    expect(response.status).toBe(303);
+    expect(sessionCleared()).toBe(true);
+  });
+
+  it("does not revoke when the deletion failed", async () => {
+    backendFetch.mockImplementation(async () => new Response("{}", { status: 500 }));
+    const handler = await load(true);
+
+    await handler(post({ confirmation: "DELETE" }));
+
+    expect(revokeSession).not.toHaveBeenCalled();
+  });
+
+  it("uses delete-specific 413 copy, not the sign-in email copy", async () => {
+    const handler = await load(true);
+
+    const response = await handler(post({ confirmation: "DELETE", pad: "x".repeat(5000) }));
+
+    const { detail } = await response.json();
+    expect(detail).toMatch(/nothing was deleted/);
+    expect(detail).not.toMatch(/email/i);
+  });
+
+  it("maps a backend 409 to a non-retry refusal and keeps the session", async () => {
+    backendFetch.mockImplementation(async () => new Response("{}", { status: 409 }));
+    const handler = await load(true);
+
+    const response = await handler(post({ confirmation: "DELETE" }));
+
+    expect(response.status).toBe(409);
+    const { detail } = await response.json();
+    expect(detail).toMatch(/will not help/);
+    expect(detail).not.toMatch(/try again in a little while/i);
     expect(sets).toHaveLength(0);
   });
 });

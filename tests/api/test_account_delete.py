@@ -206,6 +206,40 @@ def test_identity_failure_says_data_erased_but_identity_not_removed(tmp_path: Pa
     assert KEY not in response.text
 
 
+def test_a_non_httpx_identity_error_still_returns_200_with_data_erased(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from openlaw.accounts import identity
+
+    client, settings = _client(tmp_path, supabase_service_role_key=KEY)
+    _seed(settings, "user-1", "one@example.com")
+    boom = UnicodeEncodeError("ascii", KEY, 0, 1, "bad")
+
+    with patch.object(identity.httpx, "Client", side_effect=boom):
+        response = client.delete("/account", headers=bearer("user-1", "one@example.com"))
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["identity_removed"] is False
+    assert body["conversations_deleted"] == 1
+    assert _rows(settings)["conversations"] == 0
+    assert "could not be removed" in body["note_en"].lower()
+    assert KEY not in response.text and KEY not in caplog.text
+
+
+def test_delete_401_says_nothing_was_deleted_in_both_languages(tmp_path: Path) -> None:
+    client, _ = _client(tmp_path)
+
+    response = client.delete("/account")
+    from openlaw.api.refusal import refusal_detail
+
+    hindi = refusal_detail("account_delete_sign_in_required", "hi")
+
+    assert "nothing was deleted" in response.json()["detail"].lower()
+    assert "moved" not in response.json()["detail"].lower()
+    assert "कुछ भी नहीं हटाया गया" in hindi
+
+
 def test_the_identity_call_is_skipped_when_the_local_erasure_fails(tmp_path: Path) -> None:
     client, settings = _client(tmp_path, supabase_service_role_key=KEY)
     _seed(settings, "user-1", "one@example.com")

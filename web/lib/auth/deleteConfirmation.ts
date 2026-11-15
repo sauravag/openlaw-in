@@ -11,14 +11,21 @@ export const DELETE_CONFIRMATION_WORD: Record<AuthLanguage, string> = {
   hi: "हटाएं",
 };
 
-/** True when `typed` is the confirmation word for `language`. Trimmed; the
- * English word is case-insensitive, Hindi is compared NFC-normalised. */
+/** Accepted spellings per language. Hindi has two common ones (anusvara and
+ * chandrabindu) that NFC does not unify. */
+const ACCEPTED_WORDS: Record<AuthLanguage, readonly string[]> = {
+  en: ["DELETE"],
+  hi: ["हटाएं", "हटाएँ"],
+};
+
+/** True when `typed` is an accepted confirmation word for `language`.
+ * Trimmed and NFC-normalised; the English word is case-insensitive. */
 export function isDeleteConfirmed(typed: unknown, language: AuthLanguage): boolean {
   if (typeof typed !== "string") return false;
   const normalise = (value: string) => value.trim().normalize("NFC");
   const given = normalise(typed);
-  const expected = normalise(DELETE_CONFIRMATION_WORD[language]);
-  return language === "en"
-    ? given.toUpperCase() === expected
-    : given === expected;
+  return ACCEPTED_WORDS[language].some((word) => {
+    const expected = normalise(word);
+    return language === "en" ? given.toUpperCase() === expected : given === expected;
+  });
 }

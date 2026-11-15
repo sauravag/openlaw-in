@@ -129,3 +129,13 @@ def test_uses_a_bounded_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     assert remove_supabase_identity(_settings(), SUB) is True
     assert captured["timeout"] == identity.ADMIN_TIMEOUT_SECONDS
     assert 0 < identity.ADMIN_TIMEOUT_SECONDS <= 15
+
+
+@pytest.mark.parametrize(
+    "error", [UnicodeEncodeError("ascii", "\u201c", 0, 1, "bad"), ValueError("x"), httpx.InvalidURL("u")]
+)
+def test_a_non_httpx_error_is_a_failure_not_an_exception(error: Exception) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    assert remove_supabase_identity(_settings(), SUB, client=_client(handler)) is False

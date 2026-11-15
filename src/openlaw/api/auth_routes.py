@@ -73,7 +73,9 @@ _BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
 _NOTHING_MOVED = MigrationResponse(conversations_moved=0, documents_moved=0)
 
 
-def _verified_user_id(request: Request, session_factory) -> str:
+def _verified_user_id(
+    request: Request, session_factory, sign_in_refusal: str = "sign_in_required"
+) -> str:
     """Verify the bearer and commit the user row; refuse on any failure.
 
     The upsert is committed on its own here: `_flush_or_deny` rolls back the
@@ -88,7 +90,7 @@ def _verified_user_id(request: Request, session_factory) -> str:
         identity = decode_token(token, settings.supabase_jwt_secret)
     except AuthError as error:
         logger.warning("account request refused: %s", error.detail)
-        raise_refusal("sign_in_required", headers=_BEARER_CHALLENGE)
+        raise_refusal(sign_in_refusal, headers=_BEARER_CHALLENGE)
     try:
         with session_factory() as session:
             user_id = upsert_user(session, identity).id
@@ -172,7 +174,9 @@ def delete_own_account(request: Request) -> DeletionResponse:
     synchronous and must run in FastAPI's threadpool.
     """
     session_factory = request.app.state.session_factory
-    user_id = _verified_user_id(request, session_factory)
+    user_id = _verified_user_id(
+        request, session_factory, "account_delete_sign_in_required"
+    )
     with session_factory() as session:
         try:
             result = delete_account(session, user_id)

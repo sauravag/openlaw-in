@@ -201,8 +201,9 @@ def upsert_user(session: Session, identity: AuthenticatedUser) -> User:
     by email. Matching on email alone -- the brief's original shape -- let a
     *different* Supabase identity that later controls the same email address
     (an email change on Supabase's side, or an unrelated person receiving a
-    recycled mailbox; `users` rows are never deleted, so an old email stays
-    claimed indefinitely) silently inherit an existing account: its id, and
+    recycled mailbox; `users` rows are removed only by an explicit account
+    erasure (`openlaw.accounts.delete`), so an old email stays
+    claimed otherwise) silently inherit an existing account: its id, and
     therefore every `Conversation` row already bound to that id. For a
     legal-aid product this is not a hypothetical -- it is one plausible path
     from "person disclosed a family situation" to "the person who now

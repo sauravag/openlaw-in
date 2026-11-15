@@ -30,7 +30,9 @@ export type AuthRefusalKind =
   | "sent"
   | "confirmation_required"
   | "sign_in_required"
-  | "delete_failed";
+  | "delete_failed"
+  | "delete_too_large"
+  | "delete_conflict";
 
 const DETAIL: Record<AuthRefusalKind, Record<"en" | "hi", string>> = {
   invalid_email: {
@@ -61,6 +63,15 @@ const DETAIL: Record<AuthRefusalKind, Record<"en" | "hi", string>> = {
   delete_failed: {
     en: "We could not delete your account just now, and you are still signed in. Please try again in a little while.",
     hi: "हम अभी आपका खाता नहीं हटा सके, और आप अब भी साइन इन हैं। कृपया थोड़ी देर बाद फिर कोशिश करें।",
+  },
+  delete_too_large: {
+    en: "That request was too large, so nothing was deleted. Please send only the confirmation word.",
+    hi: "यह अनुरोध बहुत बड़ा था, इसलिए कुछ भी नहीं हटाया गया। कृपया केवल पुष्टि का शब्द भेजें।",
+  },
+  // A backend 409 (email already linked to another account): retrying cannot help.
+  delete_conflict: {
+    en: "We could not delete this account because its sign-in details conflict with another account. Nothing was deleted, and trying again will not help. Please contact the site operator.",
+    hi: "हम यह खाता नहीं हटा सके क्योंकि इसके साइन इन विवरण किसी दूसरे खाते से टकराते हैं। कुछ भी नहीं हटाया गया, और दोबारा कोशिश करने से मदद नहीं मिलेगी। कृपया साइट संचालक से संपर्क करें।",
   },
   // The one success body. Identical for every address, registered or not.
   sent: {
