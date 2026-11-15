@@ -267,12 +267,16 @@ services:
       # possible without auth. Kept in lockstep with .env.example by the same
       # test as OPENLAW_QUOTA_ENABLED below.
       OPENLAW_AUTH_ENABLED: ${OPENLAW_AUTH_ENABLED:-false}
-      OPENLAW_QUOTA_ENABLED: ${OPENLAW_QUOTA_ENABLED:-false}
+      # Unset follows OPENLAW_AUTH_ENABLED (so Mode B ships with a spend cap);
+      # true with auth off is a startup error. Pinned by tests/test_config.py.
+      OPENLAW_QUOTA_ENABLED: ${OPENLAW_QUOTA_ENABLED:-${OPENLAW_AUTH_ENABLED:-false}}
       OPENLAW_MONTHLY_QUOTA: ${OPENLAW_MONTHLY_QUOTA:-30}
       OPENLAW_ANONYMOUS_QUOTA: ${OPENLAW_ANONYMOUS_QUOTA:-3}
       # Left blank: sign-in is optional infrastructure, not required for the
       # anonymous Q&A path this compose file ships working out of the box.
-      # Set both to enable Supabase email/Google auth.
+      # Set both to enable Supabase email magic-link auth.
+      # Mode B: <OPENLAW_SITE_URL>/signup, so quota refusals link to sign-in.
+      OPENLAW_SIGNUP_URL: ${OPENLAW_SIGNUP_URL:-}
       OPENLAW_SUPABASE_URL: ${OPENLAW_SUPABASE_URL:-}
       OPENLAW_SUPABASE_JWT_SECRET: ${OPENLAW_SUPABASE_JWT_SECRET:-}
       # Optional; api ONLY (never web). Lets account deletion also remove the

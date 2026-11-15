@@ -14,7 +14,7 @@ in which **every legal claim is backed by a citation that resolves to a governme
 source document**.
 
 The product is built on two open datasets held locally, combined so that each supplies
-what the other lacks. It is free to use after email or Google signup, subject to a
+what the other lacks. It is free to use after email (magic-link) signup, subject to a
 monthly quota, and fully self-hostable by legal-aid bodies with no quota.
 
 ### The one-sentence differentiator
@@ -719,7 +719,7 @@ standards.
    appears in the top 10 retrieved for at least 85% of questions).
 4. Answers are returned in at least Hindi and English, reviewed by native speakers.
 5. Crisis routing fires correctly on every red-team crisis prompt.
-6. A user can sign up with email or Google and ask a question in under 60 seconds.
+6. A user can sign up with an email magic link and ask a question in under 60 seconds.
 7. Someone other than the author can self-host from the README.
 
 ---

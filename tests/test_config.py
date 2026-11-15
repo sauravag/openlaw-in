@@ -217,7 +217,6 @@ def test_env_example_agrees_with_compose_self_host_defaults(
 
     for var, attr in [
         ("OPENLAW_AUTH_ENABLED", "auth_enabled"),
-        ("OPENLAW_QUOTA_ENABLED", "quota_enabled"),
         ("OPENLAW_COOKIE_SECURE", "cookie_secure"),
         # Plan 6 Task 18: before this, `api` was never given
         # OPENLAW_UPLOADS_ENABLED or OPENLAW_DOCUMENT_ENCRYPTION_KEY at all,
@@ -235,6 +234,20 @@ def test_env_example_agrees_with_compose_self_host_defaults(
             "-- `cp .env.example .env` would silently override the compose "
             "default the moment someone follows the README"
         )
+
+    # Quota is the exception: it must FOLLOW auth, not pin a constant, or Mode B
+    # from the docs ships with no spend cap. Compose nests the auth default, and
+    # .env.example leaves the variable unset so it cannot override that.
+    assert (
+        "${OPENLAW_QUOTA_ENABLED:-${OPENLAW_AUTH_ENABLED:-false}}" in compose_text
+    ), "compose must default OPENLAW_QUOTA_ENABLED to OPENLAW_AUTH_ENABLED"
+    example_text = (root / ".env.example").read_text()
+    assert not re.search(r"^OPENLAW_QUOTA_ENABLED=", example_text, re.MULTILINE), (
+        ".env.example must leave OPENLAW_QUOTA_ENABLED unset (commented out)"
+    )
+    assert example_settings.quota_enabled == example_settings.auth_enabled
+    mode_b = Settings(_env_file=None, auth_enabled=True)  # type: ignore[call-arg]
+    assert mode_b.quota_enabled is True
 
 
 def test_trusted_proxy_ips_blank_value_means_no_trusted_proxies(monkeypatch) -> None:
