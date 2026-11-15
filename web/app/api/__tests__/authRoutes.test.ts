@@ -152,9 +152,8 @@ describe("POST /api/auth/sign-in", () => {
 
     const response = await signIn(request);
 
-    expect(response.status).toBe(202);
+    expect(response.status).toBe(303);
     expect(requestOtp.mock.calls[0][1].identifier).toBe("form@example.com");
-    expect((await response.json()).detail).toMatch(/[ऀ-ॿ]/);
   });
 
   it("rejects a malformed email with 400 and helplines before requestOtp", async () => {
@@ -438,6 +437,144 @@ describe("POST /api/auth/sign-in", () => {
 
       expect(limiter.size()).toBeLessThanOrEqual(3);
     });
+  });
+});
+
+describe("POST /api/auth/sign-in (no-JavaScript form post)", () => {
+  function formPost(
+    fields: Record<string, string>,
+    headers: Record<string, string> = SAME_ORIGIN,
+    extra: Record<string, string> = {},
+  ): Request {
+    return new Request("http://localhost:3000/api/auth/sign-in", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", ...headers, ...extra },
+      body: new URLSearchParams(fields),
+    });
+  }
+
+  function location(response: Response): string | null {
+    return response.headers.get("location");
+  }
+
+  it("redirects 303 to /signup?sent=1 on success", async () => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(formPost({ email: "form@example.com", language: "en" }));
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/signup?sent=1");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("carries Hindi through the redirect", async () => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(formPost({ email: "form@example.com", language: "hi" }));
+
+    expect(location(response)).toBe("/signup?sent=1&language=hi");
+  });
+
+  it("redirects identically whether or not the address can receive mail", async () => {
+    const { signIn } = await load(true);
+    const first = await signIn(formPost({ email: "known@example.com" }));
+    requestOtp.mockResolvedValue({ kind: "sent" });
+    const second = await signIn(formPost({ email: "unknown@example.com" }));
+
+    expect(location(first)).toBe(location(second));
+    expect(first.status).toBe(second.status);
+  });
+
+  it.each([
+    ["an invalid email", { email: "not-an-email" }, "invalid_email"],
+  ])("redirects to /signup?error=%s code for %s", async (_label, fields, code) => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(formPost(fields));
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe(`/signup?error=${code}`);
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
+  it("redirects to error=rate_limited when GoTrue rate limits", async () => {
+    requestOtp.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: 30 });
+    const { signIn } = await load(true);
+
+    const response = await signIn(formPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/signup?error=rate_limited");
+  });
+
+  it("redirects to error=rate_limited past the per-IP ceiling", async () => {
+    const { signIn } = await load(true);
+    for (let i = 0; i < 10; i += 1) await signIn(formPost({ email: "a@example.com" }));
+
+    const response = await signIn(formPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/signup?error=rate_limited");
+  });
+
+  it("redirects to error=failed when GoTrue fails", async () => {
+    requestOtp.mockResolvedValue({ kind: "failed", detail: "boom" });
+    const { signIn } = await load(true);
+
+    const response = await signIn(formPost({ email: "a@example.com", language: "hi" }));
+
+    expect(location(response)).toBe("/signup?error=failed&language=hi");
+  });
+
+  it("redirects to error=failed for a cross-site POST without sending mail", async () => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(
+      formPost({ email: "victim@example.com" }, { "sec-fetch-site": "cross-site" }),
+    );
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/signup?error=failed");
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
+  it("redirects to error=too_large for an oversized body", async () => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(
+      formPost({ email: "a@example.com" }, SAME_ORIGIN, { "content-length": "999999" }),
+    );
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/signup?error=too_large");
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
+  it("redirects to error=unavailable on a mode mismatch", async () => {
+    checkAuthAgreement.mockResolvedValue({ agrees: false });
+    const { signIn } = await load(true);
+
+    const response = await signIn(formPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(303);
+    expect(location(response)).toBe("/signup?error=unavailable");
+  });
+
+  it("keeps JSON callers on JSON responses", async () => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(jsonPost({ email: "not-an-email" }));
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("location")).toBeNull();
+  });
+
+  it("stays a 404 in Mode A even for a form post", async () => {
+    const { signIn } = await load(false);
+
+    const response = await signIn(formPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(404);
   });
 });
 

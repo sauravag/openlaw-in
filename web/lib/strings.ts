@@ -143,6 +143,26 @@ export interface UIStrings {
   accountDeleteConfirmationRequired: string;
   accountDeleteTooLarge: string;
   accountDeleteConflict: string;
+  /** Sign-in page and form (`SignInForm`, `app/signup/page.tsx`). */
+  signInHeading: string;
+  signInIntro: string;
+  signInEmailLabel: string;
+  signInEmailPlaceholder: string;
+  signInSubmit: string;
+  signInContinueWithoutAccount: string;
+  /** Account bar. */
+  accountBarLabel: string;
+  signedInAs: (email: string) => string;
+  signOutButton: string;
+  deleteAccountLink: string;
+  /** Delete-account page (`app/account/delete/page.tsx`). */
+  deleteAccountHeading: string;
+  deleteAccountWillErase: string;
+  deleteAccountLogKept: string;
+  deleteAccountIdentityMayRemain: string;
+  deleteAccountInstruction: (word: string) => string;
+  deleteAccountSubmit: string;
+  deleteAccountCancel: string;
 }
 
 const EN: UIStrings = {
@@ -246,6 +266,23 @@ const EN: UIStrings = {
   accountDeleteConfirmationRequired: "Your account was not deleted. To confirm, type the word shown (DELETE) exactly.",
   accountDeleteTooLarge: "That request was too large, so nothing was deleted. Please send only the confirmation word.",
   accountDeleteConflict: "We could not delete this account because its sign-in details conflict with another account. Nothing was deleted, and trying again will not help. Please contact the site operator.",
+  signInHeading: "Sign in",
+  signInIntro: "Enter your email address and we will send you a sign-in link. No password is needed. You can still ask your question without an account.",
+  signInEmailLabel: "Email address",
+  signInEmailPlaceholder: "you@example.com",
+  signInSubmit: "Send me a sign-in link",
+  signInContinueWithoutAccount: "Ask a question without an account",
+  accountBarLabel: "Your account",
+  signedInAs: (email) => `Signed in as ${email}`,
+  signOutButton: "Sign out",
+  deleteAccountLink: "Delete my account",
+  deleteAccountHeading: "Delete my account",
+  deleteAccountWillErase: "If you continue, your conversations, uploaded documents and excerpts will be erased.",
+  deleteAccountLogKept: "A record of who accessed each document (the access log) is kept, without any document content.",
+  deleteAccountIdentityMayRemain: "Your sign-in identity (your email address at our sign-in provider) may remain. If it does, you can contact the site operator and ask for it to be deleted.",
+  deleteAccountInstruction: (word) => `To confirm, type the word ${word} below.`,
+  deleteAccountSubmit: "Delete my account permanently",
+  deleteAccountCancel: "No, keep my account",
 };
 
 const HI: UIStrings = {
@@ -349,6 +386,23 @@ const HI: UIStrings = {
   accountDeleteConfirmationRequired: "आपका खाता नहीं हटाया गया। पुष्टि के लिए दिखाया गया शब्द (हटाएं) ठीक वैसे ही लिखें।",
   accountDeleteTooLarge: "यह अनुरोध बहुत बड़ा था, इसलिए कुछ भी नहीं हटाया गया। कृपया केवल पुष्टि का शब्द भेजें।",
   accountDeleteConflict: "हम यह खाता नहीं हटा सके क्योंकि इसके साइन इन विवरण किसी दूसरे खाते से टकराते हैं। कुछ भी नहीं हटाया गया, और दोबारा कोशिश करने से मदद नहीं मिलेगी। कृपया साइट संचालक से संपर्क करें।",
+  signInHeading: "साइन इन करें",
+  signInIntro: "अपना ईमेल पता दर्ज करें और हम आपको साइन इन लिंक भेजेंगे। पासवर्ड की ज़रूरत नहीं है। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
+  signInEmailLabel: "ईमेल पता",
+  signInEmailPlaceholder: "aap@example.com",
+  signInSubmit: "मुझे साइन इन लिंक भेजें",
+  signInContinueWithoutAccount: "बिना खाते के सवाल पूछें",
+  accountBarLabel: "आपका खाता",
+  signedInAs: (email) => `${email} से साइन इन हैं`,
+  signOutButton: "साइन आउट करें",
+  deleteAccountLink: "मेरा खाता हटाएं",
+  deleteAccountHeading: "मेरा खाता हटाएं",
+  deleteAccountWillErase: "अगर आप आगे बढ़ते हैं, तो आपकी बातचीत, अपलोड किए गए दस्तावेज़ और उनके अंश मिटा दिए जाएंगे।",
+  deleteAccountLogKept: "हर दस्तावेज़ को किसने देखा, इसका रिकॉर्ड (एक्सेस लॉग) बिना किसी दस्तावेज़ सामग्री के रखा जाएगा।",
+  deleteAccountIdentityMayRemain: "आपकी साइन इन पहचान (साइन इन प्रदाता के पास आपका ईमेल पता) बनी रह सकती है। ऐसा हो तो आप साइट संचालक से संपर्क करके उसे मिटाने को कह सकते हैं।",
+  deleteAccountInstruction: (word) => `पुष्टि के लिए नीचे शब्द ${word} लिखें।`,
+  deleteAccountSubmit: "मेरा खाता हमेशा के लिए हटाएं",
+  deleteAccountCancel: "नहीं, मेरा खाता रहने दें",
 };
 
 export function getStrings(language: Language["code"] | string): UIStrings {
