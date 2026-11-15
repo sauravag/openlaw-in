@@ -101,6 +101,9 @@ describe("cookie flags", () => {
     expect(sets[0].value).toBe("");
     expect(sets[0].options.maxAge).toBe(0);
     expect(sets[0].options.httpOnly).toBe(true);
+    expect(sets[0].options.sameSite).toBe("lax");
+    expect(sets[0].options.path).toBe("/");
+    expect(sets[0].options.secure).toBe(true);
   });
 });
 
@@ -138,6 +141,13 @@ describe("readSession / writeSession", () => {
     await writeSession({ ...SESSION, expiresAt: NOW + 61 });
     cookieHeader = echoLast();
     expect(await readSession()).not.toBeNull();
+  });
+
+  it("returns null, without throwing, for a bad percent sequence", async () => {
+    const { readSession, parseSession, SESSION_COOKIE_NAME } = await load();
+    cookieHeader = `${SESSION_COOKIE_NAME}=%E0%A4%A`;
+    expect(await readSession()).toBeNull();
+    expect(parseSession("%E0%A4%A")).toBeNull();
   });
 
   it("treats duplicate session cookies as no session", async () => {

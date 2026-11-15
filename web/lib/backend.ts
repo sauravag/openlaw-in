@@ -1,6 +1,6 @@
 import "server-only";
 
-import { sessionFromCookieHeader } from "@/lib/auth/sessionCookie";
+import { sessionFromCookieHeader, stripAuthCookies } from "@/lib/auth/sessionCookie";
 import { AUTH_ENABLED } from "@/lib/authMode";
 
 const DEFAULT_API_URL = "http://127.0.0.1:8000";
@@ -29,6 +29,12 @@ function buildBackendHeaders(request: Request): Headers {
     .map((token) => token.trim().toLowerCase())
     .filter(Boolean);
   for (const name of [...HOP_BY_HOP_HEADERS, ...named]) headers.delete(name);
+  // The backend never needs the session cookie (it holds the refresh token)
+  // or the PKCE verifier; only the Bearer access token below, and only in
+  // Mode B. Everything else (e.g. `openlaw_anon_id`) passes through intact.
+  const forwardedCookies = stripAuthCookies(request.headers.get("cookie"));
+  if (forwardedCookies === null) headers.delete("cookie");
+  else headers.set("cookie", forwardedCookies);
   if (AUTH_ENABLED) {
     // The cookie holds a JSON session; only the access token goes upstream,
     // and only when the session is valid, unexpired and unambiguous.

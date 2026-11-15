@@ -141,8 +141,41 @@ describe("proxyToBackend Authorization", () => {
     expect(await authorizationFor(withSession)).toBe("Bearer tok123");
   });
 
-  it("never sends the refresh token to the backend", async () => {
-    expect(await authorizationFor(withSession)).not.toContain("refresh456");
+  async function sentFor(headers: Record<string, string>, authEnabled: boolean) {
+    const mock = stubBackend(new Response("{}"));
+    const { proxyToBackend } = await load(authEnabled);
+    await proxyToBackend(new Request("http://web/x", { headers }), "/ask");
+    return sentHeaders(mock);
+  }
+
+  it("never sends the refresh token to the backend, in Cookie or Authorization", async () => {
+    for (const mode of [false, true]) {
+      const sent = await sentFor(withSession, mode);
+      expect(sent.get("authorization") ?? "").not.toContain("refresh456");
+      expect(sent.get("cookie") ?? "").not.toContain("refresh456");
+      expect(sent.get("cookie") ?? "").not.toContain("openlaw_session");
+    }
+  });
+
+  it("strips the pkce cookie too but keeps openlaw_anon_id byte-for-byte", async () => {
+    const raw = "openlaw_anon_id=a%20b; other=%E0%A4%A";
+    for (const mode of [false, true]) {
+      const sent = await sentFor(
+        { cookie: `openlaw_pkce=ver; ${raw.split("; ")[0]}; openlaw_session=${session()}; ${raw.split("; ")[1]}` },
+        mode,
+      );
+      expect(sent.get("cookie")).toBe(raw);
+    }
+  });
+
+  it("omits the Cookie header when only session/pkce cookies were present", async () => {
+    const sent = await sentFor({ cookie: `openlaw_session=${session()}; openlaw_pkce=v` }, true);
+    expect(sent.get("cookie")).toBeNull();
+    expect(sent.get("authorization")).toBe("Bearer tok123");
+  });
+
+  it("attaches nothing, without throwing, for a bad percent sequence", async () => {
+    expect(await authorizationFor(withCookie("%E0%A4%A"))).toBeNull();
   });
 
   it("attaches nothing when AUTH_ENABLED but no session cookie", async () => {

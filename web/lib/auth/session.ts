@@ -4,6 +4,7 @@ import { cookies, headers } from "next/headers";
 
 import {
   readCookieValue,
+  PKCE_COOKIE_NAME,
   SESSION_COOKIE_NAME,
   sessionFromCookieHeader,
   type StoredSession,
@@ -12,9 +13,7 @@ import {
 export { parseSession, SESSION_COOKIE_NAME } from "@/lib/auth/sessionCookie";
 export type { StoredSession } from "@/lib/auth/sessionCookie";
 
-/** Short-lived cookie holding the PKCE verifier between the sign-in request
- * and the callback. HttpOnly, SameSite=Lax, 10 minutes, deleted on exchange. */
-export const PKCE_COOKIE_NAME = "openlaw_pkce";
+export { PKCE_COOKIE_NAME } from "@/lib/auth/sessionCookie";
 const PKCE_COOKIE_MAX_AGE_SECONDS = 600;
 
 /** The session cookie is JSON holding BOTH the access and refresh tokens, and
@@ -49,6 +48,10 @@ async function readRawCookie(name: string): Promise<string | null> {
   return readCookieValue((await headers()).get("cookie"), name);
 }
 
+// NOTE: `headers()` reflects the inbound request only; it does not see a
+// cookie set earlier in the same request (see
+// next/dist/server/async-storage/request-store.js). A read must never follow a
+// write within one request.
 /** The signed-in session, or null (absent, malformed, duplicated or expired). */
 export async function readSession(): Promise<StoredSession | null> {
   return sessionFromCookieHeader((await headers()).get("cookie"));
@@ -77,6 +80,10 @@ export async function clearSession(): Promise<void> {
   jar.set(SESSION_COOKIE_NAME, "", { ...baseOptions(), maxAge: 0, expires: new Date(0) });
 }
 
+// NOTE: `headers()` reflects the inbound request only; it does not see a
+// cookie set earlier in the same request (see
+// next/dist/server/async-storage/request-store.js). A read must never follow a
+// write within one request.
 export async function readVerifier(): Promise<string | null> {
   return readRawCookie(PKCE_COOKIE_NAME);
 }

@@ -13,6 +13,26 @@ import "server-only";
  * the same reason `Settings.cookie_secure` cannot be unconditional). */
 export const SESSION_COOKIE_NAME = "openlaw_session";
 
+/** Short-lived cookie holding the PKCE verifier between the sign-in request
+ * and the callback. HttpOnly, SameSite=Lax, 10 minutes, deleted on exchange. */
+export const PKCE_COOKIE_NAME = "openlaw_pkce";
+
+/**
+ * `cookieHeader` without the session and PKCE cookies, or null when nothing
+ * else remains. The backend never needs either (the session one carries the
+ * refresh token); every other cookie is kept byte-for-byte, undecoded.
+ */
+export function stripAuthCookies(cookieHeader: string | null): string | null {
+  if (!cookieHeader) return null;
+  const hidden = new Set([SESSION_COOKIE_NAME, PKCE_COOKIE_NAME]);
+  const kept = cookieHeader.split(";").filter((part) => {
+    const index = part.indexOf("=");
+    return index === -1 || !hidden.has(part.slice(0, index).trim());
+  });
+  const joined = kept.map((part) => part.trim()).filter(Boolean).join("; ");
+  return joined === "" ? null : joined;
+}
+
 /** A session this close to `expiresAt` counts as expired, so the proxy never
  * races the backend's own `exp` check. */
 export const SESSION_EXPIRY_SKEW_SECONDS = 60;
