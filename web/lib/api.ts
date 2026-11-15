@@ -20,8 +20,8 @@ import type {
  * place `persist_answer_events` runs. Going around it would either
  * double-write a turn's safety events or drop them silently.
  *
- * Requests go to `/api/openlaw/ask`, a same-origin path that `next.config.ts`
- * rewrites (server-side, before it reaches the browser) to the real API.
+ * Requests go to `/api/openlaw/ask`, a same-origin Route Handler that
+ * proxies (server-side, via `lib/backend.ts`) to the real API.
  * That is what lets `credentials: 'include'` work with a plain, un-configured
  * backend: the anonymous-quota cookie (`openlaw_anon_id`, set by
  * `create_app`'s middleware) is set on a same-origin response, so no CORS
@@ -312,8 +312,8 @@ async function postQuestion(params: AskParams): Promise<Response | null> {
  *
  * **Final whole-plan review, H3.** A sixth no-server-cooperation state was
  * missed by that round: HTTP 200 with a body that fails `isAnswerData` --
- * reachable when `web` is rebuilt without `OPENLAW_API_URL` (or the
- * `rewrites()` entry moves) and `/api/openlaw/ask` falls through to Next's
+ * reachable when `OPENLAW_API_URL` is wrong for the container (or the
+ * Route Handler moves) and `/api/openlaw/ask` falls through to Next's
  * own catch-all, which answers 200 with the SPA's own HTML/JSON shell. That
  * used to `throw AskError`, which `page.tsx` rendered as a bare, helpline-
  * free error message on a first question. It now falls back to
