@@ -766,16 +766,76 @@ describe("GET /api/auth/callback", () => {
     expectVerifierCleared();
   });
 
-  it("returns the unavailable response on a mode mismatch", async () => {
+  it("answers a mode mismatch with a 303 to the sign-in page, never JSON", async () => {
     cookieHeader = "openlaw_pkce=verifier-value";
     checkAuthAgreement.mockResolvedValue({ agrees: false });
     const { callback } = await load(true);
 
     const response = await callback(callbackRequest());
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/signup?error=unavailable");
+    expect(response.headers.get("content-type")).toBeNull();
     expect(exchangeCode).not.toHaveBeenCalled();
     expectVerifierCleared();
+  });
+
+  // Final review M4: the language chosen at sign-in rides with the verifier.
+  describe("the person's language", () => {
+    async function signInThenCookie(language: string): Promise<string> {
+      const { signIn } = await load(true);
+      await signIn(jsonPost({ email: "a@b.in", language }));
+      const verifier = sets.find((c) => c.name === "openlaw_pkce");
+      sets.length = 0;
+      return `openlaw_pkce=${encodeURIComponent(verifier!.value)}`;
+    }
+
+    it("passes only the verifier itself to GoTrue", async () => {
+      cookieHeader = await signInThenCookie("hi");
+      const { callback } = await load(true);
+
+      await callback(callbackRequest());
+
+      const sentVerifier = exchangeCode.mock.calls[0][2] as string;
+      expect(sentVerifier).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    });
+
+    it.each([
+      ["success", () => undefined, "/?language=hi"],
+      ["expired link", () => exchangeCode.mockResolvedValue({ kind: "expired" }), "/signup?error=expired&language=hi"],
+      ["failed exchange", () => exchangeCode.mockResolvedValue({ kind: "failed", detail: "x" }), "/signup?error=failed&language=hi"],
+      ["mode mismatch", () => checkAuthAgreement.mockResolvedValue({ agrees: false }), "/signup?error=unavailable&language=hi"],
+      [
+        "failed migration",
+        () => backendFetch.mockImplementation(async () => new Response(null, { status: 503 })),
+        "/?migration=failed&language=hi",
+      ],
+    ])("keeps Hindi on the %s redirect", async (_label, arrange, location) => {
+      cookieHeader = await signInThenCookie("hi");
+      arrange();
+      const { callback } = await load(true);
+
+      const response = await callback(callbackRequest());
+
+      expect(response.status).toBe(303);
+      expect(response.headers.get("location")).toBe(location);
+    });
+
+    it("keeps Hindi when the code is missing", async () => {
+      cookieHeader = await signInThenCookie("hi");
+      const { callback } = await load(true);
+
+      const response = await callback(callbackRequest(""));
+
+      expect(response.headers.get("location")).toBe("/signup?error=failed&language=hi");
+    });
+
+    it("stays English for an English sign-in", async () => {
+      cookieHeader = await signInThenCookie("en");
+      const { callback } = await load(true);
+
+      expect((await callback(callbackRequest())).headers.get("location")).toBe("/");
+    });
   });
 
   it("still exchanges when the backend is unreachable (agrees null)", async () => {

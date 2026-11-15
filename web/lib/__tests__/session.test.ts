@@ -74,7 +74,7 @@ describe("cookie flags", () => {
 
   it("sets the verifier cookie httpOnly, lax, path=/, 600s, secure", async () => {
     const { writeVerifier, PKCE_COOKIE_NAME } = await load();
-    await writeVerifier("fake-verifier");
+    await writeVerifier("fake-verifier", "en");
     expect(sets[0].name).toBe(PKCE_COOKIE_NAME);
     expect(sets[0].options.httpOnly).toBe(true);
     expect(sets[0].options.sameSite).toBe("lax");
@@ -170,9 +170,19 @@ describe("verifier", () => {
   it("round-trips the verifier and returns null when absent", async () => {
     const { writeVerifier, readVerifier } = await load();
     expect(await readVerifier()).toBeNull();
-    await writeVerifier("fake-verifier");
+    await writeVerifier("fake-verifier", "hi");
     cookieHeader = echoLast();
-    expect(await readVerifier()).toBe("fake-verifier");
+    expect(await readVerifier()).toEqual({ verifier: "fake-verifier", language: "hi" });
+  });
+
+  it("reads a pre-language cookie as English, and an unknown language as English", async () => {
+    const { readVerifier } = await load();
+    cookieHeader = "openlaw_pkce=old-verifier";
+    expect(await readVerifier()).toEqual({ verifier: "old-verifier", language: "en" });
+    cookieHeader = "openlaw_pkce=v.fr";
+    expect(await readVerifier()).toEqual({ verifier: "v", language: "en" });
+    cookieHeader = "openlaw_pkce=.hi";
+    expect(await readVerifier()).toBeNull();
   });
 });
 

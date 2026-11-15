@@ -3,6 +3,7 @@ import "server-only";
 import { cookies, headers } from "next/headers";
 
 import { ANON_COOKIE_NAME } from "@/lib/anonCookie";
+import { normalizeLanguage, type AuthLanguage } from "@/lib/auth/authRefusal";
 
 import {
   readCookieValue,
@@ -98,13 +99,31 @@ export async function clearAnonymousCookie(): Promise<void> {
 // cookie set earlier in the same request (see
 // next/dist/server/async-storage/request-store.js). A read must never follow a
 // write within one request.
-export async function readVerifier(): Promise<string | null> {
-  return readRawCookie(PKCE_COOKIE_NAME);
+/** What the sign-in request left for the callback: the PKCE verifier, and
+ * the language the person was reading in (final review M4), so every
+ * callback redirect and refusal can stay in that language. */
+export interface PendingSignIn {
+  readonly verifier: string;
+  readonly language: AuthLanguage;
 }
 
-export async function writeVerifier(verifier: string): Promise<void> {
+/** Separates verifier and language in the cookie value. Never part of a
+ * base64url verifier, so the split is unambiguous. */
+const LANGUAGE_SEPARATOR = ".";
+
+export async function readVerifier(): Promise<PendingSignIn | null> {
+  const raw = await readRawCookie(PKCE_COOKIE_NAME);
+  if (!raw) return null;
+  const index = raw.lastIndexOf(LANGUAGE_SEPARATOR);
+  // A value without a language (set before this change) is English.
+  if (index === -1) return { verifier: raw, language: "en" };
+  const verifier = raw.slice(0, index);
+  return verifier ? { verifier, language: normalizeLanguage(raw.slice(index + 1)) } : null;
+}
+
+export async function writeVerifier(verifier: string, language: AuthLanguage): Promise<void> {
   const jar = await cookies();
-  jar.set(PKCE_COOKIE_NAME, verifier, {
+  jar.set(PKCE_COOKIE_NAME, `${verifier}${LANGUAGE_SEPARATOR}${language}`, {
     ...baseOptions(),
     maxAge: PKCE_COOKIE_MAX_AGE_SECONDS,
   });

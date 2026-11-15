@@ -110,7 +110,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const verifier = createVerifier();
-  await writeVerifier(verifier);
+  await writeVerifier(verifier, language);
   let outcome;
   try {
     outcome = await requestOtp(config, {
