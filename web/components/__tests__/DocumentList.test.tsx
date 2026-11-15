@@ -16,14 +16,22 @@ const lease: AttachedDocument = {
 describe('DocumentList', () => {
   it('renders nothing when no document is attached', () => {
     const { container } = render(
-      <DocumentList documents={[]} language="en" onDelete={vi.fn()} deletingId={null} />,
+      <DocumentList documents={[]} language="en" onDelete={vi.fn()} deletingId={null} retention="expires" />,
     )
     expect(container).toBeEmptyDOMElement()
   })
 
+  it('shows no expiry sentence when retention is none (Mode A)', () => {
+    render(
+      <DocumentList documents={[lease]} language="en" onDelete={vi.fn()} deletingId={null} retention="none" />,
+    )
+    expect(screen.queryByText(lease.retentionNotice)).not.toBeInTheDocument()
+    expect(screen.getByText('lease.pdf')).toBeInTheDocument()
+  })
+
   it('names the file being deleted in the control an assistive reader announces', () => {
     render(
-      <DocumentList documents={[lease]} language="en" onDelete={vi.fn()} deletingId={null} />,
+      <DocumentList documents={[lease]} language="en" onDelete={vi.fn()} deletingId={null} retention="expires" />,
     )
     expect(
       screen.getByRole('button', { name: getStrings('en').deleteDocumentLabel('lease.pdf') }),
@@ -33,7 +41,7 @@ describe('DocumentList', () => {
   it('calls back with the document id when the delete control is used', async () => {
     const onDelete = vi.fn()
     render(
-      <DocumentList documents={[lease]} language="en" onDelete={onDelete} deletingId={null} />,
+      <DocumentList documents={[lease]} language="en" onDelete={onDelete} deletingId={null} retention="expires" />,
     )
 
     await userEvent.click(
@@ -45,7 +53,7 @@ describe('DocumentList', () => {
 
   it('shows the server retention notice verbatim, so the promise made is the promise kept', () => {
     render(
-      <DocumentList documents={[lease]} language="en" onDelete={vi.fn()} deletingId={null} />,
+      <DocumentList documents={[lease]} language="en" onDelete={vi.fn()} deletingId={null} retention="expires" />,
     )
     expect(screen.getByText(lease.retentionNotice)).toBeInTheDocument()
   })
@@ -54,7 +62,7 @@ describe('DocumentList', () => {
     const fir: AttachedDocument = { ...lease, id: 'd2', filename: 'fir.pdf' }
     const strings = getStrings('en')
     render(
-      <DocumentList documents={[lease, fir]} language="en" onDelete={vi.fn()} deletingId="d1" />,
+      <DocumentList documents={[lease, fir]} language="en" onDelete={vi.fn()} deletingId="d1" retention="expires" />,
     )
     expect(
       screen.getByRole('button', { name: strings.deleteDocumentLabel('lease.pdf') }),
@@ -66,7 +74,7 @@ describe('DocumentList', () => {
 
   it('says which question these documents will be read for, in Hindi too', () => {
     render(
-      <DocumentList documents={[lease]} language="hi" onDelete={vi.fn()} deletingId={null} />,
+      <DocumentList documents={[lease]} language="hi" onDelete={vi.fn()} deletingId={null} retention="expires" />,
     )
     const strings = getStrings('hi')
     expect(screen.getByText(strings.attachedToNextTurnLabel)).toBeInTheDocument()

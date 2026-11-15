@@ -16,7 +16,7 @@ function setup(props: Partial<React.ComponentProps<typeof DocumentUpload>> = {})
     <DocumentUpload
       language="en"
       conversationId={null}
-      isSignedIn={false}
+      retention="expires"
       isUploading={false}
       uploadingFilename={null}
       documentCount={0}
@@ -56,7 +56,7 @@ describe('DocumentUpload', () => {
   })
 
   it('tells an anonymous visitor their document expires, and offers no sign-in link in Mode A, where there is no account to make', () => {
-    setup({ isSignedIn: false })
+    setup({ retention: 'expires' })
     const strings = getStrings('en')
     expect(
       screen.getByText(strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)),
@@ -64,11 +64,22 @@ describe('DocumentUpload', () => {
     expect(screen.queryByRole('link', { name: strings.signInCta })).not.toBeInTheDocument()
   })
 
-  it('does not warn a signed-in reader about an expiry that will not happen', () => {
-    setup({ isSignedIn: true })
+  it('does not warn a signed-in reader about an expiry that will not happen, and says it is kept', () => {
+    setup({ retention: 'kept' })
     expect(
       screen.queryByText(getStrings('en').anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)),
     ).not.toBeInTheDocument()
+    expect(screen.getByText(getStrings('en').keptUploadNotice)).toBeInTheDocument()
+  })
+
+  it('renders no retention notice at all when nothing will be deleted (Mode A)', () => {
+    setup({ retention: 'none' })
+    const strings = getStrings('en')
+    expect(
+      screen.queryByText(strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)),
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: strings.signInCta })).not.toBeInTheDocument()
   })
 
   it('hands the chosen file straight to the page, without waiting for a submit', async () => {

@@ -54,6 +54,18 @@ export const MAX_UPLOAD_MEGABYTES = Math.floor(MAX_UPLOAD_BYTES / BYTES_PER_MEGA
  * where there are no accounts and so nothing to link to. */
 export const SIGN_IN_PATH: string | null = AUTH_ENABLED ? '/signup' : null
 
+/**
+ * What the reader may be told about how long an upload lives.
+ *
+ * - `none`: Mode A. Nothing expires and there is no account, so no notice.
+ * - `expires`: Mode B, anonymous. Deleted after the anonymous window.
+ * - `kept`: Mode B, signed in. Kept until the owner deletes it.
+ *
+ * Three states, three names: two booleans here is how the wrong pair gets
+ * rendered together.
+ */
+export type Retention = 'none' | 'expires' | 'kept'
+
 /** One attached document, as the interface needs it. */
 export interface AttachedDocument {
   id: string

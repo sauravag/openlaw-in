@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "../page";
@@ -12,7 +12,18 @@ import {
 import { getFallbackHelplineSet } from "@/lib/fallbackHelplines";
 import { CONVERSATION_STORAGE_KEY } from "@/lib/thread";
 import { getStrings } from "@/lib/strings";
+import { accountDeletedNotice } from "@/lib/accountDeletedStrings";
+import { ANONYMOUS_UPLOAD_TTL_HOURS } from "@/lib/documents";
 import type { AnswerData, DocumentSummaryData, RefusalData } from "@/lib/types";
+
+// Mode B (accounts enabled) is the mode these tests were written against; the
+// Mode A variants live in `pageModeA.test.tsx`. `mode` lets a test flip it.
+const mode = vi.hoisted(() => ({ enabled: true }));
+vi.mock("@/lib/authMode", () => ({
+  get AUTH_ENABLED() {
+    return mode.enabled;
+  },
+}));
 
 // Every network call this page can make is stubbed -- including the four
 // Task 17 added. `importActual` keeps the non-network exports (endpoint
@@ -84,6 +95,17 @@ const baseAnswer: AnswerData = {
   quota_remaining: 2,
 };
 
+/** Stub `GET /api/auth/session`; a function body can throw to simulate failure. */
+function stubSession(body: unknown | (() => never)) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      if (typeof body === "function") return body();
+      return new Response(JSON.stringify(body), { status: 200 });
+    }),
+  );
+}
+
 describe("HomePage", () => {
   beforeEach(() => {
     mockedAskQuestion.mockReset();
@@ -93,9 +115,12 @@ describe("HomePage", () => {
     mockedReadConversation.mockReset();
     window.sessionStorage.clear();
     window.history.replaceState(null, "", "/");
+    mode.enabled = true;
+    stubSession({ signedIn: false, email: null });
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     document.documentElement.lang = "en";
   });
 
@@ -751,5 +776,195 @@ describe("HomePage", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /something went wrong/i,
     );
+  });
+});
+
+describe("HomePage retention and account state (Mode B)", () => {
+  const strings = getStrings("en");
+  const anonymousNotice = strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS);
+
+  beforeEach(() => {
+    mockedAskQuestion.mockReset();
+    mockedReadConversation.mockReset();
+    window.sessionStorage.clear();
+    window.history.replaceState(null, "", "/");
+    mode.enabled = true;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.documentElement.lang = "en";
+  });
+
+  it("tells an anonymous visitor the 24-hour promise, with the sign-in call to action", async () => {
+    stubSession({ signedIn: false, email: null });
+    render(<HomePage />);
+
+    expect(screen.getByText(anonymousNotice)).toBeInTheDocument();
+    const links = screen.getAllByRole("link", { name: strings.signInCta });
+    expect(links.length).toBeGreaterThan(0);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
+  });
+
+  it("asks for the session exactly once, uncached", async () => {
+    stubSession({ signedIn: false, email: null });
+    render(<HomePage />);
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/auth/session",
+      expect.objectContaining({ cache: "no-store" }),
+    );
+  });
+
+  it("shows the kept notice, the email and sign-out, and no sign-in call to action, once signed in", async () => {
+    stubSession({ signedIn: true, email: "asha@example.com" });
+    render(<HomePage />);
+
+    expect(await screen.findByText(strings.keptUploadNotice)).toBeInTheDocument();
+    expect(screen.queryByText(anonymousNotice)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: strings.signInCta })).not.toBeInTheDocument();
+    expect(screen.getByText(strings.signedInAs("asha@example.com"))).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: strings.signOutButton })).toBeInTheDocument();
+  });
+
+  it("does not flash the signed-in notice while the session is still loading", () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
+    render(<HomePage />);
+
+    expect(screen.getByText(anonymousNotice)).toBeInTheDocument();
+    expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["the request throws", () => stubSession(() => { throw new Error("offline"); })],
+    [
+      "the server answers with an error status",
+      () =>
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => new Response("{}", { status: 500 })),
+        ),
+    ],
+    [
+      "the body is not the session shape",
+      () => stubSession({ signedIn: "yes", email: 7 }),
+    ],
+    [
+      "the body is not JSON",
+      () =>
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () => new Response("<html>", { status: 200 })),
+        ),
+    ],
+  ])("falls back to the conservative 24-hour promise when %s", async (_name, arrange) => {
+    arrange();
+    render(<HomePage />);
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    // Let the failed fetch settle before asserting nothing changed.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText(anonymousNotice)).toBeInTheDocument();
+    expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
+  });
+
+  it("keeps the static helplines and the hoisted crisis box first while signed in", async () => {
+    stubSession({ signedIn: true, email: "asha@example.com" });
+    mockedAskQuestion.mockResolvedValue({
+      kind: "answer",
+      data: {
+        ...baseAnswer,
+        answer: "Legal analysis here.",
+        crisis_response: "If you are in danger right now, call 112.",
+        helplines: [{ number: "112", label: "Emergency" }],
+        conversation_id: "c",
+      },
+    });
+
+    const { container } = render(<HomePage />);
+    expect(screen.getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
+    await screen.findByText(strings.keptUploadNotice);
+    await userEvent.type(screen.getByLabelText(/your question/i), "he is hitting me");
+    await userEvent.click(screen.getByRole("button", { name: /^ask$/i }));
+    await screen.findByText("Legal analysis here.");
+
+    const text = container.textContent ?? "";
+    expect(text.indexOf("call 112")).toBeLessThan(text.indexOf("Legal analysis here."));
+  });
+
+  describe("redirect flags", () => {
+    function region(): HTMLElement {
+      return screen.getByTestId("redirect-notice");
+    }
+
+    it("explains a failed migration, in a polite live region, and strips the flag", async () => {
+      stubSession({ signedIn: true, email: "a@example.com" });
+      window.history.replaceState(null, "", "/?migration=failed");
+      render(<HomePage />);
+
+      expect(await within(region()).findByText(strings.authMigrationFailed)).toBeInTheDocument();
+      expect(region()).toHaveAttribute("aria-live", "polite");
+      expect(window.location.search).toBe("");
+    });
+
+    it("renders the Hindi migration copy, with no English", async () => {
+      stubSession({ signedIn: true, email: "a@example.com" });
+      window.history.replaceState(null, "", "/?migration=failed&language=hi");
+      render(<HomePage />);
+
+      const hindi = getStrings("hi");
+      expect(await within(region()).findByText(hindi.authMigrationFailed)).toBeInTheDocument();
+      expect(region().textContent).not.toContain(strings.authMigrationFailed);
+    });
+
+    it.each([
+      ["removed", true],
+      ["remains", false],
+    ])("says what was erased after account deletion (identity=%s)", async (value, removed) => {
+      stubSession({ signedIn: false, email: null });
+      window.history.replaceState(null, "", `/?account=deleted&identity=${value}`);
+      render(<HomePage />);
+
+      expect(
+        await within(region()).findByText(accountDeletedNotice("en", removed)),
+      ).toBeInTheDocument();
+      expect(window.location.search).toBe("");
+    });
+
+    it("renders the Hindi deletion notice", async () => {
+      stubSession({ signedIn: false, email: null });
+      window.history.replaceState(null, "", "/?account=deleted&identity=removed&language=hi");
+      render(<HomePage />);
+
+      expect(
+        await within(region()).findByText(accountDeletedNotice("hi", true)),
+      ).toBeInTheDocument();
+    });
+
+    it("renders nothing for an unknown value and never echoes it into the DOM", async () => {
+      stubSession({ signedIn: false, email: null });
+      window.history.replaceState(
+        null,
+        "",
+        "/?migration=<script>zzz</script>&account=deleted&identity=banana",
+      );
+      const { container } = render(<HomePage />);
+
+      await waitFor(() => expect(fetch).toHaveBeenCalled());
+      expect(region()).toBeEmptyDOMElement();
+      expect(container.innerHTML).not.toContain("zzz");
+      expect(container.innerHTML).not.toContain("banana");
+    });
+
+    it("keeps unrelated query parameters when stripping the flags", async () => {
+      stubSession({ signedIn: false, email: null });
+      window.history.replaceState(null, "", "/?migration=failed&other=1");
+      render(<HomePage />);
+
+      await within(region()).findByText(strings.authMigrationFailed);
+      expect(window.location.search).toBe("?other=1");
+    });
   });
 });

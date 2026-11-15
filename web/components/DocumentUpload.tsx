@@ -2,6 +2,7 @@ import { DOCUMENTS_ENDPOINT } from '@/lib/api'
 import {
   ALLOWED_UPLOAD_EXTENSIONS,
   ANONYMOUS_UPLOAD_TTL_HOURS,
+  type Retention,
   MAX_DOCUMENTS_PER_CONVERSATION,
   MAX_UPLOAD_MEGABYTES,
   SIGN_IN_PATH,
@@ -14,10 +15,11 @@ interface DocumentUploadProps {
   /** Sent as a form field so the no-JavaScript post lands in the right
    * conversation; `null` on a first upload, which lets the server mint one. */
   conversationId: string | null
-  /** Drives the anonymous-retention notice. Anonymous today -- this project
-   * has no browser-side session yet -- but the prop exists so the notice
-   * cannot be left behind when it does. */
-  isSignedIn: boolean
+  /** Which retention promise to make, if any: `none` (Mode A, nothing
+   * expires and there is no account, so no notice and no sign-in link),
+   * `expires` (Mode B anonymous: the 24-hour notice with the sign-in call to
+   * action) or `kept` (Mode B signed in: kept until the owner deletes it). */
+  retention: Retention
   isUploading: boolean
   uploadingFilename: string | null
   documentCount: number
@@ -54,7 +56,7 @@ interface DocumentUploadProps {
 export default function DocumentUpload({
   language,
   conversationId,
-  isSignedIn,
+  retention,
   isUploading,
   uploadingFilename,
   documentCount,
@@ -106,7 +108,7 @@ export default function DocumentUpload({
           <p className="text-sm leading-relaxed text-muted">
             {strings.uploadLimitsNote(MAX_UPLOAD_MEGABYTES, MAX_DOCUMENTS_PER_CONVERSATION)}
           </p>
-          {!isSignedIn && (
+          {retention === 'expires' && (
             <p className="text-sm leading-relaxed text-paper-ink">
               {strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)}{' '}
               {SIGN_IN_PATH && (
@@ -118,6 +120,9 @@ export default function DocumentUpload({
                 </a>
               )}
             </p>
+          )}
+          {retention === 'kept' && (
+            <p className="text-sm leading-relaxed text-paper-ink">{strings.keptUploadNotice}</p>
           )}
           {/* Needed only for the no-JavaScript path -- with scripts running,
             * `onChange` has already started the upload before this is reachable. */}

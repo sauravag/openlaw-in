@@ -1,4 +1,4 @@
-import type { AttachedDocument } from '@/lib/documents'
+import type { AttachedDocument, Retention } from '@/lib/documents'
 import { getStrings } from '@/lib/strings'
 
 interface DocumentListProps {
@@ -10,6 +10,9 @@ interface DocumentListProps {
   /** The document currently being deleted, whose button is disabled so a
    * double tap on a slow connection cannot fire two requests. */
   deletingId: string | null
+  /** `none` (Mode A) shows no retention sentence: nothing there expires, and
+   * the server's wording about expiry must not be put in front of the reader. */
+  retention: Retention
 }
 
 /** A rubbish bin. Paired with a word, never the only signal. */
@@ -41,6 +44,7 @@ export default function DocumentList({
   language,
   onDelete,
   deletingId,
+  retention,
 }: DocumentListProps) {
   if (documents.length === 0) {
     return null
@@ -59,9 +63,11 @@ export default function DocumentList({
               <p className="text-sm tabular-nums text-muted">
                 {strings.documentPageCount(document.pageCount)}
               </p>
-              <p className="mt-1 text-sm leading-relaxed text-muted">
-                {document.retentionNotice}
-              </p>
+              {retention !== 'none' && (
+                <p className="mt-1 text-sm leading-relaxed text-muted">
+                  {document.retentionNotice}
+                </p>
+              )}
             </div>
             <button
               type="button"

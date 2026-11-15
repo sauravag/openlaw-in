@@ -101,6 +101,8 @@ export interface UIStrings {
    */
   anonymousUploadNotice: (hours: number) => string;
   signInCta: string;
+  /** Shown to a signed-in reader instead of the expiry notice: nothing is deleted on a timer. */
+  keptUploadNotice: string;
   /** Progress line while a file is in flight. */
   uploadingStatus: (filename: string) => string;
   /** Accessible name of a document's delete button -- names the file. */
@@ -238,6 +240,8 @@ const EN: UIStrings = {
   anonymousUploadNotice: (hours) =>
     `This document will be deleted after ${hours} hours. Sign in to keep it.`,
   signInCta: "Sign in",
+  keptUploadNotice:
+    "This document is kept until you delete it. You can delete it at any time.",
   uploadingStatus: (filename) => `Sending ${filename}\u2026`,
   deleteDocumentLabel: (filename) => `Delete ${filename}`,
   deleteDocumentButton: "Delete",
@@ -358,6 +362,8 @@ const HI: UIStrings = {
   anonymousUploadNotice: (hours) =>
     `यह दस्तावेज़ ${hours} घंटों के बाद मिटा दिया जाएगा। इसे रखना है तो साइन इन करें।`,
   signInCta: "साइन इन करें",
+  keptUploadNotice:
+    "यह दस्तावेज़ तब तक रखा जाएगा जब तक आप इसे खुद नहीं हटाते। आप इसे कभी भी हटा सकते हैं।",
   uploadingStatus: (filename) => `${filename} भेजा जा रहा है\u2026`,
   deleteDocumentLabel: (filename) => `${filename} मिटाएँ`,
   deleteDocumentButton: "मिटाएँ",

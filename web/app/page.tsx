@@ -1,14 +1,17 @@
 "use client";
 
 import { type FormEvent, useEffect, useRef, useState } from "react";
+import AccountBar from "@/components/AccountBar";
 import ConversationThread from "@/components/ConversationThread";
 import CrisisAlert from "@/components/CrisisAlert";
 import DocumentList from "@/components/DocumentList";
 import DocumentUpload from "@/components/DocumentUpload";
 import HelplineList from "@/components/HelplineList";
 import LanguageSelector from "@/components/LanguageSelector";
+import RedirectNotice from "@/components/RedirectNotice";
 import RefusalNotice from "@/components/RefusalNotice";
 import WelcomeGuide from "@/components/WelcomeGuide";
+import { AUTH_ENABLED } from "@/lib/authMode";
 import { askQuestion, readConversation, deleteConversation } from "@/lib/api";
 import { getFallbackHelplineSet } from "@/lib/fallbackHelplines";
 import { DEFAULT_LANGUAGE, LANGUAGES, type Language } from "@/lib/languages";
@@ -26,9 +29,12 @@ import {
 } from "@/lib/thread";
 import {
   attachedFromConversationCard,
+  type Retention,
   type AttachedDocument,
 } from "@/lib/documents";
 import { useDocuments } from "@/lib/useDocuments";
+import { useRedirectNotice } from "@/lib/useRedirectNotice";
+import { useSession } from "@/lib/useSession";
 
 type Status = "idle" | "loading" | "error";
 
@@ -207,6 +213,16 @@ export default function HomePage() {
     onConversationStarted: rememberConversation,
   });
 
+  // Must run before `useRestoreFromQueryString`, which may rewrite the URL.
+  const redirectNotice = useRedirectNotice();
+  const session = useSession();
+  // Referenced as `AUTH_ENABLED` directly so Mode A's build folds this to
+  // "none" and drops every account branch.
+  const retention: Retention = !AUTH_ENABLED
+    ? "none"
+    : session.signedIn
+      ? "kept"
+      : "expires";
   useRestoreFromQueryString(setQuestion, setLanguage);
   useRestoreConversation(
     language,
@@ -326,10 +342,21 @@ export default function HomePage() {
             OpenLaw<span className="text-brand">.in</span>
           </h1>
           <p className="mt-1 text-base text-muted">{strings.tagline}</p>
+          {AUTH_ENABLED && (
+            <div className="mt-3">
+              <AccountBar
+                signedIn={session.signedIn}
+                email={session.email}
+                language={language}
+              />
+            </div>
+          )}
         </div>
       </header>
 
       <main className={`${COLUMN} flex flex-1 flex-col gap-8 py-6 sm:py-8`}>
+        <RedirectNotice notice={redirectNotice} language={language} />
+
         {/* What this is, first: a first-time visitor should understand the
          * product before being shown a wall of emergency numbers. Rendered
          * only until the conversation has started, so it never sits above a
@@ -438,14 +465,12 @@ export default function HomePage() {
             language={language}
             onDelete={(documentId) => void attachments.removeDocument(documentId)}
             deletingId={attachments.deletingId}
+            retention={retention}
           />
           <DocumentUpload
             language={language}
             conversationId={conversationId}
-            // No browser-side session exists in this build, so every visitor
-            // is anonymous and must be told their upload expires. The prop is
-            // here so the notice cannot be forgotten when sign-in lands.
-            isSignedIn={false}
+            retention={retention}
             isUploading={attachments.uploadingFilename !== null}
             uploadingFilename={attachments.uploadingFilename}
             documentCount={attachments.documents.length}
