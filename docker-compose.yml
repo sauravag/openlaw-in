@@ -24,15 +24,17 @@
 # constraint, not a default to reconsider.
 #
 # --- Reverse-proxy trust (binding requirement 1; Task 7 review, H1) --------
-# `web` (Next.js) proxies `/ask` to `api` server-side (see
-# `web/next.config.ts`'s `rewrites()`) purely so the anonymous-quota cookie
-# round-trips with zero CORS configuration -- but a Next.js `rewrites()`
-# entry is NOT a reverse proxy and must never be trusted as one: it does not
-# set `X-Forwarded-For` on its own (Next only fills that header in when
-# ABSENT, `x-forwarded-for ??= ...`, `node_modules/next/dist/server/
-# base-server.js`), and because it copies incoming headers through
-# unchanged, a client hitting `web` directly could forge whatever
-# `X-Forwarded-For` it liked. Trusting `web` as if it corrected that header
+# `web` (Next.js) proxies to `api` server-side through enumerated Route
+# Handlers (`web/app/api/openlaw/*/route.ts`, all going through
+# `web/lib/backend.ts`'s `proxyToBackend`) so the anonymous-quota cookie
+# round-trips with zero CORS configuration and the Bearer token is attached
+# server-side -- but that proxy is NOT a reverse proxy and must never be
+# trusted as one: it does not set `X-Forwarded-For` on its own (Next only
+# fills that header in when ABSENT, `x-forwarded-for ??= ...`,
+# `node_modules/next/dist/server/base-server.js`), and `forwardableHeaders`
+# copies incoming headers through unchanged apart from `Authorization`,
+# hop-by-hop headers and the session cookies, so a client hitting `web`
+# directly could forge whatever `X-Forwarded-For` it liked. Trusting `web` as if it corrected that header
 # would be WORSE than trusting nothing: every real caller collapses into one
 # shared rate-limit bucket (no real per-client value ever arrives), and a
 # spoofed header lets an attacker bypass the limiter outright.
@@ -42,7 +44,7 @@
 # above) and that OVERWRITES `X-Forwarded-For` with the connection it
 # actually observed (`proxy_set_header X-Forwarded-For $remote_addr;` --
 # never `$proxy_add_x_forwarded_for`, which appends to a client-supplied
-# value instead of replacing it). `web`'s rewrite then forwards that
+# value instead of replacing it). `web`'s Route Handlers then forward that
 # genuine value through to `api` unchanged (Next's `??=` never overwrites an
 # already-present header), so `api` sees `web`'s address as its peer (the
 # one address actually connecting to it) and a REAL, un-forgeable client
@@ -57,7 +59,7 @@
 # NO change, PROVIDED your ingress also overwrites `X-Forwarded-For` the way
 # `nginx/nginx.conf` does above -- verify that explicitly; do not assume it.
 # The one case that DOES need a change: an ingress that talks to `api`
-# directly, bypassing `web`'s rewrite (or a future multi-replica `api`
+# directly, bypassing `web`'s Route Handlers (or a future multi-replica `api`
 # behind a load balancer) -- then set `OPENLAW_TRUSTED_PROXY_IPS` to THAT
 # proxy's/load balancer's actual address instead of `web`'s.
 
