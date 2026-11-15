@@ -4,12 +4,37 @@ import { notFound, redirectTo } from "@/lib/auth/routeHelpers";
 import { clearVerifier, readVerifier, writeSession } from "@/lib/auth/session";
 import { authUnavailableResponse, checkAuthAgreement } from "@/lib/authAgreement";
 import { AUTH_ENABLED } from "@/lib/authMode";
+import { postToBackend } from "@/lib/backend";
 
 export const dynamic = "force-dynamic";
 
 const MAX_CODE_LENGTH = 512;
 const FAILED = "/signup?error=failed";
 const EXPIRED = "/signup?error=expired";
+const MIGRATION_FAILED = "/?migration=failed";
+const MIGRATE_PATH = "/account/migrate";
+
+/**
+ * Moves this browser's anonymous material into the new account. Never throws
+ * and never fails sign-in: any failure is logged (no tokens) and reported as
+ * false so the person is told their earlier material was not moved.
+ */
+async function migrateAnonymousMaterial(
+  accessToken: string,
+  inboundCookieHeader: string | null,
+): Promise<boolean> {
+  try {
+    const response = await postToBackend(MIGRATE_PATH, {
+      bearer: accessToken,
+      inboundCookieHeader,
+    });
+    if (response.ok) return true;
+    console.error("[Auth] account migration refused, status", response.status);
+  } catch (error) {
+    console.error("[Auth] account migration failed", error instanceof Error ? error.name : "unknown");
+  }
+  return false;
+}
 
 async function exchange(code: string, verifier: string) {
   const config = readGotrueConfig();
@@ -57,7 +82,9 @@ export async function GET(request: Request): Promise<Response> {
     console.error("[Auth] could not store session", error instanceof Error ? error.message : "unknown");
     return redirectTo(FAILED);
   }
-  // Task 10: call the backend's POST /account/migrate here with
-  // `Authorization: Bearer ${outcome.accessToken}` to adopt anonymous history.
-  return redirectTo("/");
+  const migrated = await migrateAnonymousMaterial(
+    outcome.accessToken,
+    request.headers.get("cookie"),
+  );
+  return redirectTo(migrated ? "/" : MIGRATION_FAILED);
 }

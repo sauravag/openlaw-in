@@ -9,6 +9,8 @@ const BAD_GATEWAY = 502;
 const BAD_REQUEST = 400;
 const FORBIDDEN = 403;
 const MAX_DECODE_ROUNDS = 3;
+/** Bound on a server-initiated backend call, so sign-in never hangs on it. */
+export const BACKEND_POST_TIMEOUT_MS = 10_000;
 
 // RFC 9110 section 7.6.1 hop-by-hop headers (+ `host`, which fetch recomputes).
 // undici rejects several of these outright, which would turn a legitimate
@@ -18,23 +20,33 @@ const HOP_BY_HOP_HEADERS = [
   "trailer", "upgrade", "expect", "host",
 ];
 
-/** Request headers for the backend: cookie in, any client Authorization out. */
-function buildBackendHeaders(request: Request): Headers {
-  const headers = new Headers(request.headers);
+/**
+ * Inbound headers made safe to forward: any client Authorization out, hop-by-hop
+ * headers out, and the session/PKCE cookies stripped from `Cookie`. Carries NO
+ * bearer; callers attach one from a session they have verified themselves.
+ */
+function forwardableHeaders(source: Headers): Headers {
+  const headers = new Headers(source);
   // A browser must not hand the backend a token of its choosing through here.
   headers.delete("authorization");
   // Names listed in the inbound `Connection` value are hop-by-hop too.
-  const named = (request.headers.get("connection") ?? "")
+  const named = (source.get("connection") ?? "")
     .split(",")
     .map((token) => token.trim().toLowerCase())
     .filter(Boolean);
   for (const name of [...HOP_BY_HOP_HEADERS, ...named]) headers.delete(name);
   // The backend never needs the session cookie (it holds the refresh token)
-  // or the PKCE verifier; only the Bearer access token below, and only in
-  // Mode B. Everything else (e.g. `openlaw_anon_id`) passes through intact.
-  const forwardedCookies = stripAuthCookies(request.headers.get("cookie"));
+  // or the PKCE verifier; only a Bearer access token, and only in Mode B.
+  // Everything else (e.g. `openlaw_anon_id`) passes through intact.
+  const forwardedCookies = stripAuthCookies(source.get("cookie"));
   if (forwardedCookies === null) headers.delete("cookie");
   else headers.set("cookie", forwardedCookies);
+  return headers;
+}
+
+/** Request headers for the backend: cookie in, any client Authorization out. */
+function buildBackendHeaders(request: Request): Headers {
+  const headers = forwardableHeaders(request.headers);
   if (AUTH_ENABLED) {
     // The cookie holds a JSON session; only the access token goes upstream,
     // and only when the session is valid, unexpired and unambiguous.
@@ -150,5 +162,43 @@ export async function proxyToBackend(
     status: upstream.status,
     statusText: upstream.statusText,
     headers: buildResponseHeaders(upstream, new URL(base).origin),
+  });
+}
+
+export interface PostToBackendOptions {
+  /** Access token held in memory by the caller (not read from any cookie). */
+  bearer: string;
+  /** The inbound `Cookie` header; only non-auth cookies are forwarded. */
+  inboundCookieHeader: string | null;
+  timeoutMs?: number;
+}
+
+/**
+ * Server-initiated, body-less POST to the backend with an explicit bearer.
+ *
+ * For the magic-link callback, which has only just minted the session in THIS
+ * request: `proxyToBackend` reads the bearer from the inbound request's
+ * cookie, which cannot see a cookie written earlier in the same request, and
+ * the inbound request is a GET from an email link. Shares header building
+ * with `proxyToBackend`, so `openlaw_session` and `openlaw_pkce` are never
+ * forwarded, whereas `openlaw_anon_id` is. Rejects on a network error or
+ * timeout; the CALLER decides what a failure means.
+ */
+export async function postToBackend(
+  backendPath: string,
+  { bearer, inboundCookieHeader, timeoutMs = BACKEND_POST_TIMEOUT_MS }: PostToBackendOptions,
+): Promise<Response> {
+  if (hasDotSegment(backendPath)) throw new Error("invalid backend path");
+  const base = (process.env.OPENLAW_API_URL ?? DEFAULT_API_URL).replace(/\/+$/, "");
+  const source = new Headers();
+  if (inboundCookieHeader) source.set("cookie", inboundCookieHeader);
+  const headers = forwardableHeaders(source);
+  headers.set("authorization", `Bearer ${bearer}`);
+  return fetch(`${base}${backendPath}`, {
+    method: "POST",
+    headers,
+    redirect: "manual",
+    cache: "no-store",
+    signal: AbortSignal.timeout(timeoutMs),
   });
 }

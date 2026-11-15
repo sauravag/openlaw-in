@@ -353,3 +353,65 @@ describe("proxyToBackend path, signal and redirect hardening", () => {
     expect(response.headers.get("location")).toBe("https://other.test/y");
   });
 });
+
+describe("postToBackend", () => {
+  const SESSION_COOKIE = "openlaw_session=%7B%22accessToken%22%3A%22stale%22%7D";
+
+  it("POSTs to the backend with the in-memory bearer", async () => {
+    const mock = stubBackend(new Response("{}"));
+    const { postToBackend } = await load(true);
+    await postToBackend("/account/migrate", { bearer: "fresh-token", inboundCookieHeader: null });
+    expect(mock.mock.calls[0][0]).toBe("http://backend.test/account/migrate");
+    const init = mock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(sentHeaders(mock).get("authorization")).toBe("Bearer fresh-token");
+  });
+
+  it("forwards the anon cookie but never the session or PKCE cookies", async () => {
+    const mock = stubBackend(new Response("{}"));
+    const { postToBackend } = await load(true);
+    await postToBackend("/account/migrate", {
+      bearer: "t",
+      inboundCookieHeader: `openlaw_anon_id=anon-1; ${SESSION_COOKIE}; openlaw_pkce=verifier`,
+    });
+    const cookie = sentHeaders(mock).get("cookie") ?? "";
+    expect(cookie).toBe("openlaw_anon_id=anon-1");
+    expect(cookie).not.toContain("openlaw_session");
+    expect(cookie).not.toContain("openlaw_pkce");
+  });
+
+  it("sends no Cookie header when only auth cookies were inbound", async () => {
+    const mock = stubBackend(new Response("{}"));
+    const { postToBackend } = await load(true);
+    await postToBackend("/account/migrate", {
+      bearer: "t",
+      inboundCookieHeader: `${SESSION_COOKIE}; openlaw_pkce=verifier`,
+    });
+    expect(sentHeaders(mock).has("cookie")).toBe(false);
+  });
+
+  it("uses a bounded timeout signal", async () => {
+    const mock = stubBackend(new Response("{}"));
+    const { postToBackend, BACKEND_POST_TIMEOUT_MS } = await load(true);
+    expect(BACKEND_POST_TIMEOUT_MS).toBe(10_000);
+    await postToBackend("/account/migrate", { bearer: "t", inboundCookieHeader: null });
+    expect((mock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("rejects a dot-segment path without calling fetch", async () => {
+    const mock = stubBackend(new Response("{}"));
+    const { postToBackend } = await load(true);
+    await expect(
+      postToBackend("/a/../b", { bearer: "t", inboundCookieHeader: null }),
+    ).rejects.toThrow();
+    expect(mock).not.toHaveBeenCalled();
+  });
+
+  it("propagates a network failure to the caller", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+    const { postToBackend } = await load(true);
+    await expect(
+      postToBackend("/account/migrate", { bearer: "t", inboundCookieHeader: null }),
+    ).rejects.toThrow("fetch failed");
+  });
+});

@@ -31,6 +31,8 @@ vi.mock("@/lib/authAgreement", () => ({
     Response.json({ detail: "unavailable-marker" }, { status: 503 }),
 }));
 
+const backendFetch = vi.fn<typeof fetch>();
+
 const NOW_SECONDS = Math.floor(Date.now() / 1000);
 const SESSION = {
   kind: "session" as const,
@@ -91,10 +93,15 @@ beforeEach(() => {
   exchangeCode.mockReset().mockResolvedValue(SESSION);
   revokeSession.mockReset().mockResolvedValue(undefined);
   checkAuthAgreement.mockReset().mockResolvedValue({ agrees: true });
+  backendFetch
+    .mockReset()
+    .mockImplementation(async () => Response.json({ conversations_moved: 0, documents_moved: 0 }));
+  vi.stubGlobal("fetch", backendFetch);
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe("Mode A (auth disabled)", () => {
@@ -459,6 +466,69 @@ describe("GET /api/auth/callback", () => {
     const cleared = sets.filter((c) => c.name === "openlaw_pkce");
     expect(cleared[cleared.length - 1].options.maxAge).toBe(0);
     expect(await response.text()).not.toContain("access-token-secret");
+  });
+
+  describe("account migration", () => {
+    const withCookies = "openlaw_pkce=verifier-value; openlaw_anon_id=anon-1";
+    const migrationOutcomes: Array<[string, () => void]> = [
+      ["a non-2xx backend response", () => backendFetch.mockResolvedValue(new Response("x", { status: 503 }))],
+      ["a network error", () => backendFetch.mockRejectedValue(new TypeError("fetch failed"))],
+      [
+        "a timeout",
+        () => backendFetch.mockRejectedValue(new DOMException("timed out", "TimeoutError")),
+      ],
+    ];
+
+    it("posts to /account/migrate with the in-memory bearer and only the anon cookie", async () => {
+      cookieHeader = withCookies;
+      const { callback } = await load(true);
+      const request = new Request("http://localhost:3000/api/auth/callback?code=abc123", {
+        headers: { cookie: `${withCookies}; openlaw_session=stale-session` },
+      });
+
+      const response = await callback(request);
+
+      expect(response.headers.get("location")).toBe("/");
+      expect(backendFetch).toHaveBeenCalledTimes(1);
+      const [url, init] = backendFetch.mock.calls[0];
+      expect(String(url)).toMatch(/\/account\/migrate$/);
+      expect(init?.method).toBe("POST");
+      const sent = new Headers(init?.headers);
+      expect(sent.get("authorization")).toBe("Bearer access-token-secret");
+      expect(sent.get("cookie")).toBe("openlaw_anon_id=anon-1");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it.each(migrationOutcomes)(
+      "still signs in, logs without tokens and flags ?migration=failed on %s",
+      async (_name, arrange) => {
+        cookieHeader = withCookies;
+        arrange();
+        const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+        const { callback } = await load(true);
+
+        const response = await callback(callbackRequest());
+
+        expect(response.status).toBe(303);
+        expect(response.headers.get("location")).toBe("/?migration=failed");
+        expect(sets.some((c) => c.name === "openlaw_session")).toBe(true);
+        const writes = sets.filter((c) => c.name === "openlaw_pkce");
+        expect(writes[writes.length - 1].options.maxAge).toBe(0);
+        expect(errors).toHaveBeenCalled();
+        expect(JSON.stringify(errors.mock.calls)).not.toContain("access-token-secret");
+        errors.mockRestore();
+      },
+    );
+
+    it("does not call the backend when the code exchange fails", async () => {
+      cookieHeader = withCookies;
+      exchangeCode.mockResolvedValue({ kind: "failed", detail: "x" });
+      const { callback } = await load(true);
+
+      await callback(callbackRequest());
+
+      expect(backendFetch).not.toHaveBeenCalled();
+    });
   });
 
   it("redirects to /signup?error=expired for an expired code", async () => {

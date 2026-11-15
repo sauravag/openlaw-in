@@ -260,6 +260,20 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
             "अब भी पूछ सकते हैं।"
         ),
     },
+    # Returned by `POST /account/migrate` for a missing, invalid or expired
+    # bearer. Migration has no anonymous meaning, so unlike `/ask` there is no
+    # fall-back: the person is told plainly, and the callback keeps them signed
+    # in regardless (see the frontend's `?migration=failed`).
+    "sign_in_required": {
+        "en": (
+            "We could not confirm your sign-in, so your earlier conversations "
+            "were not moved to your account. Please sign in again."
+        ),
+        "hi": (
+            "हम आपके साइन इन की पुष्टि नहीं कर सके, इसलिए आपकी पहले की बातचीत आपके "
+            "खाते में नहीं ले जाई गई। कृपया फिर से साइन इन करें।"
+        ),
+    },
     # Returned for a conversation or document the caller does not own, AND
     # for one that does not exist -- deliberately the same response, so the
     # reply cannot be used to enumerate real ids (see `openlaw.db
@@ -287,6 +301,8 @@ REFUSAL_STATUS: dict[str, int] = {
     "too_many_documents": 422,
     "not_found": 404,
     "auth_unavailable": 503,
+    # Same status as the other auth refusal, by ruling, rather than a 401.
+    "sign_in_required": 503,
 }
 
 #: `openlaw.documents.extract.ExtractionError.reason` -> refusal key. The
