@@ -8,7 +8,7 @@ function isLanguageCode(value: string | null): value is Language["code"] {
 /**
  * Restore `question`/`language` from the URL query string on mount.
  *
- * Task 6 review, M5: the form's `method="get"` fallback (in `app/page.tsx`) means a
+ * Task 6 review, M5: the composer's `method="get"` fallback (`components/Composer.tsx`) means a
  * submit that happens before React has hydrated -- or with JavaScript off
  * entirely -- performs a real browser GET to `?question=...&language=...`
  * rather than silently discarding what was typed. This is the other half of
@@ -36,25 +36,43 @@ export function useRestoreFromQueryString(
   }, []);
 }
 
+/** `smooth`, unless the reader asked the system for less motion. */
+function scrollBehavior(): ScrollBehavior {
+  const prefersLessMotion =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return prefersLessMotion ? "auto" : "smooth";
+}
+
 /**
- * Scroll and move focus to `ref`'s element whenever `dependency` changes.
+ * Scroll `ref`'s element into view whenever `dependency` changes, aligned by
+ * `block`. Never on any other render, and never on mount with a null value:
+ * someone who has scrolled up to re-read an earlier answer is not yanked
+ * down by typing, a language switch, or a session re-check.
  *
- * Task 6 review, H2: requirement 4 is "reachable without scrolling past
- * legal analysis," and DOM order alone does not satisfy that on a phone --
- * the form itself pushes the result ~440-520px down. A sighted user gets no
- * signal that anything appeared unless the viewport actually moves. The
- * element focused is the result wrapper, whose FIRST child is the crisis
- * box whenever there is one, so focus lands above the legal content rather
- * than after it.
+ * Task 6 review, H2: requirement 4 is "reachable without scrolling past legal
+ * analysis", and DOM order alone does not satisfy that -- a sighted reader
+ * gets no signal anything appeared unless the viewport moves. In the chat
+ * layout the message list is its own scroll area, and the page scrolls the
+ * START of the newest answer turn to the top of it (`block: "start"`), not
+ * to the bottom of the list. The crisis block is that turn's first child, so
+ * it is the first thing on screen, above the legal analysis.
+ *
+ * This used to move focus to the result as well, which is how a screen
+ * reader heard the answer. That pulled the caret out of the question box and
+ * stranded it ~680px above the viewport (the owner's "I have to refresh"
+ * report). Focus now stays in the composer; the answer is announced through
+ * the polite live region in `MessageList`, and `CrisisAlert` keeps its own
+ * `role="alert"`.
  */
 export function useScrollIntoViewOnChange(
   ref: React.RefObject<HTMLElement | null>,
   dependency: unknown,
+  block: ScrollLogicalPosition = "start",
 ) {
   useEffect(() => {
     if (dependency === null || dependency === undefined) return;
-    ref.current?.focus();
-    ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    ref.current?.scrollIntoView({ behavior: scrollBehavior(), block });
     // `ref` is a stable object; only re-run when the tracked value changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dependency]);

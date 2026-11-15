@@ -140,8 +140,14 @@ describe("HomePage", () => {
     render(<HomePage />);
 
     expect(mockedAskQuestion).not.toHaveBeenCalled();
-    expect(screen.getByRole("link", { name: /112/ })).toHaveAttribute("href", "tel:112");
-    expect(screen.getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
+    // Scoped to the static helpline block: the chat header now carries its
+    // own one-tap 112 link as well, so "the" 112 link is no longer unique.
+    const standing = screen.getByRole("region", { name: getStrings("en").helplineHeading });
+    expect(within(standing).getByRole("link", { name: /112/ })).toHaveAttribute("href", "tel:112");
+    expect(within(standing).getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
+    expect(
+      within(screen.getByRole("banner")).getByRole("link", { name: getStrings("en").emergencyCallLabel }),
+    ).toHaveAttribute("href", "tel:112");
   });
 
   it("welcomes a first-time visitor with example questions, and drops them once there is an answer", async () => {
@@ -391,11 +397,13 @@ describe("HomePage", () => {
     expect(thread.indexOf("First answer.")).toBeLessThan(thread.indexOf("Second answer."));
   });
 
-  it("puts a crisis answer first in DOM order even at the bottom of a long thread", async () => {
-    // The ordering requirement that a thread could easily have broken: the
-    // newest answer sits LAST in the list, so a crisis response arriving on
-    // turn three would be below two turns of legal analysis. The page hoists
-    // it above the whole thread instead.
+  it("puts a crisis answer first in its own reply, even at the bottom of a long thread", async () => {
+    // The ordering requirement a thread could easily have broken: the newest
+    // reply sits LAST in the list, below earlier turns' legal analysis. The
+    // single-column page hoisted the crisis box above the whole thread; the
+    // chat layout keeps it as the FIRST child of its own reply and scrolls
+    // that reply's start to the top of the view (next test), so it is still
+    // the first thing on screen, never below legal analysis.
     mockedAskQuestion
       .mockResolvedValueOnce({
         kind: "answer",
@@ -412,7 +420,7 @@ describe("HomePage", () => {
         },
       });
 
-    const { container } = render(<HomePage />);
+    render(<HomePage />);
     await userEvent.type(screen.getByLabelText(/your question/i), "First question");
     await userEvent.click(screen.getByRole("button", { name: /^ask$/i }));
     await screen.findByText("Ordinary legal analysis.");
@@ -421,15 +429,20 @@ describe("HomePage", () => {
     await userEvent.click(screen.getByRole("button", { name: /^ask$/i }));
     await screen.findByText("More legal analysis.");
 
-    const text = container.textContent ?? "";
-    expect(text.indexOf("call 112")).toBeLessThan(text.indexOf("Ordinary legal analysis."));
-    expect(text.indexOf("call 112")).toBeLessThan(text.indexOf("First question"));
-    // Exactly one crisis box -- hoisted, not duplicated inside the turn.
+    // Exactly one crisis box, in the newest turn, ahead of that turn's law.
     expect(screen.getAllByTestId("crisis")).toHaveLength(1);
-    expect(screen.getByTestId("crisis").querySelector('a[href="tel:112"]')).toBeInTheDocument();
+    const crisis = screen.getByTestId("crisis");
+    const newestTurn = threadItems()[1];
+    expect(newestTurn.contains(crisis)).toBe(true);
+    const text = newestTurn.textContent ?? "";
+    expect(text.indexOf("call 112")).toBeLessThan(text.indexOf("More legal analysis."));
+    expect(crisis.querySelector('a[href="tel:112"]')).toBeInTheDocument();
+    // Nothing from an earlier turn sits between the question and its help.
+    expect(text).not.toContain("Ordinary legal analysis.");
   });
 
-  it("moves focus to the hoisted crisis box, not to the legal analysis", async () => {
+  it("keeps focus in the composer and scrolls the reply that leads with the crisis box into view", async () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
     mockedAskQuestion.mockResolvedValue({
       kind: "answer",
       data: {
@@ -444,11 +457,19 @@ describe("HomePage", () => {
     await userEvent.click(screen.getByRole("button", { name: /^ask$/i }));
     await screen.findByTestId("crisis");
 
-    const focused = document.activeElement as HTMLElement;
-    expect(focused.contains(screen.getByTestId("crisis"))).toBe(true);
-    // The focused wrapper leads with the crisis box: the helpline text is the
-    // first thing in it, not something below an answer.
-    expect((focused.textContent ?? "").indexOf("call 112")).toBeLessThan(400);
+    // Focus no longer moves to the reply (it stranded the question box far
+    // above the viewport); the live region announces it instead.
+    expect(screen.getByLabelText(/your question/i)).toHaveFocus();
+    const index = scroll.mock.calls.findLastIndex(
+      ([options]) => typeof options === "object" && options?.block === "start",
+    );
+    expect(index).toBeGreaterThanOrEqual(0);
+    const target = scroll.mock.contexts[index] as HTMLElement;
+    expect(target.contains(screen.getByTestId("crisis"))).toBe(true);
+    // The scrolled-to reply leads with the crisis box: the helpline text is
+    // the first thing in it, not something below an answer.
+    expect((target.textContent ?? "").indexOf("call 112")).toBeLessThan(400);
+    scroll.mockRestore();
   });
 
   it.each([
