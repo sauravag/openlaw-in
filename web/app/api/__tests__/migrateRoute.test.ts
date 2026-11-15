@@ -12,7 +12,7 @@ vi.mock("next/headers", () => ({
 const backendFetch = vi.fn<typeof fetch>();
 const NOW_SECONDS = Math.floor(Date.now() / 1000);
 const SESSION_COOKIE = `openlaw_session=${encodeURIComponent(
-  JSON.stringify({ accessToken: "access-token-secret", refreshToken: "r", expiresAt: NOW_SECONDS + 3600, email: "a@b.in" }),
+  JSON.stringify({ accessToken: "access-token-secret", expiresAt: NOW_SECONDS + 3600, email: "a@b.in" }),
 )}`;
 const SAME_ORIGIN = { "sec-fetch-site": "same-origin" };
 

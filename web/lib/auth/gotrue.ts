@@ -50,7 +50,6 @@ export type ExchangeOutcome =
   | {
       kind: "session";
       accessToken: string;
-      refreshToken: string;
       expiresAt: number;
       email: string;
     }
@@ -210,8 +209,11 @@ function resolveExpiry(body: Json, claims: Json): number | null {
 function parseSession(body: unknown): ExchangeOutcome {
   const invalid: ExchangeOutcome = { kind: "failed", detail: "gotrue_response_invalid" };
   if (!isRecord(body)) return invalid;
-  const { access_token: access, refresh_token: refresh, user } = body;
-  if (typeof access !== "string" || typeof refresh !== "string" || !refresh) return invalid;
+  // The refresh token is deliberately not read: token refresh is not built,
+  // and a long-lived credential kept for nothing only makes a stolen cookie
+  // worth more (final review L1).
+  const { access_token: access, user } = body;
+  if (typeof access !== "string") return invalid;
   const claims = jwtClaims(access);
   if (claims === null) return invalid;
   const hasSubject = typeof claims.sub === "string" && claims.sub.length > 0;
@@ -220,7 +222,7 @@ function parseSession(body: unknown): ExchangeOutcome {
   if (!hasSubject || claims.aud !== REQUIRED_AUDIENCE || expiresAt === null || !email) {
     return invalid;
   }
-  return { kind: "session", accessToken: access, refreshToken: refresh, expiresAt, email };
+  return { kind: "session", accessToken: access, expiresAt, email };
 }
 
 /** Trade the emailed PKCE `code` plus our `verifier` for a session. */

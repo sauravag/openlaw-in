@@ -19,9 +19,9 @@ export type { StoredSession } from "@/lib/auth/sessionCookie";
 export { PKCE_COOKIE_NAME } from "@/lib/auth/sessionCookie";
 const PKCE_COOKIE_MAX_AGE_SECONDS = 600;
 
-/** The session cookie is JSON holding BOTH the access and refresh tokens, and
- * browsers silently drop a cookie over roughly 4 KB. Supabase JWTs are about
- * 1 KB each, so a normal session is ~2.5 KB; refuse loudly past this ceiling
+/** The session cookie is JSON holding the access token (no refresh token:
+ * final review L1), and browsers silently drop a cookie over roughly 4 KB. A
+ * Supabase JWT is about 1 KB, so a normal session is ~1.2 KB; refuse loudly past this ceiling
  * (below 4096, leaving room for the name and attributes) rather than let the
  * browser discard the cookie and leave the person mysteriously signed out. */
 const MAX_COOKIE_VALUE_BYTES = 3800;
@@ -63,7 +63,6 @@ export async function readSession(): Promise<StoredSession | null> {
 export async function writeSession(session: StoredSession): Promise<void> {
   const value = JSON.stringify({
     accessToken: session.accessToken,
-    refreshToken: session.refreshToken,
     expiresAt: session.expiresAt,
     email: session.email,
   });

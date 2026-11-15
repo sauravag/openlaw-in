@@ -144,12 +144,19 @@ describe("requestOtp", () => {
 });
 
 describe("exchangeCode", () => {
+  // Final review L1: the refresh token is neither required nor kept.
+  it("ignores the refresh token entirely", async () => {
+    fetchMock.mockResolvedValue(reply(200, { ...goodBody, refresh_token: undefined }));
+    const outcome = await exchangeCode(CONFIG, CODE, VERIFIER);
+    expect(outcome.kind).toBe("session");
+    expect(JSON.stringify(outcome)).not.toContain(REFRESH);
+  });
+
   it("returns a full session and posts to the pkce grant", async () => {
     fetchMock.mockResolvedValue(reply(200, goodBody));
     expect(await exchangeCode(CONFIG, CODE, VERIFIER)).toEqual({
       kind: "session",
       accessToken: ACCESS,
-      refreshToken: REFRESH,
       expiresAt: 1_900_000_000,
       email: "asha@example.com",
     });
@@ -201,8 +208,6 @@ describe("exchangeCode", () => {
     ["a non-JWT access token", { ...goodBody, access_token: "opaque" }],
     ["an undecodable JWT payload", { ...goodBody, access_token: "a.!!!.c" }],
     ["a JWT whose payload is not an object", { ...goodBody, access_token: `a.${b64url([1])}.c` }],
-    ["a missing refresh token", { ...goodBody, refresh_token: "" }],
-    ["a numeric refresh token", { ...goodBody, refresh_token: 7 }],
     ["no subject", { ...goodBody, access_token: makeJwt({ ...GOOD_CLAIMS, sub: undefined }) }],
     ["the wrong audience", { ...goodBody, access_token: makeJwt({ ...GOOD_CLAIMS, aud: "anon" }) }],
     ["no expiry anywhere", { ...goodBody, expires_at: undefined, access_token: makeJwt({ ...GOOD_CLAIMS, exp: undefined }) }],

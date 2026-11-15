@@ -37,6 +37,7 @@ const NOW_SECONDS = Math.floor(Date.now() / 1000);
 const SESSION = {
   kind: "session" as const,
   accessToken: "access-token-secret",
+  // What a GoTrue mock might still return; it must never be stored.
   refreshToken: "refresh-token-secret",
   expiresAt: NOW_SECONDS + 3600,
   email: "person@example.com",
@@ -618,6 +619,8 @@ describe("GET /api/auth/callback", () => {
     const session = sets.find((c) => c.name === "openlaw_session");
     expect(session?.options.httpOnly).toBe(true);
     expect(JSON.parse(session!.value).email).toBe("person@example.com");
+    // Final review L1: even if GoTrue hands one over, no refresh token is kept.
+    expect(session!.value).not.toContain("refresh-token-secret");
     const cleared = sets.filter((c) => c.name === "openlaw_pkce");
     expect(cleared[cleared.length - 1].options.maxAge).toBe(0);
     expect(await response.text()).not.toContain("access-token-secret");

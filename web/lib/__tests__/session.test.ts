@@ -22,7 +22,6 @@ vi.mock("next/headers", () => ({
 const NOW = 1_800_000_000;
 const SESSION = {
   accessToken: "fake-access-token",
-  refreshToken: "fake-refresh-token",
   expiresAt: NOW + 3600,
   email: "person@example.com",
 };
@@ -186,6 +185,22 @@ describe("verifier", () => {
   });
 });
 
+// Final review L1: no refresh feature exists, so no refresh token is stored.
+describe("no refresh token", () => {
+  it("writes a cookie holding only the access token, expiry and email", async () => {
+    const { writeSession } = await load();
+    await writeSession({ ...SESSION, refreshToken: "must-not-be-stored" } as typeof SESSION);
+    expect(Object.keys(JSON.parse(sets[0].value)).sort()).toEqual(["accessToken", "email", "expiresAt"]);
+    expect(sets[0].value).not.toContain("must-not-be-stored");
+  });
+
+  it("still reads a cookie written before, and drops its refresh token", async () => {
+    const { parseSession } = await load();
+    expect(parseSession(JSON.stringify({ ...SESSION, refreshToken: "old" }))).toEqual(SESSION);
+    expect(parseSession(JSON.stringify(SESSION))).toEqual(SESSION);
+  });
+});
+
 describe("parseSession", () => {
   it("rejects undefined, garbage, and wrong field types", async () => {
     const { parseSession } = await load();
@@ -194,7 +209,6 @@ describe("parseSession", () => {
     expect(parseSession("null")).toBeNull();
     expect(parseSession(JSON.stringify({ ...SESSION, expiresAt: "9999999999" }))).toBeNull();
     expect(parseSession(JSON.stringify({ ...SESSION, accessToken: 1 }))).toBeNull();
-    expect(parseSession(JSON.stringify({ ...SESSION, refreshToken: null }))).toBeNull();
     expect(parseSession(JSON.stringify({ ...SESSION, email: undefined }))).toBeNull();
     expect(parseSession(JSON.stringify({ ...SESSION, accessToken: "" }))).toBeNull();
   });

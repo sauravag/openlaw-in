@@ -20,7 +20,8 @@ export const PKCE_COOKIE_NAME = "openlaw_pkce";
 /**
  * `cookieHeader` without the session and PKCE cookies, or null when nothing
  * else remains. The backend never needs either (the session one carries the
- * refresh token); every other cookie is kept byte-for-byte, undecoded.
+ * access token, which goes upstream only as a Bearer header); every other
+ * cookie is kept byte-for-byte, undecoded.
  */
 export function stripAuthCookies(cookieHeader: string | null): string | null {
   if (!cookieHeader) return null;
@@ -39,7 +40,6 @@ export const SESSION_EXPIRY_SKEW_SECONDS = 60;
 
 export interface StoredSession {
   readonly accessToken: string;
-  readonly refreshToken: string;
   /** Unix seconds. */
   readonly expiresAt: number;
   readonly email: string;
@@ -87,10 +87,11 @@ export function parseSession(
     return null;
   }
   if (typeof data !== "object" || data === null) return null;
-  const { accessToken, refreshToken, expiresAt, email } = data as Record<string, unknown>;
+  // A cookie written before final review L1 may still carry `refreshToken`;
+  // it is ignored and never returned.
+  const { accessToken, expiresAt, email } = data as Record<string, unknown>;
   if (
     !isNonEmptyString(accessToken) ||
-    !isNonEmptyString(refreshToken) ||
     !isNonEmptyString(email) ||
     typeof expiresAt !== "number" ||
     !Number.isFinite(expiresAt)
@@ -98,7 +99,7 @@ export function parseSession(
     return null;
   }
   if (expiresAt - SESSION_EXPIRY_SKEW_SECONDS <= nowSeconds) return null;
-  return { accessToken, refreshToken, expiresAt, email };
+  return { accessToken, expiresAt, email };
 }
 
 /** Session carried by a raw `Cookie` header, or null. */

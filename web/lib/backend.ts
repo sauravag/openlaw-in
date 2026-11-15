@@ -36,8 +36,8 @@ function forwardableHeaders(source: Headers): Headers {
     .map((token) => token.trim().toLowerCase())
     .filter(Boolean);
   for (const name of [...HOP_BY_HOP_HEADERS, ...named]) headers.delete(name);
-  // The backend never needs the session cookie (it holds the refresh token)
-  // or the PKCE verifier; only a Bearer access token, and only in Mode B.
+  // The backend never needs the session cookie or the PKCE verifier; only a
+  // Bearer access token, and only in Mode B.
   // Everything else (e.g. `openlaw_anon_id`) passes through intact.
   const forwardedCookies = stripAuthCookies(source.get("cookie"));
   if (forwardedCookies === null) headers.delete("cookie");
