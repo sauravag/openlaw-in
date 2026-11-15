@@ -177,9 +177,12 @@ def delete_own_account(request: Request) -> DeletionResponse:
     user_id = _verified_user_id(
         request, session_factory, "account_delete_sign_in_required"
     )
+    # The caller's own anonymous cookie, never anything from the body: what
+    # this browser still holds without an account is erased too (review M1).
+    anon_token = getattr(request.state, "anon_token", None)
     with session_factory() as session:
         try:
-            result = delete_account(session, user_id)
+            result = delete_account(session, user_id, anon_token=anon_token)
             session.commit()
         except Exception:
             session.rollback()

@@ -341,3 +341,39 @@ def test_delete_account_through_the_endpoint_on_live_postgres(
                 ).delete()
             cleanup.query(User).filter(User.id == subject).delete()
             cleanup.commit()
+
+
+# --- final review M1: the caller's anonymous material is erased too ----------
+
+
+def _seed_anonymous(settings: Settings, anon_token: str) -> str:
+    engine = create_engine(settings.database_url)
+    try:
+        with Session(engine) as session:
+            owner = Owner(user_id=None, anon_token=anon_token)
+            conversation = create_conversation(session, owner, settings)
+            document = store_document(
+                session, owner, conversation.id, "fir.txt", "text/plain", NOTICE_TEXT, settings
+            )
+            session.commit()
+            return document.id
+    finally:
+        engine.dispose()
+
+
+def test_erases_material_owned_by_the_callers_anonymous_cookie(tmp_path: Path) -> None:
+    client, settings = _client(tmp_path)
+    _seed(settings, "user-1", "one@example.com")
+    _seed_anonymous(settings, "this-browser")
+    _seed_anonymous(settings, "another-browser")
+    client.cookies.set("openlaw_anon_id", "this-browser")
+
+    response = client.delete("/account", headers=bearer("user-1", "one@example.com"))
+
+    body = response.json()
+    assert response.status_code == 200
+    assert (body["conversations_deleted"], body["documents_deleted"]) == (2, 2)
+    rows = _rows(settings)
+    assert rows["conversations"] == 1  # only the other browser's survives
+    assert rows["documents"] == 1
+    assert "this browser" in body["note_en"]

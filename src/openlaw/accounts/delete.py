@@ -97,20 +97,9 @@ def _count_retained_audit_rows(session: Session, document_ids: list[str]) -> int
     ) or 0
 
 
-def delete_account(session: Session, user_id: str) -> DeletionResult:
-    """Erase `user_id`'s account and everything it owns.
-
-    Does not commit. Raises `ValueError` for an empty `user_id`, before any
-    SQL. Idempotent: a repeat matches nothing and returns zeros.
-    """
-    if not user_id:
-        raise ValueError("user_id must be non-empty")
-    owner = Owner(user_id=user_id, anon_token=None)
-    # Lock the users row first: a child insert by this same user takes a
-    # FOR KEY SHARE lock on it, so a concurrent insert either committed before
-    # this point (and is counted and audited below) or waits for this commit.
-    session.execute(select(User.id).where(User.id == user_id).with_for_update())
-
+def _erase_owned(session: Session, owner: Owner) -> tuple[list[str], int, int]:
+    """Audit and delete everything `owner` holds; return (document ids,
+    conversations deleted, messages deleted)."""
     document_ids = _delete_documents(session, owner)
     conversation_ids = list(
         session.scalars(select(Conversation.id).where(owner_clause(Conversation, owner)))
@@ -120,12 +109,48 @@ def delete_account(session: Session, user_id: str) -> DeletionResult:
         session.execute(
             delete(Conversation).where(Conversation.id.in_(conversation_ids))
         )
+    return document_ids, len(conversation_ids), messages_deleted
+
+
+def delete_account(
+    session: Session, user_id: str, anon_token: str | None = None
+) -> DeletionResult:
+    """Erase `user_id`'s account and everything it owns.
+
+    `anon_token` is the caller's own `openlaw_anon_id` cookie, when present:
+    material still owned by it (a migration that failed at sign-in, or an
+    upload made after the session lapsed) is erased in the same transaction
+    and counted in the same totals (final review M1). Without this, the
+    erasure notice would claim everything was erased while this browser could
+    still open an FIR. Only the cookie the request carried is used, never an
+    id from the request body.
+
+    Does not commit. Raises `ValueError` for an empty `user_id`, before any
+    SQL. Idempotent: a repeat matches nothing and returns zeros.
+    """
+    if not user_id:
+        raise ValueError("user_id must be non-empty")
+    # Lock the users row first: a child insert by this same user takes a
+    # FOR KEY SHARE lock on it, so a concurrent insert either committed before
+    # this point (and is counted and audited below) or waits for this commit.
+    session.execute(select(User.id).where(User.id == user_id).with_for_update())
+
+    owners = [Owner(user_id=user_id, anon_token=None)]
+    if anon_token:
+        owners.append(Owner(user_id=None, anon_token=anon_token))
+    document_ids: list[str] = []
+    conversations_deleted = messages_deleted = 0
+    for owner in owners:
+        documents, conversations, messages = _erase_owned(session, owner)
+        document_ids += documents
+        conversations_deleted += conversations
+        messages_deleted += messages
     session.execute(delete(QuotaUsage).where(QuotaUsage.user_id == user_id))
     session.execute(delete(User).where(User.id == user_id))
     session.flush()
 
     return DeletionResult(
-        conversations_deleted=len(conversation_ids),
+        conversations_deleted=conversations_deleted,
         documents_deleted=len(document_ids),
         messages_deleted=messages_deleted,
         audit_rows_retained=_count_retained_audit_rows(session, document_ids),

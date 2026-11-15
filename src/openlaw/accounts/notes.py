@@ -9,12 +9,14 @@ was.
 from __future__ import annotations
 
 _RETAINED_EN = (
-    "Your conversations, uploaded documents and excerpts have been erased. "
+    "Your conversations, uploaded documents and excerpts have been erased, "
+    "including any linked to this browser without an account. "
     "A record of who accessed each document (the access log) is kept, without "
     "any document content."
 )
 _RETAINED_HI = (
-    "आपकी बातचीत, अपलोड किए गए दस्तावेज़ और उनके अंश मिटा दिए गए हैं। हर दस्तावेज़ को किसने "
+    "आपकी बातचीत, अपलोड किए गए दस्तावेज़ और उनके अंश मिटा दिए गए हैं, उनके साथ भी जो बिना "
+    "खाते के इस ब्राउज़र से जुड़े थे। हर दस्तावेज़ को किसने "
     "देखा, इसका रिकॉर्ड (एक्सेस लॉग) बिना किसी दस्तावेज़ सामग्री के रखा गया है।"
 )
 #: What `account_deleted` (refusal copy) repeats after its opening sentence,

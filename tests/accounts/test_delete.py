@@ -318,3 +318,48 @@ def test_locks_the_users_row_so_a_concurrent_child_insert_waits(
     session.rollback()
 
     assert outcome == ["blocked"]
+
+
+# --- final review M1: this browser's anonymous material goes too -------------
+
+
+def test_erases_the_callers_anonymous_material_in_the_same_call(session: Session) -> None:
+    user_id = _user(session)
+    anon_token = _uid()
+    _material(session, Owner(user_id=user_id, anon_token=None))
+    anon_conv, anon_docs = _material(
+        session, Owner(user_id=None, anon_token=anon_token), documents=2
+    )
+    anon_doc_ids = sorted(d.id for d in anon_docs)
+    anon_conv_id = anon_conv.id
+
+    result = delete_account(session, user_id, anon_token=anon_token)
+    session.commit()
+    session.expire_all()
+
+    assert (result.conversations_deleted, result.documents_deleted) == (2, 3)
+    assert result.messages_deleted == 4
+    assert session.get(Conversation, anon_conv_id) is None
+    rows = list(
+        session.scalars(
+            select(DocumentAccessLog).where(
+                DocumentAccessLog.document_id.in_(anon_doc_ids),
+                DocumentAccessLog.action == DELETE_ACTION,
+            )
+        )
+    )
+    assert sorted(r.document_id for r in rows) == anon_doc_ids
+    assert {(r.actor_kind, r.actor_ref) for r in rows} == {("anon", anon_token)}
+
+
+def test_another_browsers_anonymous_material_is_untouched(session: Session) -> None:
+    user_id = _user(session)
+    other_conv, _ = _material(session, Owner(user_id=None, anon_token=_uid()))
+    other_conv_id = other_conv.id
+
+    result = delete_account(session, user_id, anon_token=_uid())
+    session.commit()
+    session.expire_all()
+
+    assert result == DeletionResult(0, 0, 0, 0)
+    assert session.get(Conversation, other_conv_id) is not None
