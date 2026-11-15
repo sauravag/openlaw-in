@@ -1,0 +1,115 @@
+import "server-only";
+
+/**
+ * Proxies one request to the FastAPI backend, server-side.
+ *
+ * Replaces what `next.config.ts`'s `rewrites()` did, because a rewrite cannot
+ * add a request header and `Authorization: Bearer` must be attached here --
+ * never in the browser, where the token would have to be JavaScript-readable.
+ * Proxying (rather than calling the API cross-origin) is also what lets the
+ * anonymous-quota cookie (`openlaw_anon_id`, HttpOnly) survive with zero CORS
+ * configuration: the browser only ever talks to its own origin.
+ *
+ * Three things a rewrite did for free and this MUST do explicitly:
+ *   1. Forward the inbound `Cookie` header, so `openlaw_anon_id` reaches
+ *      `openlaw.api.app._ensure_anonymous_token`.
+ *   2. Forward every `Set-Cookie` from the backend response, so a first-time
+ *      caller's freshly minted anon cookie actually lands in the browser --
+ *      including on a refusal, which is precisely the case that middleware
+ *      exists to cover.
+ *   3. Preserve the status code and `Retry-After`, so a 429's structured
+ *      refusal body and retry hint survive the hop.
+ * Dropping (1) or (2) makes every request look like a first visit: anonymous
+ * ownership and quota silently reset per request. That is wrong, not
+ * imprecise -- see `app.py`'s docstring on the same boundary.
+ */
+import { AUTH_ENABLED } from "@/lib/authMode";
+
+/**
+ * Name of the HttpOnly session cookie. Task 7 owns setting it and owns the
+ * format of its value; for Task 6 the Bearer token is simply this cookie's
+ * value, attached only when `AUTH_ENABLED` and the cookie is present.
+ */
+export const SESSION_COOKIE_NAME = "openlaw_session";
+
+const DEFAULT_API_URL = "http://127.0.0.1:8000";
+const BAD_GATEWAY = 502;
+
+/** Value of one cookie in a raw `Cookie` header, or null. */
+function readCookie(cookieHeader: string | null, name: string): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const index = part.indexOf("=");
+    if (index === -1) continue;
+    if (part.slice(0, index).trim() !== name) continue;
+    const value = part.slice(index + 1).trim();
+    return value === "" ? null : value;
+  }
+  return null;
+}
+
+/** Request headers for the backend: cookie in, any client Authorization out. */
+function buildBackendHeaders(request: Request): Headers {
+  const headers = new Headers(request.headers);
+  // A browser must not hand the backend a token of its choosing through here.
+  headers.delete("authorization");
+  // Hop-specific; fetch recomputes these for the new connection.
+  headers.delete("host");
+  headers.delete("connection");
+  if (AUTH_ENABLED) {
+    const token = readCookie(request.headers.get("cookie"), SESSION_COOKIE_NAME);
+    if (token) headers.set("authorization", `Bearer ${token}`);
+  }
+  return headers;
+}
+
+/** Response headers for the browser: all Set-Cookie values kept separate. */
+function buildResponseHeaders(upstream: Response): Headers {
+  const headers = new Headers();
+  upstream.headers.forEach((value, key) => {
+    // `forEach` flattens Set-Cookie; re-added individually below. fetch has
+    // already decoded the body, so its length/encoding no longer apply.
+    if (["set-cookie", "content-encoding", "content-length", "transfer-encoding"].includes(key)) return;
+    headers.set(key, value);
+  });
+  for (const cookie of upstream.headers.getSetCookie()) {
+    headers.append("set-cookie", cookie);
+  }
+  return headers;
+}
+
+export async function proxyToBackend(
+  request: Request,
+  backendPath: string,
+): Promise<Response> {
+  const base = (process.env.OPENLAW_API_URL ?? DEFAULT_API_URL).replace(/\/+$/, "");
+  const search = new URL(request.url).search;
+  const hasBody = request.method !== "GET" && request.method !== "HEAD";
+
+  const init: RequestInit & { duplex?: "half" } = {
+    method: request.method,
+    headers: buildBackendHeaders(request),
+    redirect: "manual",
+    cache: "no-store",
+  };
+  if (hasBody && request.body) {
+    // Streamed, not buffered: a 10 MiB upload must not become a string.
+    init.body = request.body;
+    init.duplex = "half";
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${base}${backendPath}${search}`, init);
+  } catch (error) {
+    console.error("[backend proxy] upstream request failed", backendPath, error);
+    return Response.json({ detail: "The service is unavailable." }, { status: BAD_GATEWAY });
+  }
+
+  const nullBody = upstream.status === 204 || upstream.status === 304;
+  return new Response(nullBody ? null : upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: buildResponseHeaders(upstream),
+  });
+}
