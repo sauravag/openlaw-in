@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -161,21 +161,61 @@ def test_leaves_another_tokens_rows_untouched(session: Session) -> None:
     assert other_docs[0].anon_token == other and other_docs[0].expires_at is not None
 
 
-def test_leaves_rows_already_owned_by_another_account_untouched(
+def test_leaves_rows_owned_by_another_account_even_if_they_carry_the_token(
     session: Session,
 ) -> None:
+    """The CHECK allows `user_id` AND `anon_token` both set, so the
+    `user_id IS NULL` half of the predicate is what protects such a row."""
     token, new_user, old_user = _uid(), _user(session), _user(session)
-    conversation = create_conversation(
-        session, Owner(user_id=old_user, anon_token=None), _settings()
-    )
+    conversation = Conversation(user_id=old_user, anon_token=token)
+    session.add(conversation)
+    session.flush()
     session.info.setdefault("conversations", []).append(conversation.id)
+    document = Document(
+        user_id=old_user,
+        anon_token=token,
+        conversation_id=conversation.id,
+        filename="x.txt",
+        content_type="text/plain",
+        byte_size=1,
+        page_count=1,
+        ciphertext=b"c",
+        nonce=b"n",
+        key_id="k",
+    )
+    session.add(document)
     session.commit()
 
     result = migrate_anonymous_material(session, token, new_user, _settings())
+    session.commit()
     session.expire_all()
 
     assert result == MigrationResult(0, 0, True)
-    assert conversation.user_id == old_user
+    assert conversation.user_id == old_user and conversation.anon_token == token
+    assert document.user_id == old_user and document.anon_token == token
+    assert _migrate_logs(session, [document.id]) == []
+
+
+def test_anon_owner_clause_requires_user_id_is_null() -> None:
+    from openlaw.db.conversations import owner_clause
+
+    sql = str(owner_clause(Conversation, Owner(user_id=None, anon_token="t")))
+
+    assert "user_id IS NULL" in sql and "anon_token =" in sql
+
+
+def test_loaded_orm_objects_reflect_the_new_owner_without_expiring(
+    session: Session,
+) -> None:
+    token, user_id = _uid(), _user(session)
+    conversation, docs = _anon_material(session, token)
+    assert conversation.anon_token == token  # loaded, in the identity map
+
+    migrate_anonymous_material(session, token, user_id, _settings())
+
+    assert conversation.user_id == user_id and conversation.anon_token is None
+    assert conversation.expires_at is None
+    assert docs[0].user_id == user_id and docs[0].anon_token is None
 
 
 def test_second_call_returns_zeros_and_already_migrated(session: Session) -> None:
@@ -207,15 +247,19 @@ def test_failure_updating_documents_leaves_nothing_moved(session: Session) -> No
     token, user_id = _uid(), _user(session)
     conversation, docs = _anon_material(session, token)
     real = migrate_module.reassign_owner
+    moved: list[list[str]] = []
 
     def failing(sess: Session, model: type, *args: object) -> list[str]:
         if model is Document:
             raise RuntimeError("boom")
-        return real(sess, model, *args)
+        ids = real(sess, model, *args)
+        moved.append(ids)
+        return ids
 
     with patch.object(migrate_module, "reassign_owner", failing):
         with pytest.raises(RuntimeError):
             migrate_anonymous_material(session, token, user_id, _settings())
+    assert moved == [[conversation.id]]  # the conversation UPDATE really ran
     session.rollback()
     session.expire_all()
 
@@ -296,27 +340,39 @@ def test_concurrent_migrations_move_and_audit_once(live_engine: Engine) -> None:
         conv_id, doc_ids = conversation.id, [d.id for d in docs]
         setup.commit()
 
-    results: list[MigrationResult] = []
-    barrier = threading.Barrier(2)
+    outcome: dict[str, object] = {}
 
-    def run() -> None:
-        with Session(live_engine) as s:
-            barrier.wait()
-            results.append(migrate_anonymous_material(s, token, user_id, _settings()))
-            s.commit()
+    def second() -> None:
+        try:
+            with Session(live_engine) as s2:
+                s2.execute(text("SET lock_timeout = '10s'"))
+                outcome["result"] = migrate_anonymous_material(
+                    s2, token, user_id, _settings()
+                )
+                s2.commit()
+        except BaseException as exc:  # re-raised in the main thread
+            outcome["error"] = exc
 
+    s1 = Session(live_engine)
     try:
-        threads = [threading.Thread(target=run) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        first = migrate_anonymous_material(s1, token, user_id, _settings())
+        assert first == MigrationResult(1, 2, False)  # uncommitted, locks held
 
-        assert sorted(r.conversations_moved for r in results) == [0, 1]
-        assert sorted(r.documents_moved for r in results) == [0, 2]
+        thread = threading.Thread(target=second)
+        thread.start()
+        thread.join(timeout=0.5)
+        assert thread.is_alive(), "second migration should block on the row lock"
+
+        s1.commit()
+        thread.join(timeout=15)
+        assert not thread.is_alive()
+        if "error" in outcome:
+            raise outcome["error"]  # type: ignore[misc]
+        assert outcome["result"] == MigrationResult(0, 0, True)
         with Session(live_engine) as check:
             assert len(_migrate_logs(check, doc_ids)) == 2
     finally:
+        s1.close()
         with Session(live_engine) as cleanup:
             cleanup.query(DocumentAccessLog).filter(
                 DocumentAccessLog.document_id.in_(doc_ids)

@@ -39,7 +39,13 @@ MIGRATE_ACTION = "migrate"
 
 @dataclass(frozen=True)
 class MigrationResult:
-    """What one migration attempt moved. All zeros on a repeat attempt."""
+    """What one migration attempt moved. All zeros on a repeat attempt.
+
+    `already_migrated=True` also covers a token that never owned anything
+    (deliberately indistinguishable, so a probe learns nothing). Callers must
+    not show "already migrated" to a person; to them it means "nothing to
+    move".
+    """
 
     conversations_moved: int
     documents_moved: int

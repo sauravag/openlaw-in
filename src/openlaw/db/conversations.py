@@ -354,7 +354,8 @@ def reassign_owner(
     throughout and a retry matches nothing. Ids come from `RETURNING`, not a
     prior SELECT: under Postgres row locking a concurrent second UPDATE
     re-evaluates the predicate after the first commits and returns no rows,
-    so nothing is moved or audited twice. Does not commit.
+    so nothing is moved or audited twice. Already-loaded instances are
+    synchronised by the ORM's default `auto` strategy. Does not commit.
     """
     if from_owner.user_id is not None or not from_owner.anon_token:
         raise ValueError("from_owner must be an anonymous owner with a token")
@@ -365,6 +366,5 @@ def reassign_owner(
         .where(owner_clause(model, from_owner))
         .values(**owner_columns(to_owner), expires_at=None)
         .returning(model.id)
-        .execution_options(synchronize_session=False)
     )
     return list(session.execute(statement).scalars())
