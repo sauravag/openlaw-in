@@ -345,6 +345,17 @@ def _raise_quota_exceeded(
     )
 
 
+def _bearer_honoured(settings: Settings) -> bool:
+    """Whether a bearer token may identify the caller at all.
+
+    Only in Mode B, and only with a verification secret. Gating on the secret
+    alone (final review L4) let a Mode A backend with leftover Supabase
+    variables in `.env` honour a bearer, creating account-owned rows in a mode
+    whose UI has no accounts to reach them through.
+    """
+    return bool(settings.auth_enabled and settings.supabase_jwt_secret)
+
+
 def _authenticated_decision(
     session_factory: Callable,
     settings: Settings,
@@ -374,7 +385,7 @@ def _authenticated_decision(
     atomically together.
     """
     token = extract_bearer(authorization)
-    if not token or not settings.supabase_jwt_secret:
+    if not token or not _bearer_honoured(settings):
         return None
 
     try:
@@ -588,7 +599,7 @@ def caller_owner(
     `AuthError.detail` reaches only `logger.warning` -- never a client.
     """
     token = extract_bearer(authorization)
-    if token and settings.supabase_jwt_secret:
+    if token and _bearer_honoured(settings):
         try:
             with session_factory() as session:
                 identity = decode_token(token, settings.supabase_jwt_secret)
