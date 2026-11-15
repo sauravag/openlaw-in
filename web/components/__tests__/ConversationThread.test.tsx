@@ -118,18 +118,13 @@ describe('ConversationThread', () => {
     expect(screen.getByRole('link', { name: /15100/ })).toHaveAttribute('href', 'tel:15100')
   })
 
-  it('omits the crisis box for the turn whose crisis the page has hoisted above the thread', () => {
+  it('renders a crisis box as the first thing in its own reply', () => {
     const crisisTurn = turn({
       outcome: { kind: 'answer', data: { ...answer, crisis_response: 'Call 112 now.' } },
     })
-    render(
-      <ConversationThread
-        turns={[crisisTurn]}
-        language="en"
-        suppressCrisisForTurnId="t1"
-      />,
-    )
-    expect(screen.queryByTestId('crisis')).not.toBeInTheDocument()
+    render(<ConversationThread turns={[crisisTurn]} language="en" />)
+    const reply = screen.getByTestId('crisis').closest('article') as HTMLElement
+    expect(reply.firstElementChild).toBe(screen.getByTestId('crisis'))
   })
 
   it('keeps an older turn crisis box in place, since help once given is never withdrawn', () => {
@@ -141,7 +136,6 @@ describe('ConversationThread', () => {
       <ConversationThread
         turns={[older, turn({ id: 't2' })]}
         language="en"
-        suppressCrisisForTurnId="t2"
       />,
     )
     expect(screen.getByTestId('crisis')).toHaveTextContent('Call 112 now.')
@@ -230,34 +224,6 @@ describe('ConversationThread', () => {
     const alert = screen.getByTestId('crisis')
     expect(alert).toHaveTextContent('If you are thinking about harming yourself')
     expect(alert).toHaveTextContent('14416')
-  })
-
-  it('omits a restored crisis box the page has already hoisted', () => {
-    render(
-      <ConversationThread
-        turns={[
-          turn({
-            id: 't1',
-            outcome: {
-              kind: 'replay',
-              data: {
-                turn_index: 0,
-                question: 'i want to kill myself',
-                answer: 'Help is available right now -- see below.',
-                document_answer: null,
-                language: 'en',
-                crisis_response: 'If you are thinking about harming yourself',
-                helplines: [{ number: '14416', label: 'Tele-MANAS' }],
-                is_answerable: true,
-              },
-            },
-          }),
-        ]}
-        language="en"
-        suppressCrisisForTurnId="t1"
-      />,
-    )
-    expect(screen.queryByTestId('crisis')).not.toBeInTheDocument()
   })
 
   // MEDIUM-2: `citations={[]}` was hard-coded, so a restored statement about

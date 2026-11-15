@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "../page";
@@ -171,6 +171,32 @@ describe("your conversations (Mode B, signed in)", () => {
     expect(mockedRead).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-2" }));
     expect(window.sessionStorage.getItem(CONVERSATION_STORAGE_KEY)).toBe("conv-2");
     expect(window.sessionStorage.getItem(CONVERSATION_KEPT_STORAGE_KEY)).toBe("1");
+  });
+
+  it("closes the mobile help sheet when a conversation is opened from it (M6)", async () => {
+    stubSession(true);
+    mockedList.mockResolvedValue({
+      kind: "list",
+      data: {
+        conversations: [
+          { id: "conv-2", created_at: "2026-11-14T10:00:00+00:00", updated_at: "2026-11-14T10:00:00+00:00", document_count: 0 },
+        ],
+        next_offset: null,
+      },
+    });
+    mockedRead.mockResolvedValue(restoredView);
+    render(<HomePage />);
+    const strings = getStrings("en");
+    const openButton = await screen.findByRole("button", { name: strings.openConversationButton });
+    await userEvent.click(
+      within(screen.getByRole("banner")).getByRole("link", { name: strings.helpButton }),
+    );
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    await userEvent.click(openButton);
+
+    expect(await screen.findByText("Earlier question?")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("asks for no list while anonymous", async () => {

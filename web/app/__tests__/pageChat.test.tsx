@@ -297,12 +297,51 @@ describe("the side pane", () => {
     expect(mockedAsk).not.toHaveBeenCalled();
   });
 
-  it("keeps a one-tap 112 call link in the header", () => {
+  it("heads the example questions with their own h2, not a subsection of the helplines", () => {
     render(<HomePage />);
-    const header = screen.getByRole("banner");
-    expect(within(header).getByRole("link", { name: strings.emergencyCallLabel })).toHaveAttribute(
-      "href",
-      "tel:112",
+    const pane = screen.getByRole("complementary", { name: strings.helpButton });
+    expect(
+      within(pane).getByRole("heading", { level: 2, name: strings.examplesHeading }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("the always-visible helpline strip (phones)", () => {
+  const ALL_NUMBERS = ["112", "181", "1091", "1098", "14416", "15100"];
+
+  it("puts all six numbers in the accessibility tree as tel: links, before any tap", () => {
+    render(<HomePage />);
+    const strip = screen.getByRole("region", { name: strings.helplineStripLabel });
+
+    for (const number of ALL_NUMBERS) {
+      // `getByRole` skips anything hidden or aria-hidden, so this proves
+      // each number is perceivable, not merely present in the markup.
+      const link = within(strip).getByRole("link", { name: new RegExp(`${number}$`) });
+      expect(link).toHaveAttribute("href", `tel:${number}`);
+    }
+  });
+
+  it("is never display:none or aria-hidden below lg", () => {
+    render(<HomePage />);
+    const strip = screen.getByRole("region", { name: strings.helplineStripLabel });
+
+    // jsdom applies no Tailwind CSS, so check the classes themselves: the
+    // only hiding utility allowed is the lg-and-up one (the side pane takes
+    // over there).
+    const classes = strip.className.split(/\s+/);
+    expect(classes).not.toContain("hidden");
+    expect(classes).toContain("lg:hidden");
+    expect(strip).not.toHaveAttribute("aria-hidden");
+    expect(strip.closest("[aria-hidden]")).toBeNull();
+    expect(strip).toBeVisible();
+  });
+
+  it("names each number in Hindi when Hindi is selected", async () => {
+    render(<HomePage />);
+    await userEvent.selectOptions(screen.getByRole("combobox"), "hi");
+    const strip = screen.getByRole("region", { name: getStrings("hi").helplineStripLabel });
+    expect(within(strip).getByRole("link", { name: /15100$/ })).toHaveAccessibleName(
+      /कानूनी सहायता/,
     );
   });
 });
@@ -371,5 +410,97 @@ describe("the mobile help sheet", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(composer()).toHaveValue(second);
     expect(composer()).toHaveFocus();
+  });
+});
+
+/** Stub `matchMedia` so the page believes it is on a phone (or not). */
+function stubPhone(isPhone: boolean) {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn((query: string) => ({
+      matches: isPhone,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
+}
+
+describe("the soft keyboard and a new reply (I1)", () => {
+  it("on a phone, closes the keyboard when a reply lands so its crisis box is not panned away", async () => {
+    stubPhone(true);
+    mockedAsk.mockResolvedValue(
+      answer("Legal analysis.", {
+        crisis_response: "If you are in danger right now, call 112.",
+        helplines: [{ number: "112", label: "Emergency" }],
+      }),
+    );
+    render(<HomePage />);
+
+    await userEvent.type(composer(), "he is hitting me{Enter}");
+    await screen.findByText("Legal analysis.");
+
+    expect(composer()).not.toHaveFocus();
+  });
+
+  it("on a desktop, keeps the caret in the composer when a reply lands", async () => {
+    stubPhone(false);
+    mockedAsk.mockResolvedValue(answer("Done."));
+    render(<HomePage />);
+
+    await userEvent.type(composer(), "q{Enter}");
+    await screen.findByText("Done.");
+
+    expect(composer()).toHaveFocus();
+  });
+
+  it("on a phone, does not focus the composer when a conversation is restored (M7)", async () => {
+    stubPhone(true);
+    window.sessionStorage.setItem("openlaw.conversation_id", "conv-9");
+    vi.mocked(readConversation).mockResolvedValue({
+      kind: "conversation",
+      data: {
+        conversation_id: "conv-9",
+        turns: [
+          { turn_index: 0, question: "Old?", answer: "Old answer.", document_answer: null, language: "en" },
+        ],
+      },
+    });
+    render(<HomePage />);
+
+    await screen.findByText("Old answer.");
+    expect(composer()).not.toHaveFocus();
+  });
+});
+
+describe("a crisis reply (M1)", () => {
+  it("says in the polite announcement that the reply carries urgent help, and the box is an alert", async () => {
+    mockedAsk.mockResolvedValue(
+      answer("Legal analysis.", {
+        crisis_response: "If you are in danger right now, call 112.",
+        helplines: [{ number: "112", label: "Emergency" }],
+      }),
+    );
+    render(<HomePage />);
+
+    await userEvent.type(composer(), "he is hitting me{Enter}");
+    await screen.findByText("Legal analysis.");
+
+    expect(screen.getByTestId("reply-announcer")).toHaveTextContent(
+      strings.replyWithHelpAnnouncement(1),
+    );
+    const thread = screen.getByRole("list", { name: strings.threadHeading });
+    expect(within(thread).getByRole("alert")).toBe(within(thread).getByTestId("crisis"));
+  });
+
+  it("has a Hindi crisis announcement that is not the English one", () => {
+    expect(getStrings("hi").replyWithHelpAnnouncement(2)).not.toBe(
+      strings.replyWithHelpAnnouncement(2),
+    );
+    expect(getStrings("hi").replyWithHelpAnnouncement(2)).toContain("2");
   });
 });

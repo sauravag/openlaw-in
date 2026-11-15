@@ -60,3 +60,12 @@ describe('WelcomeGuide', () => {
     expect(screen.queryByText(/what this is/i)).not.toBeInTheDocument()
   })
 })
+
+describe('WelcomeGuide without a pick handler', () => {
+  it('offers no example buttons when the page shows the examples elsewhere', () => {
+    render(<WelcomeGuide language="en" />)
+    for (const question of getStrings('en').exampleQuestions) {
+      expect(screen.queryByRole('button', { name: question })).not.toBeInTheDocument()
+    }
+  })
+})

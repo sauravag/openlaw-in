@@ -140,14 +140,13 @@ describe("HomePage", () => {
     render(<HomePage />);
 
     expect(mockedAskQuestion).not.toHaveBeenCalled();
-    // Scoped to the static helpline block: the chat header now carries its
-    // own one-tap 112 link as well, so "the" 112 link is no longer unique.
+    // Scoped to the static helpline block: the always-visible phone strip
+    // carries the same numbers too, so "the" 112 link is no longer unique.
     const standing = screen.getByRole("region", { name: getStrings("en").helplineHeading });
     expect(within(standing).getByRole("link", { name: /112/ })).toHaveAttribute("href", "tel:112");
     expect(within(standing).getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
-    expect(
-      within(screen.getByRole("banner")).getByRole("link", { name: getStrings("en").emergencyCallLabel }),
-    ).toHaveAttribute("href", "tel:112");
+    const strip = screen.getByRole("region", { name: getStrings("en").helplineStripLabel });
+    expect(within(strip).getByRole("link", { name: /112$/ })).toHaveAttribute("href", "tel:112");
   });
 
   it("welcomes a first-time visitor with example questions, and drops them once there is an answer", async () => {
@@ -437,8 +436,11 @@ describe("HomePage", () => {
     const text = newestTurn.textContent ?? "";
     expect(text.indexOf("call 112")).toBeLessThan(text.indexOf("More legal analysis."));
     expect(crisis.querySelector('a[href="tel:112"]')).toBeInTheDocument();
-    // Nothing from an earlier turn sits between the question and its help.
-    expect(text).not.toContain("Ordinary legal analysis.");
+    // The help belongs to the turn that triggered it: the earlier, ordinary
+    // turn carries no crisis box and no crisis text of its own.
+    const earlierTurn = threadItems()[0];
+    expect(earlierTurn.contains(crisis)).toBe(false);
+    expect(earlierTurn.textContent ?? "").not.toContain("call 112");
   });
 
   it("keeps focus in the composer and scrolls the reply that leads with the crisis box into view", async () => {
