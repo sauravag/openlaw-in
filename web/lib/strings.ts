@@ -182,6 +182,21 @@ export interface UIStrings {
   migrationSucceeded: string;
   /** Final review H3c: the frontend build and the backend disagree on accounts. */
   misconfiguredBanner: (hours: number) => string;
+  // --- Chat layout ----------------------------------------------------------
+  /** Polite live-region text when a reply lands; numbered so a second reply
+   * is a changed string a screen reader announces again. */
+  replyArrivedAnnouncement: (turnNumber: number) => string;
+  /** Accessible name of the compact header call link. Contains "112" so the
+   * spoken name matches the visible digits. */
+  emergencyCallLabel: string;
+  /** Mobile header control that opens the helplines and examples sheet. */
+  helpButton: string;
+  /** Closes that sheet. */
+  closeHelpButton: string;
+  /** The composer's paperclip. */
+  attachDocumentButton: string;
+  /** Mobile empty-state control that opens the sheet holding the examples. */
+  showExamplesButton: string;
 }
 
 /** The `UIStrings` keys whose value is a plain sentence (not a formatter function). */
@@ -210,7 +225,7 @@ const EN: UIStrings = {
   signupCta: "Create a free account for more questions",
   noScriptNotice:
     "This works best with JavaScript enabled. Without it, your question is kept if the page reloads, but you will need to press Ask again.",
-  previousAnswerNotice: "Could not get a new answer. Your previous answer is still shown below.",
+  previousAnswerNotice: "Could not get a new answer. Your previous answer is still shown above.",
   helplineHeading: "Need help right now?",
   helplineNote: "Free to call, day or night, from any phone in India.",
   crisisHeading: "Help is available right now",
@@ -221,7 +236,7 @@ const EN: UIStrings = {
     "It is not a lawyer and cannot give legal advice. For that, free legal aid is available on 15100.",
   ],
   coverageNote:
-    "It reads Indian statutes and regulations, plus judgments of the Supreme Court, the Punjab & Haryana High Court and the Delhi High Court. It does not cover district courts or consumer forums, and it can be out of date, so check the source before you rely on it.",
+    "It reads Indian statutes and regulations, plus judgments of the Supreme Court and a growing number of High Courts. It does not cover every High Court yet, nor district courts or consumer forums, and it can be out of date, so check the source before you rely on it.",
   examplesHeading: "Not sure how to put it? Try one of these",
   exampleQuestions: [
     "How much notice must my landlord give me before eviction?",
@@ -322,6 +337,13 @@ const EN: UIStrings = {
   migrationSucceeded: "Done. Your earlier conversations are now in your account.",
   misconfiguredBanner: (hours) =>
     `This site is misconfigured: its two halves disagree about whether accounts are switched on. Documents you upload may be deleted after ${hours} hours. If you run this site, rebuild the web service with the same OPENLAW_AUTH_ENABLED value as the API.`,
+  replyArrivedAnnouncement: (turnNumber) =>
+    `Reply ${turnNumber} has arrived. It is shown above the question box.`,
+  emergencyCallLabel: "Call 112, emergency",
+  helpButton: "Help",
+  closeHelpButton: "Close",
+  attachDocumentButton: "Attach a document",
+  showExamplesButton: "See example questions",
 };
 
 const HI: UIStrings = {
@@ -345,7 +367,7 @@ const HI: UIStrings = {
   signupCta: "अधिक सवालों के लिए मुफ़्त खाता बनाएं",
   noScriptNotice:
     "यह JavaScript सक्षम होने पर सबसे अच्छा काम करता है। इसके बिना, पेज फिर से लोड होने पर भी आपका सवाल सुरक्षित रहेगा, लेकिन आपको फिर से 'पूछें' दबाना होगा।",
-  previousAnswerNotice: "नया उत्तर नहीं मिल सका। आपका पिछला उत्तर अभी भी नीचे दिखाया गया है।",
+  previousAnswerNotice: "नया उत्तर नहीं मिल सका। आपका पिछला उत्तर अभी भी ऊपर दिखाया गया है।",
   helplineHeading: "अभी मदद चाहिए?",
   helplineNote: "भारत में किसी भी फ़ोन से, दिन हो या रात, कॉल निःशुल्क है।",
   crisisHeading: "मदद अभी उपलब्ध है",
@@ -356,7 +378,7 @@ const HI: UIStrings = {
     "यह वकील नहीं है और कानूनी सलाह नहीं दे सकता। उसके लिए 15100 पर निःशुल्क कानूनी सहायता उपलब्ध है।",
   ],
   coverageNote:
-    "इसमें भारतीय अधिनियम और नियम शामिल हैं, साथ ही उच्चतम न्यायालय, पंजाब एवं हरियाणा उच्च न्यायालय और दिल्ली उच्च न्यायालय के फैसले। ज़िला अदालतें और उपभोक्ता फोरम इसमें नहीं हैं, और जानकारी पुरानी भी हो सकती है — इसलिए भरोसा करने से पहले स्रोत ज़रूर देखें।",
+    "इसमें भारतीय अधिनियम और नियम शामिल हैं, साथ ही उच्चतम न्यायालय और लगातार बढ़ती संख्या में उच्च न्यायालयों के फैसले। अभी हर उच्च न्यायालय इसमें नहीं है, न ही ज़िला अदालतें और उपभोक्ता फोरम, और जानकारी पुरानी भी हो सकती है — इसलिए भरोसा करने से पहले स्रोत ज़रूर देखें।",
   examplesHeading: "समझ नहीं आ रहा कैसे लिखें? इनमें से कोई चुनें",
   exampleQuestions: [
     "बेदखली से पहले मकान मालिक को मुझे कितना नोटिस देना होता है?",
@@ -457,6 +479,13 @@ const HI: UIStrings = {
   migrationSucceeded: "हो गया। आपकी पहले की बातचीत अब आपके खाते में है।",
   misconfiguredBanner: (hours) =>
     `इस साइट की सेटिंग गलत है: इसके दो हिस्से इस बात पर सहमत नहीं हैं कि खाते चालू हैं या नहीं। आपके अपलोड किए गए दस्तावेज़ ${hours} घंटे बाद मिटाए जा सकते हैं। अगर आप यह साइट चलाते हैं, तो वेब सेवा को API वाले OPENLAW_AUTH_ENABLED मान के साथ फिर से बनाएँ।`,
+  replyArrivedAnnouncement: (turnNumber) =>
+    `उत्तर ${turnNumber} आ गया है। यह सवाल वाले बॉक्स के ऊपर दिखाया गया है।`,
+  emergencyCallLabel: "112 पर कॉल करें, आपातकालीन सेवा",
+  helpButton: "मदद",
+  closeHelpButton: "बंद करें",
+  attachDocumentButton: "दस्तावेज़ जोड़ें",
+  showExamplesButton: "उदाहरण सवाल देखें",
 };
 
 export function getStrings(language: Language["code"] | string): UIStrings {

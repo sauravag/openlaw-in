@@ -17,9 +17,12 @@ describe('WelcomeGuide', () => {
     render(<WelcomeGuide language="en" onPickExample={vi.fn()} />)
 
     const coverage = screen.getByText(/supreme court/i)
-    expect(coverage).toHaveTextContent(/punjab & haryana high court/i)
-    expect(coverage).toHaveTextContent(/delhi high court/i)
-    expect(coverage).toHaveTextContent(/does not cover district courts/i)
+    // Coverage grows court by court, so the copy names no specific High
+    // Court (a list goes stale) but still says plainly what is missing.
+    expect(coverage).toHaveTextContent(/a growing number of high courts/i)
+    expect(coverage).not.toHaveTextContent(/punjab|delhi|bombay|karnataka/i)
+    expect(coverage).toHaveTextContent(/does not cover every high court yet/i)
+    expect(coverage).toHaveTextContent(/district courts or consumer forums/i)
   })
 
   it('says plainly that it is not a lawyer', () => {
