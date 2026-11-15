@@ -1036,17 +1036,30 @@ person deletes them. Never commit any value below and never print them.
    **Quota turns on with auth.** Leave `OPENLAW_QUOTA_ENABLED` unset: it
    follows `OPENLAW_AUTH_ENABLED` (both in `docker-compose.yml` and in the
    code), giving 3 anonymous and 30 signed-in questions per month. To confirm
-   the cap is live, ask more than `OPENLAW_ANONYMOUS_QUOTA` questions
-   anonymously; the next one must come back as HTTP 429 with a `signup_url`.
-   If you never get a 429, quota is off and your API key is uncapped.
+   the quota is on, ask more than `OPENLAW_ANONYMOUS_QUOTA` questions
+   anonymously from one browser; the next one must come back as HTTP 429
+   with a `signup_url`. If it never does, quota is off.
+
+   **What that check does not prove.** The anonymous allowance is counted
+   per cookie (`openlaw_anon_id`), and the API mints a fresh cookie for any
+   request that arrives without one. A script that does not store cookies
+   therefore never runs out of anonymous questions. The only bound on it is
+   the per-IP burst limiter: 30 requests per minute per IP (Mode B only),
+   which still allows about 43,200 questions a day from a single IP. That
+   counter is in memory, per process, and resets when the API restarts. A
+   429 in the browser check means the quota is on; it does not mean your
+   model-provider spend is capped. Set a spending limit with your provider
+   as well. (A per-IP daily anonymous ceiling is a known follow-up.)
 
 5. **Rebuild the frontend.** The flag is inlined at build time, so after any
    change to `OPENLAW_AUTH_ENABLED`:
 
        docker compose build web && docker compose up -d
 
-   If frontend and backend disagree, the app detects it and sign-in refuses;
-   it remains a broken deployment until you rebuild.
+   If frontend and backend disagree, the app detects it: sign-in refuses,
+   and every page shows a banner saying the site is misconfigured and that
+   uploads may be deleted after 24 hours. It remains a broken deployment
+   until you rebuild.
 6. **Put TLS in front** (see "Reverse-proxy trust" below) and set
    `OPENLAW_COOKIE_SECURE=true`.
 
