@@ -26,8 +26,23 @@ import type {
  */
 export const MAX_UPLOAD_BYTES = 10_485_760
 
-/** Mirrors `Settings.max_documents_per_conversation`. */
-export const MAX_DOCUMENTS_PER_CONVERSATION = 3
+/** Mode A's cap: mirrors `openlaw.config.MODE_A_MAX_DOCUMENTS_PER_CONVERSATION`
+ * (what `Settings.effective_max_documents_per_conversation` raises Mode A to:
+ * the operator analysing their own case file). */
+export const MODE_A_MAX_DOCUMENTS_PER_CONVERSATION = 25
+
+/** Mode B's cap: mirrors `Settings.max_documents_per_conversation`. */
+export const MODE_B_MAX_DOCUMENTS_PER_CONVERSATION = 3
+
+/**
+ * The cap this build states and enforces locally, following the mode exactly
+ * as the backend's effective value does (final review H4). A single Mode B
+ * number here hid the upload control at three documents in Mode A, where the
+ * backend accepts 25.
+ */
+export const MAX_DOCUMENTS_PER_CONVERSATION = AUTH_ENABLED
+  ? MODE_B_MAX_DOCUMENTS_PER_CONVERSATION
+  : MODE_A_MAX_DOCUMENTS_PER_CONVERSATION
 
 /** Mirrors `Settings.anonymous_upload_ttl_hours`. */
 export const ANONYMOUS_UPLOAD_TTL_HOURS = 24

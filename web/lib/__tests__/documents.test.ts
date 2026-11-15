@@ -1,9 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { importInMode } from '@/test-utils/authMode'
 import {
   ALLOWED_UPLOAD_TYPES,
   ANONYMOUS_UPLOAD_TTL_HOURS,
   MAX_DOCUMENTS_PER_CONVERSATION,
   MAX_UPLOAD_BYTES,
+  MODE_A_MAX_DOCUMENTS_PER_CONVERSATION,
+  MODE_B_MAX_DOCUMENTS_PER_CONVERSATION,
   attachedFromConversationCard,
   attachedFromSummary,
   localUploadProblem,
@@ -128,13 +133,54 @@ describe('mirrored server limits', () => {
     // enforcer, these exist only so the copy can state the limit honestly
     // and an obvious failure costs no upload.
     expect(MAX_UPLOAD_BYTES).toBe(10_485_760)
-    expect(MAX_DOCUMENTS_PER_CONVERSATION).toBe(3)
     expect(ANONYMOUS_UPLOAD_TTL_HOURS).toBe(24)
     expect([...ALLOWED_UPLOAD_TYPES]).toEqual([
       'application/pdf',
       'text/plain',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     ])
+  })
+})
+
+// Final review H4: the per-conversation document cap follows the mode, and
+// each mode's frontend value is pinned to the backend SOURCE, not to a copy.
+describe('per-conversation document cap', () => {
+  const config = readFileSync(
+    path.resolve(import.meta.dirname, '..', '..', '..', 'src', 'openlaw', 'config.py'),
+    'utf8',
+  )
+  const pythonInt = (pattern: RegExp) => {
+    const match = config.match(pattern)
+    if (!match) throw new Error(`not found in config.py: ${pattern}`)
+    return Number(match[1])
+  }
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('pins Mode A to MODE_A_MAX_DOCUMENTS_PER_CONVERSATION', () => {
+    expect(MODE_A_MAX_DOCUMENTS_PER_CONVERSATION).toBe(
+      pythonInt(/^MODE_A_MAX_DOCUMENTS_PER_CONVERSATION = (\d+)$/m),
+    )
+  })
+
+  it('pins Mode B to Settings.max_documents_per_conversation', () => {
+    expect(MODE_B_MAX_DOCUMENTS_PER_CONVERSATION).toBe(
+      pythonInt(/^\s+max_documents_per_conversation: int = (\d+)$/m),
+    )
+  })
+
+  it.each([
+    [false, 'MODE_A_MAX_DOCUMENTS_PER_CONVERSATION'],
+    [true, 'MODE_B_MAX_DOCUMENTS_PER_CONVERSATION'],
+  ] as const)('uses the right cap when AUTH_ENABLED is %s', async (authEnabled, name) => {
+    const documents = await importInMode(authEnabled, () => import('@/lib/documents'))
+    expect(documents.MAX_DOCUMENTS_PER_CONVERSATION).toBe(documents[name])
+    const held = documents[name] - 1
+    const file = new File(['x'], 'a.pdf', { type: 'application/pdf' })
+    expect(documents.localUploadProblem(file, held)).toBeNull()
+    expect(documents.localUploadProblem(file, held + 1)).toBe('too_many_documents')
   })
 })
 
