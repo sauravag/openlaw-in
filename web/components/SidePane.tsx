@@ -60,8 +60,8 @@ function CloseButton({ label, onClose }: { label: string; onClose: () => void })
  * as a modal sheet -- not a copy. The static helpline block therefore exists
  * exactly once in the DOM in every state (final whole-plan review, H6: it is
  * in the server HTML before any script runs), and closing the sheet only
- * hides it. The header's 112 link keeps the emergency number one tap away
- * while the sheet is closed. With JavaScript off, the "Help" link targets
+ * hides it. While it is closed, `HelplineStrip` keeps every number visible
+ * and one tap from a call. With JavaScript off, the "Help" link targets
  * `#help-pane` and CSS `:target` shows the sheet.
  */
 export default function SidePane(props: SidePaneProps) {

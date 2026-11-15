@@ -920,7 +920,9 @@ describe("HomePage retention and account state (Mode B)", () => {
     });
 
     const { container } = render(<HomePage />);
-    expect(screen.getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
+    // Scoped to the static block: the phone helpline strip repeats 15100.
+    const standing = screen.getByRole("region", { name: strings.helplineHeading });
+    expect(within(standing).getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
     await screen.findByText(strings.keptUploadNotice);
     await userEvent.type(screen.getByLabelText(/your question/i), "he is hitting me");
     await userEvent.click(screen.getByRole("button", { name: /^ask$/i }));

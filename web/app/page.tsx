@@ -6,6 +6,7 @@ import AttachmentStatus, { hasAttachmentActivity } from "@/components/Attachment
 import AttachmentTray from "@/components/AttachmentTray";
 import ChatHeader from "@/components/ChatHeader";
 import ChatLayout from "@/components/ChatLayout";
+import HelplineStrip from "@/components/HelplineStrip";
 import Composer from "@/components/Composer";
 import MessageList from "@/components/MessageList";
 import MisconfigurationBanner from "@/components/MisconfigurationBanner";
@@ -92,29 +93,22 @@ function AccountSection(props: AccountSectionProps) {
   );
 }
 
-interface ComposerAreaProps {
-  language: Language["code"];
-  onLanguageChange: (code: Language["code"]) => void;
-  composer: ComposerState;
-  chat: ChatState;
-  attachments: DocumentsState;
-  pointer: ConversationPointer;
-  retention: Retention;
-  session: SessionHandle;
-}
-
 /** The composer with its attachment chips and paperclip tray wired in. */
-function ComposerArea({ language, composer, chat, attachments, retention, session, ...rest }: ComposerAreaProps) {
-  const isNoticeShownAbove = hasAttachmentActivity(attachments.documents, attachments.uploadingFilename);
+function ComposerArea({ page }: { page: HomeState }) {
+  const { language, attachments, retention, session } = page;
+  const isNoticeShownAbove = hasAttachmentActivity(
+    attachments.documents,
+    attachments.uploadingFilename,
+  );
   return (
     <Composer
       language={language}
-      onLanguageChange={rest.onLanguageChange}
-      question={composer.question}
-      onQuestionChange={composer.setQuestion}
-      onSend={() => void composer.send()}
-      isLoading={chat.status === "loading"}
-      textareaRef={composer.textareaRef}
+      onLanguageChange={page.setLanguage}
+      question={page.composer.question}
+      onQuestionChange={page.composer.setQuestion}
+      onSend={() => void page.composer.send()}
+      isLoading={page.chat.status === "loading"}
+      textareaRef={page.composer.textareaRef}
       attachmentStatus={
         <AttachmentStatus
           language={language}
@@ -129,7 +123,7 @@ function ComposerArea({ language, composer, chat, attachments, retention, sessio
       attachControl={
         <AttachmentTray
           language={language}
-          conversationId={rest.pointer.conversationId}
+          conversationId={page.pointer.conversationId}
           retention={retention}
           canOfferSignIn={session.isResolved}
           documentCount={attachments.documents.length}
@@ -144,12 +138,110 @@ function ComposerArea({ language, composer, chat, attachments, retention, sessio
   );
 }
 
-/** Pick an example: close the mobile sheet and put the question in the box. */
-function pickExample(help: HelpSheet, composer: ComposerState): (question: string) => void {
-  return (question) => {
+interface HomeState {
+  language: Language["code"];
+  setLanguage: (code: Language["code"]) => void;
+  session: SessionHandle;
+  isMisconfigured: boolean;
+  redirectNotice: RedirectNoticeKind | null;
+  pointer: ConversationPointer;
+  attachments: DocumentsState;
+  retention: Retention;
+  chat: ChatState;
+  composer: ComposerState;
+  help: HelpSheet;
+  ownConversations: readonly ConversationListItemData[];
+  refreshConversationList: () => void;
+}
+
+/** Every piece of the page's state, wired together in dependency order. */
+function useHomeState(): HomeState {
+  // Must run before `useRestoreFromQueryString`, which may rewrite the URL.
+  const redirectNotice = useRedirectNotice();
+  const session = useSession();
+  const isMisconfigured = useAuthMismatch();
+  const [language, setLanguage] = useState<Language["code"]>(DEFAULT_LANGUAGE);
+  const pointer = useConversationPointer(session.signedIn);
+  const attachments = useDocuments({
+    language,
+    conversationId: pointer.conversationId,
+    onConversationStarted: pointer.remember,
+  });
+  const retention = useRetention(attachments.documents, session);
+  const chat = useChat({ language, pointer, attachments });
+  const composer = useComposer(chat.ask, latestTurn(chat.turns)?.id ?? null);
+  const help = useHelpSheet();
+  useRestoreFromQueryString(composer.setQuestion, setLanguage);
+  useRestoreConversation(language, {
+    onRestored: chat.showConversation,
+    onSessionEnded: chat.markSessionEnded,
+    checkSession: session.refresh,
+  });
+  const [listRefreshes, setListRefreshes] = useState(0);
+  const listKey = `${pointer.conversationId ?? ""}:${listRefreshes}`;
+  const ownConversations = useConversationList(session.signedIn, language, listKey);
+  useDocumentLanguage(language);
+  const refreshConversationList = () => setListRefreshes((count) => count + 1);
+  return {
+    language, setLanguage, session, isMisconfigured, redirectNotice, pointer, attachments,
+    retention, chat, composer, help, ownConversations, refreshConversationList,
+  };
+}
+
+function HomeMessages({ page }: { page: HomeState }) {
+  const { language, chat } = page;
+  return (
+    <MessageList
+      language={language}
+      notices={
+        <PageNotices
+          language={language}
+          isMisconfigured={page.isMisconfigured}
+          redirectNotice={page.redirectNotice}
+          isSessionEnded={chat.isSessionEnded}
+          onMigrated={page.refreshConversationList}
+        />
+      }
+      turns={chat.turns}
+      pending={chat.pending}
+      status={chat.status}
+      errorMessage={chat.errorMessage}
+      uploadRefusal={page.attachments.refusal}
+      canDeleteConversation={page.pointer.conversationId !== null}
+      onDeleteConversation={() => void chat.deleteCurrentConversation()}
+      onShowExamples={page.help.open}
+    />
+  );
+}
+
+function HomeSidePane({ page }: { page: HomeState }) {
+  const { language, help, composer } = page;
+  // Both actions close the mobile sheet, so what they lead to is not left
+  // behind the backdrop (review M6). Desktop ignores the sheet state.
+  function pickExample(question: string): void {
     composer.fill(question);
     help.close();
-  };
+  }
+  function openConversation(id: string): void {
+    help.close();
+    void page.chat.openConversation(id);
+  }
+  return (
+    <SidePane
+      language={language}
+      isSheetOpen={help.isOpen}
+      onCloseSheet={help.close}
+      onPickExample={pickExample}
+    >
+      <AccountSection
+        language={language}
+        session={page.session}
+        conversations={page.ownConversations}
+        currentId={page.pointer.conversationId}
+        onOpen={openConversation}
+      />
+    </SidePane>
+  );
 }
 
 /**
@@ -161,7 +253,8 @@ function pickExample(help: HelpSheet, composer: ComposerState): (question: strin
  * `useComposer` (the box and its caret), `useDocuments` (attachments),
  * `useRetention`, `useHelpSheet` -- and layout in components. Every safety
  * property of the single-column page is kept: the static helpline block is in
- * the server HTML in every mode (`SidePane`), each crisis block is the first
+ * the server HTML in every mode (`SidePane`), every number is visible on a
+ * phone before any tap (`HelplineStrip`), each crisis block is the first
  * child of its own reply and is what the reply scroll brings into view
  * (`MessageList`), every refusal carries helplines, and the question form
  * still works without JavaScript (`Composer`).
@@ -170,48 +263,17 @@ function pickExample(help: HelpSheet, composer: ComposerState): (question: strin
  * tracked by the cookie `create_app`'s middleware sets on the proxied response.
  */
 export default function HomePage() {
-  // Must run before `useRestoreFromQueryString`, which may rewrite the URL.
-  const redirectNotice = useRedirectNotice();
-  const session = useSession();
-  const isMisconfigured = useAuthMismatch();
-  const [language, setLanguage] = useState<Language["code"]>(DEFAULT_LANGUAGE);
-  const pointer = useConversationPointer(session.signedIn);
-  const attachments = useDocuments({ language, conversationId: pointer.conversationId, onConversationStarted: pointer.remember });
-  const retention = useRetention(attachments.documents, session);
-  const chat = useChat({ language, pointer, attachments });
-  const composer = useComposer(chat.ask, latestTurn(chat.turns)?.id ?? null);
-  const help = useHelpSheet();
-  useRestoreFromQueryString(composer.setQuestion, setLanguage);
-  useRestoreConversation(language, { onRestored: chat.showConversation, onSessionEnded: chat.markSessionEnded, checkSession: session.refresh });
-  const [listRefreshes, setListRefreshes] = useState(0);
-  const ownConversations = useConversationList(session.signedIn, language, `${pointer.conversationId ?? ""}:${listRefreshes}`);
-  useDocumentLanguage(language);
-
+  const page = useHomeState();
+  const { language, help } = page;
   return (
     <ChatLayout
       isSheetOpen={help.isOpen}
       onCloseSheet={help.close}
       header={<ChatHeader language={language} isHelpOpen={help.isOpen} onOpenHelp={help.open} />}
-      messages={
-        <MessageList
-          language={language}
-          notices={<PageNotices language={language} isMisconfigured={isMisconfigured} redirectNotice={redirectNotice} isSessionEnded={chat.isSessionEnded} onMigrated={() => setListRefreshes((count) => count + 1)} />}
-          turns={chat.turns}
-          pending={chat.pending}
-          status={chat.status}
-          errorMessage={chat.errorMessage}
-          uploadRefusal={attachments.refusal}
-          canDeleteConversation={pointer.conversationId !== null}
-          onDeleteConversation={() => void chat.deleteCurrentConversation()}
-          onShowExamples={help.open}
-        />
-      }
-      composer={<ComposerArea language={language} onLanguageChange={setLanguage} composer={composer} chat={chat} attachments={attachments} pointer={pointer} retention={retention} session={session} />}
-      sidePane={
-        <SidePane language={language} isSheetOpen={help.isOpen} onCloseSheet={help.close} onPickExample={pickExample(help, composer)}>
-          <AccountSection language={language} session={session} conversations={ownConversations} currentId={pointer.conversationId} onOpen={(id) => void chat.openConversation(id)} />
-        </SidePane>
-      }
+      helplineStrip={<HelplineStrip language={language} />}
+      messages={<HomeMessages page={page} />}
+      composer={<ComposerArea page={page} />}
+      sidePane={<HomeSidePane page={page} />}
     />
   );
 }

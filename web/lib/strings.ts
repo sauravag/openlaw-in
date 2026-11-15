@@ -186,9 +186,11 @@ export interface UIStrings {
   /** Polite live-region text when a reply lands; numbered so a second reply
    * is a changed string a screen reader announces again. */
   replyArrivedAnnouncement: (turnNumber: number) => string;
-  /** Accessible name of the compact header call link. Contains "112" so the
-   * spoken name matches the visible digits. */
-  emergencyCallLabel: string;
+  /** The same announcement when the reply carries a crisis block, so a
+   * screen reader user hears that urgent help is in it. */
+  replyWithHelpAnnouncement: (turnNumber: number) => string;
+  /** Names the always-visible strip of helpline numbers on phones. */
+  helplineStripLabel: string;
   /** Mobile header control that opens the helplines and examples sheet. */
   helpButton: string;
   /** Closes that sheet. */
@@ -339,7 +341,9 @@ const EN: UIStrings = {
     `This site is misconfigured: its two halves disagree about whether accounts are switched on. Documents you upload may be deleted after ${hours} hours. If you run this site, rebuild the web service with the same OPENLAW_AUTH_ENABLED value as the API.`,
   replyArrivedAnnouncement: (turnNumber) =>
     `Reply ${turnNumber} has arrived. It is shown above the question box.`,
-  emergencyCallLabel: "Call 112, emergency",
+  replyWithHelpAnnouncement: (turnNumber) =>
+    `Reply ${turnNumber} has arrived. It includes urgent help numbers.`,
+  helplineStripLabel: "Helpline numbers, free to call",
   helpButton: "Help",
   closeHelpButton: "Close",
   attachDocumentButton: "Attach a document",
@@ -481,7 +485,9 @@ const HI: UIStrings = {
     `इस साइट की सेटिंग गलत है: इसके दो हिस्से इस बात पर सहमत नहीं हैं कि खाते चालू हैं या नहीं। आपके अपलोड किए गए दस्तावेज़ ${hours} घंटे बाद मिटाए जा सकते हैं। अगर आप यह साइट चलाते हैं, तो वेब सेवा को API वाले OPENLAW_AUTH_ENABLED मान के साथ फिर से बनाएँ।`,
   replyArrivedAnnouncement: (turnNumber) =>
     `उत्तर ${turnNumber} आ गया है। यह सवाल वाले बॉक्स के ऊपर दिखाया गया है।`,
-  emergencyCallLabel: "112 पर कॉल करें, आपातकालीन सेवा",
+  replyWithHelpAnnouncement: (turnNumber) =>
+    `उत्तर ${turnNumber} आ गया है। इसमें तुरंत मदद के नंबर हैं।`,
+  helplineStripLabel: "हेल्पलाइन नंबर, कॉल निःशुल्क",
   helpButton: "मदद",
   closeHelpButton: "बंद करें",
   attachDocumentButton: "दस्तावेज़ जोड़ें",

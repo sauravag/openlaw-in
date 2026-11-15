@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "../page";
@@ -147,7 +147,9 @@ describe("HomePage in Mode A", () => {
     });
 
     const { container } = render(<HomePage />);
-    expect(screen.getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
+    // Scoped to the static block: the phone helpline strip repeats 15100.
+    const standing = screen.getByRole("region", { name: strings.helplineHeading });
+    expect(within(standing).getByRole("link", { name: /15100/ })).toHaveAttribute("href", "tel:15100");
     await userEvent.type(screen.getByLabelText(/your question/i), "he is hitting me");
     await userEvent.click(screen.getByRole("button", { name: /^ask$/i }));
     await waitFor(() => expect(screen.getByTestId("crisis")).toBeInTheDocument());

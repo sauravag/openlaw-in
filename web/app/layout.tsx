@@ -1,10 +1,26 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "OpenLaw.in",
   description:
     "Free, cited answers to questions about Indian law, grounded in government sources.",
+};
+
+/**
+ * `interactiveWidget: "resizes-content"`: when the soft keyboard opens, the
+ * layout viewport shrinks with it instead of the browser panning the page.
+ * The chat is an `h-dvh` column with the composer pinned at the bottom, so
+ * this keeps the composer above the keyboard AND keeps the top of the
+ * message list -- where a reply's crisis box is scrolled to -- on screen,
+ * rather than panned away above the visible area (chat UI review, I1).
+ * `width`/`initialScale` restate Next's defaults, which an explicit
+ * viewport export would otherwise not carry.
+ */
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  interactiveWidget: "resizes-content",
 };
 
 // No custom web font: the primary user is on a cheap Android phone, possibly
