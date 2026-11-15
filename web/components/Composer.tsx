@@ -50,7 +50,9 @@ function SendIcon() {
 
 /** The language selector (joined to the form by `form=`) and the standing
  * "information, not advice" line, under the box. */
-function ComposerFooter({ language, onLanguageChange }: Pick<ComposerProps, 'language' | 'onLanguageChange'>) {
+type ComposerFooterProps = Pick<ComposerProps, 'language' | 'onLanguageChange'>
+
+function ComposerFooter({ language, onLanguageChange }: ComposerFooterProps) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-1">
       <LanguageSelector
@@ -65,21 +67,51 @@ function ComposerFooter({ language, onLanguageChange }: Pick<ComposerProps, 'lan
   )
 }
 
-interface QuestionFormProps
-  extends Pick<ComposerProps, 'isLoading' | 'language' | 'question' | 'onQuestionChange' | 'onSend' | 'textareaRef'> {
-  canSend: boolean
+interface QuestionTextareaProps
+  extends Pick<ComposerProps, 'language' | 'question' | 'onQuestionChange' | 'textareaRef'> {
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void
 }
 
-function QuestionForm({
-  canSend,
-  isLoading,
+function QuestionTextarea({
   language,
   question,
   onQuestionChange,
-  onSend,
   textareaRef,
-}: QuestionFormProps) {
+  onKeyDown,
+}: QuestionTextareaProps) {
   const strings = getStrings(language)
+  const height = EMPTY_BOX_HEIGHT[question === '' ? 'empty' : 'typed']
+  return (
+    <>
+      <label htmlFor="question-input" className="sr-only">
+        {strings.questionLabel}
+      </label>
+      <textarea
+        id="question-input"
+        ref={textareaRef}
+        name="question"
+        rows={1}
+        enterKeyHint="send"
+        className={`${height} max-h-[190px] w-full resize-none bg-transparent px-2 py-2.5 text-base leading-relaxed text-ink placeholder:text-muted focus:outline-none focus-visible:outline-none sm:text-lg`}
+        value={question}
+        onChange={(event) => onQuestionChange(event.target.value)}
+        onKeyDown={onKeyDown}
+        maxLength={QUESTION_MAX_LENGTH}
+        placeholder={strings.questionPlaceholder}
+        required
+      />
+    </>
+  )
+}
+
+interface QuestionFormProps extends Omit<QuestionTextareaProps, 'onKeyDown'> {
+  canSend: boolean
+  isLoading: boolean
+  onSend: () => void
+}
+
+function QuestionForm({ canSend, isLoading, onSend, ...textarea }: QuestionFormProps) {
+  const strings = getStrings(textarea.language)
   // The server HTML never disables the button: with JavaScript off it is the
   // only way to submit, and the box always starts empty there.
   const isHydrated = useIsHydrated()
@@ -103,23 +135,7 @@ function QuestionForm({
       noValidate
       className="flex min-w-0 flex-1 items-end gap-1.5"
     >
-      <label htmlFor="question-input" className="sr-only">
-        {strings.questionLabel}
-      </label>
-      <textarea
-        id="question-input"
-        ref={textareaRef}
-        name="question"
-        rows={1}
-        enterKeyHint="send"
-        className={`${EMPTY_BOX_HEIGHT[question === '' ? 'empty' : 'typed']} max-h-[190px] w-full resize-none bg-transparent px-2 py-2.5 text-base leading-relaxed text-ink placeholder:text-muted focus:outline-none focus-visible:outline-none sm:text-lg`}
-        value={question}
-        onChange={(event) => onQuestionChange(event.target.value)}
-        onKeyDown={handleKeyDown}
-        maxLength={QUESTION_MAX_LENGTH}
-        placeholder={strings.questionPlaceholder}
-        required
-      />
+      <QuestionTextarea {...textarea} onKeyDown={handleKeyDown} />
       <button
         type="submit"
         disabled={isHydrated && !canSend}

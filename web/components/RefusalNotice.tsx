@@ -10,10 +10,10 @@ interface RefusalNoticeProps {
    * H3) -- independent of `data`, which carries no `language` field (the
    * 500 body has no answer to have been localised for). */
   language: string
-  /** Set `false` when the caller has already rendered this refusal's crisis
-   * block higher up the page -- see `AnswerView`'s identical prop, and
-   * `app/page.tsx`, which hoists the newest turn's crisis above the thread.
-   * Defaults to `true` so nothing is lost by omission. */
+  /** Set `false` only when the caller has already rendered this refusal's
+   * crisis block elsewhere -- see `AnswerView`'s identical prop. The chat page
+   * never does: each crisis renders first inside its own reply. Defaults to
+   * `true` so nothing is lost by omission. */
   showCrisis?: boolean
 }
 

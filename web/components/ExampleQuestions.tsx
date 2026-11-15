@@ -12,12 +12,16 @@ interface ExampleQuestionsProps {
   onPickExample: (question: string) => void
 }
 
-/** Tappable starter questions, under their heading. */
+/** Tappable starter questions, as their own section with an `h2`: in the
+ * side pane they follow the helplines as a sibling, not a subsection of
+ * "Need help right now?". */
 export default function ExampleQuestions({ language, onPickExample }: ExampleQuestionsProps) {
   const strings = getStrings(language)
   return (
-    <div>
-      <h3 className="text-base font-semibold text-ink">{strings.examplesHeading}</h3>
+    <section aria-labelledby="example-questions-heading">
+      <h2 id="example-questions-heading" className="text-base font-semibold text-ink">
+        {strings.examplesHeading}
+      </h2>
       <ul className="mt-3 flex flex-col gap-2">
         {strings.exampleQuestions.map((question) => (
           <li key={question}>
@@ -39,6 +43,6 @@ export default function ExampleQuestions({ language, onPickExample }: ExampleQue
           </li>
         ))}
       </ul>
-    </div>
+    </section>
   )
 }

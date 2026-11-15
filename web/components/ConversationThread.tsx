@@ -14,15 +14,6 @@ interface ConversationThreadProps {
    * selected, so the thread's furniture follows the reader rather than the
    * language an older turn happened to be asked in. */
   language: string
-  /**
-   * A turn whose crisis block the caller has already rendered elsewhere, so
-   * this turn's own copy is omitted and help appears once. The chat page does
-   * not use it (each crisis renders first inside its own reply); it is kept
-   * for a caller that hoists. Every OTHER turn keeps its crisis box exactly
-   * where it was: help already delivered is never withdrawn by a later turn
-   * (Task 6 review, M3).
-   */
-  suppressCrisisForTurnId?: string | null
   /** Attached to the newest turn's reply, so the page can scroll that reply's
    * START -- its crisis block, when there is one -- to the top of the view. */
   newestReplyRef?: Ref<HTMLDivElement>
@@ -49,18 +40,15 @@ interface ConversationThreadProps {
  * has of checking a statement about her own paperwork, so a claim must never
  * outlive them (MEDIUM-2).
  */
-function ReplayedTurn({
-  data,
-  strings,
-  showCrisis,
-}: {
+interface ReplayedTurnProps {
   data: ConversationTurnCardData
   strings: UIStrings
-  showCrisis: boolean
-}) {
+}
+
+function ReplayedTurn({ data, strings }: ReplayedTurnProps) {
   return (
     <article className="flex flex-col gap-3">
-      {showCrisis && data.crisis_response && (
+      {data.crisis_response && (
         <CrisisAlert
           crisisResponse={data.crisis_response}
           helplines={data.helplines ?? []}
@@ -80,35 +68,19 @@ function ReplayedTurn({
   )
 }
 
-/** Whichever surface this turn's outcome belongs on. */
-function TurnOutcomeView({
-  turn,
-  strings,
-  showCrisis,
-}: {
+interface TurnOutcomeViewProps {
   turn: ThreadTurn
   strings: UIStrings
-  showCrisis: boolean
-}) {
-  if (turn.outcome.kind === 'answer') {
-    return <AnswerView data={turn.outcome.data} showCrisis={showCrisis} />
-  }
+}
+
+/** Whichever surface this turn's outcome belongs on. Each one renders its
+ * crisis block, when there is one, as its first child. */
+function TurnOutcomeView({ turn, strings }: TurnOutcomeViewProps) {
+  if (turn.outcome.kind === 'answer') return <AnswerView data={turn.outcome.data} />
   if (turn.outcome.kind === 'refused') {
-    return (
-      <RefusalNotice
-        data={turn.outcome.data}
-        language={turn.language}
-        showCrisis={showCrisis}
-      />
-    )
+    return <RefusalNotice data={turn.outcome.data} language={turn.language} />
   }
-  return (
-    <ReplayedTurn
-      data={turn.outcome.data}
-      strings={strings}
-      showCrisis={showCrisis}
-    />
-  )
+  return <ReplayedTurn data={turn.outcome.data} strings={strings} />
 }
 
 /**
@@ -131,7 +103,6 @@ function TurnOutcomeView({
 export default function ConversationThread({
   turns,
   language,
-  suppressCrisisForTurnId = null,
   newestReplyRef,
 }: ConversationThreadProps) {
   if (turns.length === 0) {
@@ -154,11 +125,7 @@ export default function ConversationThread({
             ref={turn.id === newestId ? newestReplyRef : undefined}
             className="scroll-mt-4"
           >
-            <TurnOutcomeView
-              turn={turn}
-              strings={strings}
-              showCrisis={turn.id !== suppressCrisisForTurnId}
-            />
+            <TurnOutcomeView turn={turn} strings={strings} />
           </div>
         </li>
       ))}

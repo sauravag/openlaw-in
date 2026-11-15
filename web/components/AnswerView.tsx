@@ -8,12 +8,10 @@ import SourceList from './SourceList'
 interface AnswerViewProps {
   data: AnswerData
   /**
-   * Set `false` when the caller has already rendered this answer's crisis
-   * block somewhere higher up the page. `app/page.tsx` does exactly that for
-   * the newest turn: inside a thread the newest answer sits LAST, so a crisis
-   * response left here would be below every earlier turn's legal analysis.
-   * Defaults to `true`, so a standalone `AnswerView` still renders it and no
-   * caller can lose it by forgetting a prop.
+   * Set `false` only when the caller has already rendered this answer's
+   * crisis block elsewhere. The chat page never does: each crisis renders
+   * first inside its own reply, and the page scrolls that reply's start into
+   * view. Defaults to `true`, so no caller can lose it by forgetting a prop.
    */
   showCrisis?: boolean
 }

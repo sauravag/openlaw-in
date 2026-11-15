@@ -10,11 +10,11 @@ interface WelcomeGuideProps {
    * submit. A mis-tap on a small screen must not silently spend one of a
    * person's free questions, and seeing the question land in the box is
    * what teaches "this is the shape of a question that works".
+   *
+   * Leave it out when the page offers the examples elsewhere (the chat
+   * layout's side pane): the examples are then not rendered here at all.
    */
-  onPickExample: (question: string) => void
-  /** False when the example questions live elsewhere on the page (the chat
-   * layout's side pane), so they are not offered twice. Defaults to true. */
-  showExamples?: boolean
+  onPickExample?: (question: string) => void
 }
 
 /**
@@ -35,11 +35,7 @@ interface WelcomeGuideProps {
  * Hidden as soon as the conversation has a turn -- see `MessageList`. It is
  * an empty state, not a permanent banner competing with the answer.
  */
-export default function WelcomeGuide({
-  language,
-  onPickExample,
-  showExamples = true,
-}: WelcomeGuideProps) {
+export default function WelcomeGuide({ language, onPickExample }: WelcomeGuideProps) {
   const strings = getStrings(language)
   return (
     <section
@@ -68,7 +64,7 @@ export default function WelcomeGuide({
         <p className="mt-4 text-sm leading-relaxed text-muted">{strings.coverageNote}</p>
       </div>
 
-      {showExamples && <ExampleQuestions language={language} onPickExample={onPickExample} />}
+      {onPickExample && <ExampleQuestions language={language} onPickExample={onPickExample} />}
     </section>
   )
 }

@@ -55,8 +55,8 @@ export type TurnOutcome =
   | { kind: 'replay'; data: ConversationTurnCardData }
 
 export interface ThreadTurn {
-  /** Stable within the thread; used as the React key and to identify the
-   * turn whose crisis block the page has hoisted above everything. */
+  /** Stable within the thread; used as the React key and to tell when a new
+   * newest turn has arrived (the page scrolls its reply into view). */
   id: string
   question: string
   /** The language the turn was asked in -- the fallback for a refusal, which
@@ -91,11 +91,11 @@ export interface TurnCrisis {
 /**
  * The crisis attached to `turn`, or `null`.
  *
- * One function for all three outcome kinds, so the page can hoist a crisis
- * block above the thread without caring whether the turn was answered,
- * refused, or restored from storage -- someone in danger who happens to hit a
- * rate limit, or whose phone reclaimed the tab, must see help in exactly the
- * same place as someone who got an answer.
+ * One function for all three outcome kinds, so the page can treat a crisis
+ * turn the same whether it was answered, refused, or restored from storage
+ * (it words the reply's live announcement from this) -- someone in danger
+ * who happens to hit a rate limit, or whose phone reclaimed the tab, must be
+ * told about help exactly as someone who got an answer.
  *
  * `replay` returned `null` here until the final whole-plan review (HIGH-3):
  * a restored crisis turn could not hoist its own helpline card, and because
