@@ -30,7 +30,10 @@ type Refuse = (
   headers?: Record<string, string>,
 ) => Response;
 
-type DeleteRefusalKind = Exclude<AuthRefusalKind, "sent" | "invalid_email" | "rate_limited" | "failed" | "too_large">;
+type DeleteRefusalKind = Extract<
+  AuthRefusalKind,
+  "confirmation_required" | "sign_in_required" | "delete_failed" | "delete_too_large" | "delete_conflict"
+>;
 
 /** The `/account/delete?error=` code a refusal kind lands on for a form post. */
 const FORM_CODE: Record<DeleteRefusalKind, AccountDeleteErrorCode | null> = {

@@ -34,7 +34,10 @@ export type AuthRefusalKind =
   | "sign_in_required"
   | "delete_failed"
   | "delete_too_large"
-  | "delete_conflict";
+  | "delete_conflict"
+  | "migration_sign_in_required"
+  | "migration_failed"
+  | "migration_email_conflict";
 
 /** Which `UIStrings` sentence each kind speaks. The sentences live in `lib/strings.ts`. */
 const DETAIL_KEY = {
@@ -48,6 +51,9 @@ const DETAIL_KEY = {
   delete_too_large: "accountDeleteTooLarge",
   delete_conflict: "accountDeleteConflict",
   sent: "authLinkSent",
+  migration_sign_in_required: "signInRequired",
+  migration_failed: "authMigrationFailed",
+  migration_email_conflict: "accountEmailConflict",
 } as const satisfies Record<AuthRefusalKind, keyof UIStrings>;
 
 function detailFor(kind: AuthRefusalKind, language: AuthLanguage): string {

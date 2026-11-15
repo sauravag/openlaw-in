@@ -633,3 +633,31 @@ export async function listConversations(params: DeleteParams): Promise<Conversat
   if (response.ok && isConversationList(body)) return { kind: "list", data: body };
   return { kind: "refused", status: response.status, data: refusalFrom(body, params.language) };
 }
+
+/** The Mode B route that re-runs the anonymous-to-account migration. */
+const MIGRATE_ENDPOINT = "/api/auth/migrate";
+
+export type MigrationOutcome =
+  | { kind: "migrated" }
+  | { kind: "refused"; status: number; data: RefusalData };
+
+/**
+ * Retry moving this browser's earlier conversations into the account (final
+ * review H2). **Total: never throws.** Same-origin, so the HttpOnly session
+ * and anonymous cookies ride along; the route reads both server-side.
+ */
+export async function retryMigration(params: DeleteParams): Promise<MigrationOutcome> {
+  const response = await send(MIGRATE_ENDPOINT, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language: params.language }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (response === null) {
+    return { kind: "refused", status: NO_RESPONSE_STATUS, data: fallbackRefusalData(params.language) };
+  }
+  if (response.ok) return { kind: "migrated" };
+  const body: unknown = await response.json().catch(() => null);
+  return { kind: "refused", status: response.status, data: refusalFrom(body, params.language) };
+}

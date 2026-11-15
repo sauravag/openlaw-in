@@ -173,6 +173,10 @@ export interface UIStrings {
   currentConversationLabel: string;
   /** Final review H1a: a kept conversation the lapsed session cannot show. */
   sessionEndedNotice: string;
+  /** Final review H2: retrying a failed migration from the page. */
+  migrationRetryButton: string;
+  migrationRetrying: string;
+  migrationSucceeded: string;
 }
 
 /** The `UIStrings` keys whose value is a plain sentence (not a formatter function). */
@@ -272,12 +276,12 @@ const EN: UIStrings = {
   authFailed: "We could not sign you in just now. Please try again in a little while. You can still ask your question without an account.",
   authRateLimited: "Too many sign-in attempts. Please try again in 10 minutes. You can still ask your question without an account.",
   authUnavailable: "Signing in is not available on this service right now. You can still ask your question without an account.",
-  authMigrationFailed: "You are signed in, but your earlier conversations could not be moved to your account. They are still in this browser until they expire.",
+  authMigrationFailed: "Your earlier conversations are not in your account yet. Try again. If it keeps failing they will be deleted after 24 hours.",
   accountDeleted: "Your account has been deleted. Your conversations, uploaded documents and excerpts have been erased, including any linked to this browser without an account. A record of who accessed each document (the access log) is kept, without any document content.",
   accountDeleteFailed: "Your account was not deleted: something went wrong on our side, and you are still signed in. Please try again in a little while.",
   signInRequired: "We could not confirm your sign-in, so your earlier conversations were not moved to your account. Please sign in again.",
   accountDeleteSignInRequired: "We could not confirm your sign-in, so nothing was deleted. Please sign in again.",
-  accountEmailConflict: "This email is already linked to another account, so your earlier conversations were not moved. They are still in this browser until they expire.",
+  accountEmailConflict: "This email is already linked to another account, so your earlier conversations were not moved. They will be deleted within 24 hours of when you started them.",
   conversationsSignInRequired: "Sign in to see your conversations. You can still ask your question without an account.",
   authInvalidEmail: "That does not look like an email address. Please check it and try again.",
   authRequestTooLarge: "That request was too large. Please enter just your email address.",
@@ -307,6 +311,9 @@ const EN: UIStrings = {
   openConversationButton: "Open",
   currentConversationLabel: "Open now",
   sessionEndedNotice: "Your session has ended, so this conversation is not shown. Sign in to see it again.",
+  migrationRetryButton: "Try again",
+  migrationRetrying: "Trying again\u2026",
+  migrationSucceeded: "Done. Your earlier conversations are now in your account.",
 };
 
 const HI: UIStrings = {
@@ -401,12 +408,12 @@ const HI: UIStrings = {
   authFailed: "हम अभी आपको साइन इन नहीं करा सके। कृपया थोड़ी देर बाद फिर कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
   authRateLimited: "साइन इन की बहुत ज़्यादा कोशिशें हुईं। कृपया 10 मिनट बाद दोबारा कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
   authUnavailable: "इस सेवा पर अभी साइन इन उपलब्ध नहीं है। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
-  authMigrationFailed: "आप साइन इन हैं, लेकिन आपकी पहले की बातचीत आपके खाते में नहीं ले जाई जा सकी। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि समाप्त नहीं हो जाती।",
+  authMigrationFailed: "आपकी पहले की बातचीत अभी आपके खाते में नहीं आई है। फिर से कोशिश करें। अगर यह बार-बार विफल हो, तो वह 24 घंटे बाद मिटा दी जाएगी।",
   accountDeleted: "आपका खाता हटा दिया गया है। आपकी बातचीत, अपलोड किए गए दस्तावेज़ और उनके अंश मिटा दिए गए हैं, उनके साथ भी जो बिना खाते के इस ब्राउज़र से जुड़े थे। हर दस्तावेज़ को किसने देखा, इसका रिकॉर्ड (एक्सेस लॉग) बिना किसी दस्तावेज़ सामग्री के रखा गया है।",
   accountDeleteFailed: "आपका खाता नहीं हटाया गया: हमारी ओर से कुछ गड़बड़ हुई, और आप अब भी साइन इन हैं। कृपया थोड़ी देर बाद फिर कोशिश करें।",
   signInRequired: "हम आपके साइन इन की पुष्टि नहीं कर सके, इसलिए आपकी पहले की बातचीत आपके खाते में नहीं ले जाई गई। कृपया फिर से साइन इन करें।",
   accountDeleteSignInRequired: "हम आपके साइन इन की पुष्टि नहीं कर सके, इसलिए कुछ भी नहीं हटाया गया। कृपया फिर से साइन इन करें।",
-  accountEmailConflict: "यह ईमेल पहले से किसी दूसरे खाते से जुड़ा है, इसलिए आपकी पहले की बातचीत नहीं ले जाई गई। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि समाप्त नहीं हो जाती।",
+  accountEmailConflict: "यह ईमेल पहले से किसी दूसरे खाते से जुड़ा है, इसलिए आपकी पहले की बातचीत नहीं ले जाई गई। वह शुरू होने के 24 घंटे के भीतर मिटा दी जाएगी।",
   conversationsSignInRequired: "अपनी बातचीत देखने के लिए साइन इन करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
   authInvalidEmail: "यह ईमेल पता सही नहीं लग रहा। कृपया जांच कर दोबारा कोशिश करें।",
   authRequestTooLarge: "यह अनुरोध बहुत बड़ा था। कृपया केवल अपना ईमेल पता दर्ज करें।",
@@ -436,6 +443,9 @@ const HI: UIStrings = {
   openConversationButton: "खोलें",
   currentConversationLabel: "अभी खुली है",
   sessionEndedNotice: "आपका सत्र समाप्त हो गया है, इसलिए यह बातचीत नहीं दिख रही। इसे फिर से देखने के लिए साइन इन करें।",
+  migrationRetryButton: "फिर से कोशिश करें",
+  migrationRetrying: "फिर से कोशिश हो रही है\u2026",
+  migrationSucceeded: "हो गया। आपकी पहले की बातचीत अब आपके खाते में है।",
 };
 
 export function getStrings(language: Language["code"] | string): UIStrings {

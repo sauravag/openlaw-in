@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CONVERSATIONS_ENDPOINT, listConversations } from '../api'
+import { CONVERSATIONS_ENDPOINT, listConversations, retryMigration } from '../api'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -68,5 +68,32 @@ describe('listConversations (final review H1b)', () => {
     const outcome = await listConversations({ language: 'en' })
 
     expect(outcome).toMatchObject({ kind: 'refused', status: 0 })
+  })
+})
+
+describe('retryMigration (final review H2)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs the language to the same-origin migrate route', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { status: 'migrated', conversations_moved: 1, documents_moved: 0 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await retryMigration({ language: 'hi' })).toEqual({ kind: 'migrated' })
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/auth/migrate')
+    expect(init).toMatchObject({ method: 'POST', credentials: 'include' })
+    expect(JSON.parse(init.body)).toEqual({ language: 'hi' })
+  })
+
+  it('resolves a refusal, with help, never throwing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(502, refusal)))
+    expect(await retryMigration({ language: 'en' })).toEqual({ kind: 'refused', status: 502, data: refusal })
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')))
+    expect(await retryMigration({ language: 'en' })).toMatchObject({ kind: 'refused', status: 0 })
   })
 })

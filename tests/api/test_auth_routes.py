@@ -376,7 +376,10 @@ def test_migrate_refuses_an_email_collision_with_409_and_honest_copy(
     body = response.json()
     assert "already linked to another account" in body["detail"]
     assert "sign in again" not in body["detail"].lower()
-    assert "still in this browser" in body["detail"]
+    # Final review H2: signed in, the anonymous material is NOT visible in
+    # this browser any more; the copy says when it will be deleted instead.
+    assert "still in this browser" not in body["detail"]
+    assert "deleted within 24 hours" in body["detail"]
     assert body["escalation_footer"] and body["helplines"]
     assert "registered to a different account" not in response.text
     assert (None, "anon-2") in _owners(settings)

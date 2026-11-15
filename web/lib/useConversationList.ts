@@ -5,8 +5,8 @@ import type { ConversationListItemData } from './types'
 
 /**
  * The signed-in owner's conversations (final review H1b), refetched when the
- * person signs in and whenever the current conversation changes (a new one
- * was just started). Mode B and signed in only: nothing is asked otherwise.
+ * person signs in and whenever `refreshKey` changes (a new conversation was
+ * started, or a retried migration moved earlier ones in). Mode B and signed in only: nothing is asked otherwise.
  *
  * A failed list is shown as no list. It is a convenience for finding a
  * conversation again, never the only way to reach help, and the helplines on
@@ -15,7 +15,9 @@ import type { ConversationListItemData } from './types'
 export function useConversationList(
   signedIn: boolean,
   language: string,
-  currentConversationId: string | null,
+  /** Any change refetches: the current conversation id, plus a counter the
+   * page bumps after a retried migration. */
+  refreshKey: string,
 ): readonly ConversationListItemData[] {
   const [items, setItems] = useState<readonly ConversationListItemData[]>([])
 
@@ -34,7 +36,7 @@ export function useConversationList(
     }
     // `language` only picks the refusal's language; a change must not refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signedIn, currentConversationId])
+  }, [signedIn, refreshKey])
 
   return items
 }

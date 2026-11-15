@@ -28,6 +28,7 @@ const AUTH_ROUTES: ReadonlyArray<readonly [string, () => Promise<object>, string
   ["/api/auth/sign-out", () => import("../auth/sign-out/route"), "POST"],
   ["/api/auth/session", () => import("../auth/session/route"), "GET"],
   ["/api/auth/delete-account", () => import("../auth/delete-account/route"), "POST"],
+  ["/api/auth/migrate", () => import("../auth/migrate/route"), "POST"],
 ];
 
 type Handler = (request: Request) => Promise<Response>;

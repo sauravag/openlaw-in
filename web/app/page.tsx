@@ -156,7 +156,12 @@ export default function HomePage() {
     onSessionEnded: () => setIsSessionEnded(true),
     checkSession: refreshSession,
   });
-  const ownConversations = useConversationList(session.signedIn, language, conversationId);
+  const [listRefreshes, setListRefreshes] = useState(0);
+  const ownConversations = useConversationList(
+    session.signedIn,
+    language,
+    `${conversationId ?? ""}:${listRefreshes}`,
+  );
 
   /** Open one of the signed-in person's own conversations from the list. */
   async function handleOpenConversation(id: string) {
@@ -294,7 +299,11 @@ export default function HomePage() {
       </header>
 
       <main className={`${COLUMN} flex flex-1 flex-col gap-8 py-6 sm:py-8`}>
-        <RedirectNotice notice={redirectNotice} language={language} />
+        <RedirectNotice
+          notice={redirectNotice}
+          language={language}
+          onMigrated={() => setListRefreshes((count) => count + 1)}
+        />
         {AUTH_ENABLED && isSessionEnded && <SessionEndedNotice language={language} />}
         {AUTH_ENABLED && (
           <YourConversations

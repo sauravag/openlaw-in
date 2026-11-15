@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from openlaw.config import Settings
 from openlaw.api.refusal import (
     REFUSAL_STATUS,
     _REFUSAL_DETAIL,
@@ -118,6 +119,31 @@ def test_account_deleted_states_what_was_erased_and_what_is_kept() -> None:
     english, hindi = RETAINED_NOTES
     assert english in refusal_detail("account_deleted", "en")
     assert hindi in refusal_detail("account_deleted", "hi")
+
+
+# --- final review H2: migration-failure copy must be true ------------------------
+
+_FALSE_BROWSER_CLAIMS = ("still in this browser", "इस ब्राउज़र में तब तक")
+
+
+@pytest.mark.parametrize("language", ["en", "hi"])
+@pytest.mark.parametrize("key", ALL_KEYS)
+def test_no_auth_copy_claims_material_is_still_in_this_browser(key: str, language: str) -> None:
+    text = refusal_detail(key, language)
+    for claim in _FALSE_BROWSER_CLAIMS:
+        assert claim not in text
+
+
+def test_migration_failed_copy_says_what_is_true_and_offers_a_retry() -> None:
+    hours = Settings.model_fields["anonymous_upload_ttl_hours"].default
+
+    assert refusal_detail("auth_migration_failed", "en") == (
+        "Your earlier conversations are not in your account yet. Try again. If "
+        f"it keeps failing they will be deleted after {hours} hours."
+    )
+    assert f"{hours} घंटे" in refusal_detail("auth_migration_failed", "hi")
+    assert f"{hours} घंटे" in refusal_detail("account_email_conflict", "hi")
+    assert f"within {hours} hours" in refusal_detail("account_email_conflict", "en")
 
 
 def test_delete_failed_says_nothing_was_deleted() -> None:

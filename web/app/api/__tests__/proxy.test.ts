@@ -95,6 +95,8 @@ describe("proxy surface is enumerated", () => {
   const ALLOWED_ROUTE_FILES = [
     "api/auth/callback/route.ts",
     "api/auth/delete-account/route.ts",
+    // Final review H2: retry a failed migration (404 in Mode A).
+    "api/auth/migrate/route.ts",
     "api/auth/session/route.ts",
     "api/auth/sign-in/route.ts",
     "api/auth/sign-out/route.ts",

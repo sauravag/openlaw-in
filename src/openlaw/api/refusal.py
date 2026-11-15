@@ -302,18 +302,18 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
         ),
     },
     # `POST /account/migrate` when the verified email already belongs to a
-    # different account. Signing in again cannot help, so this must not say so;
-    # the earlier material is still in this browser until it expires.
+    # different account. Signing in again cannot help, so this must not say so.
+    # Signed in, the person can no longer see the anonymous material in this
+    # browser (final review H2), so the copy says when it goes instead.
     "account_email_conflict": {
         "en": (
             "This email is already linked to another account, so your earlier "
-            "conversations were not moved. They are still in this browser until "
-            "they expire."
+            "conversations were not moved. They will be deleted within 24 hours "
+            "of when you started them."
         ),
         "hi": (
             "यह ईमेल पहले से किसी दूसरे खाते से जुड़ा है, इसलिए आपकी पहले की बातचीत "
-            "नहीं ले जाई गई। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि समाप्त "
-            "नहीं हो जाती।"
+            "नहीं ले जाई गई। वह शुरू होने के 24 घंटे के भीतर मिटा दी जाएगी।"
         ),
     },
     # --- Plan 7 Task 12: one entry per authentication / account terminal state.
@@ -363,16 +363,18 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
             "कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।"
         ),
     },
+    # Final review H2: signed in, every request carries the bearer, so the
+    # anonymous material is NOT visible in this browser. The page offers a
+    # retry (`POST /api/auth/migrate`); the hours are the default
+    # `Settings.anonymous_upload_ttl_hours`, pinned by test.
     "auth_migration_failed": {
         "en": (
-            "You are signed in, but your earlier conversations could not be "
-            "moved to your account. They are still in this browser until they "
-            "expire."
+            "Your earlier conversations are not in your account yet. Try again. "
+            "If it keeps failing they will be deleted after 24 hours."
         ),
         "hi": (
-            "आप साइन इन हैं, लेकिन आपकी पहले की बातचीत आपके खाते में नहीं ले "
-            "जाई जा सकी। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि "
-            "समाप्त नहीं हो जाती।"
+            "आपकी पहले की बातचीत अभी आपके खाते में नहीं आई है। फिर से कोशिश करें। "
+            "अगर यह बार-बार विफल हो, तो वह 24 घंटे बाद मिटा दी जाएगी।"
         ),
     },
     "account_deleted": {

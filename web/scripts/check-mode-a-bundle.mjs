@@ -23,6 +23,7 @@ export const FORBIDDEN = [
   "openlaw_pkce",
   "/api/auth/sign-in",
   "/api/auth/sign-out",
+  "/api/auth/migrate",
   "/account/delete",
   "/signup",
 ];
