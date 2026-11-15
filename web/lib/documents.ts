@@ -57,8 +57,9 @@ export const SIGN_IN_PATH: string | null = AUTH_ENABLED ? '/signup' : null
 /**
  * What the reader may be told about how long an upload lives.
  *
- * - `none`: Mode A. Nothing expires and there is no account, so no notice.
- * - `expires`: Mode B, anonymous. Deleted after the anonymous window.
+ * - `none`: Mode A, and no document carries an expiry. No notice.
+ * - `expires`: Mode B anonymous, or ANY mode once a document carries an
+ *   expiry (ground truth wins; final review H3b).
  * - `kept`: Mode B, signed in. Kept until the owner deletes it.
  *
  * Three states, three names: two booleans here is how the wrong pair gets

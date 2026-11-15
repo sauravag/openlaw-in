@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { isAuthFlagOn } from "./lib/authFlag";
 
 // The browser never calls the FastAPI backend directly: it talks to this
 // origin's enumerated Route Handlers under `app/api/openlaw/`, which forward
@@ -13,12 +14,16 @@ import type { NextConfig } from "next";
 // bundle. Next only inlines a variable that is defined at build time; when the
 // flag is unset the lookup stays a runtime `process.env` read, the minifier
 // cannot fold `if (!AUTH_ENABLED) return null`, and Mode A would ship sign-in
-// markup. Defaulting to "false" here makes the build always define it
-// (`lib/authMode.ts`, `scripts/check-mode-a-bundle.mjs`).
+// markup. Normalising to "true"/"false" here makes the build always define it
+// as one of two literals (`lib/authMode.ts`, `scripts/check-mode-a-bundle.mjs`),
+// and reading it with the backend's own truthy set (`True`, `1`, `yes`, `on`,
+// ...) means an operator's spelling cannot build Mode A beside a Mode B API
+// (final review H3a).
 export function buildEnv(
   source: Record<string, string | undefined> = process.env,
 ): Record<string, string> {
-  return { NEXT_PUBLIC_OPENLAW_AUTH_ENABLED: source.NEXT_PUBLIC_OPENLAW_AUTH_ENABLED ?? "false" };
+  const isOn = isAuthFlagOn(source.NEXT_PUBLIC_OPENLAW_AUTH_ENABLED);
+  return { NEXT_PUBLIC_OPENLAW_AUTH_ENABLED: isOn ? "true" : "false" };
 }
 
 const nextConfig: NextConfig = { env: buildEnv() };

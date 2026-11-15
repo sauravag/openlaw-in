@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { CONVERSATIONS_ENDPOINT, listConversations, retryMigration } from '../api'
+import { CONVERSATIONS_ENDPOINT, listConversations, readAuthAgreement, retryMigration } from '../api'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -95,5 +95,33 @@ describe('retryMigration (final review H2)', () => {
 
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')))
     expect(await retryMigration({ language: 'en' })).toMatchObject({ kind: 'refused', status: 0 })
+  })
+})
+
+describe('readAuthAgreement (final review H3c)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads agrees from the same-origin status route, uncached', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { agrees: false }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await readAuthAgreement()).toBe(false)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/openlaw/auth-status',
+      expect.objectContaining({ cache: 'no-store' }),
+    )
+  })
+
+  it.each([
+    ['a true answer', () => Promise.resolve(jsonResponse(200, { agrees: true })), true],
+    ['an unreachable backend', () => Promise.resolve(jsonResponse(200, { agrees: null })), null],
+    ['a malformed body', () => Promise.resolve(jsonResponse(200, { agrees: 'no' })), null],
+    ['a server error', () => Promise.resolve(jsonResponse(500, {})), null],
+    ['a network failure', () => Promise.reject(new TypeError('offline')), null],
+  ])('maps %s', async (_label, respond, expected) => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(respond))
+    expect(await readAuthAgreement()).toBe(expected)
   })
 })

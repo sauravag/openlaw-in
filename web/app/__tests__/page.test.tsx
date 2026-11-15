@@ -42,6 +42,7 @@ vi.mock("@/lib/api", async () => {
       kind: "list" as const,
       data: { conversations: [], next_offset: null },
     })),
+    readAuthAgreement: vi.fn(async () => null),
   };
 });
 

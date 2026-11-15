@@ -661,3 +661,23 @@ export async function retryMigration(params: DeleteParams): Promise<MigrationOut
   const body: unknown = await response.json().catch(() => null);
   return { kind: "refused", status: response.status, data: refusalFrom(body, params.language) };
 }
+
+/** Same-origin status route (`app/api/openlaw/auth-status`, Task 3). */
+const AUTH_STATUS_ENDPOINT = "/api/openlaw/auth-status";
+
+/**
+ * Whether this frontend build and the backend agree on the auth mode (final
+ * review H3c): `false` is a proven mismatch, `null` means it could not be
+ * told (an unreachable backend is not a misconfiguration). **Never throws.**
+ */
+export async function readAuthAgreement(): Promise<boolean | null> {
+  const response = await send(AUTH_STATUS_ENDPOINT, {
+    method: "GET",
+    cache: "no-store",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (response === null || !response.ok) return null;
+  const body: unknown = await response.json().catch(() => null);
+  const agrees = (body as { agrees?: unknown } | null)?.agrees;
+  return typeof agrees === "boolean" ? agrees : null;
+}

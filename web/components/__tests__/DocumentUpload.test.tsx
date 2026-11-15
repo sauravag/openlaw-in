@@ -59,12 +59,17 @@ describe('DocumentUpload', () => {
     ).toBeInTheDocument()
   })
 
-  it('tells an anonymous visitor their document expires, and offers no sign-in link in Mode A, where there is no account to make', () => {
+  it('says documents here expire when the server says so (a mismatched backend), with no sign-in sentence or link in Mode A', () => {
+    // Final review H3b: ground truth renders in every mode, and Mode A has no
+    // account, so "sign in to keep it" would be a false next step.
     setup({ retention: 'expires' })
     const strings = getStrings('en')
     expect(
-      screen.getByText(strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)),
+      screen.getByText(strings.expiringUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)),
     ).toBeInTheDocument()
+    expect(
+      screen.queryByText(strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)),
+    ).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: strings.signInCta })).not.toBeInTheDocument()
   })
 

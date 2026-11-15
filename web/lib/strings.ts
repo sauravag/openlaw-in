@@ -100,6 +100,9 @@ export interface UIStrings {
    * `Settings.anonymous_upload_ttl_hours`.
    */
   anonymousUploadNotice: (hours: number) => string;
+  /** The expiry sentence where no account exists to change it (a Mode A
+   * build beside a backend that expires uploads; final review H3b). */
+  expiringUploadNotice: (hours: number) => string;
   signInCta: string;
   /** Shown to a signed-in reader instead of the expiry notice: nothing is deleted on a timer. */
   keptUploadNotice: string;
@@ -177,6 +180,8 @@ export interface UIStrings {
   migrationRetryButton: string;
   migrationRetrying: string;
   migrationSucceeded: string;
+  /** Final review H3c: the frontend build and the backend disagree on accounts. */
+  misconfiguredBanner: (hours: number) => string;
 }
 
 /** The `UIStrings` keys whose value is a plain sentence (not a formatter function). */
@@ -251,6 +256,7 @@ const EN: UIStrings = {
     `You have attached the most documents we can read at once (${maxDocuments}). Delete one to attach another.`,
   anonymousUploadNotice: (hours) =>
     `This document will be deleted after ${hours} hours. Sign in to keep it.`,
+  expiringUploadNotice: (hours) => `Documents attached here will be deleted after ${hours} hours.`,
   signInCta: "Sign in",
   keptUploadNotice:
     "This document is kept until you delete it. You can delete it at any time.",
@@ -314,6 +320,8 @@ const EN: UIStrings = {
   migrationRetryButton: "Try again",
   migrationRetrying: "Trying again\u2026",
   migrationSucceeded: "Done. Your earlier conversations are now in your account.",
+  misconfiguredBanner: (hours) =>
+    `This site is misconfigured: its two halves disagree about whether accounts are switched on. Documents you upload may be deleted after ${hours} hours. If you run this site, rebuild the web service with the same OPENLAW_AUTH_ENABLED value as the API.`,
 };
 
 const HI: UIStrings = {
@@ -383,6 +391,7 @@ const HI: UIStrings = {
     `आपने एक साथ पढ़े जा सकने वाले सबसे ज़्यादा दस्तावेज़ (${maxDocuments}) जोड़ दिए हैं। नया जोड़ने के लिए एक मिटाएँ।`,
   anonymousUploadNotice: (hours) =>
     `यह दस्तावेज़ ${hours} घंटों के बाद मिटा दिया जाएगा। इसे रखना है तो साइन इन करें।`,
+  expiringUploadNotice: (hours) => `यहाँ जोड़े गए दस्तावेज़ ${hours} घंटे बाद मिटा दिए जाएँगे।`,
   signInCta: "साइन इन करें",
   keptUploadNotice:
     "यह दस्तावेज़ तब तक रखा जाएगा जब तक आप इसे खुद नहीं हटाते। आप इसे कभी भी हटा सकते हैं।",
@@ -446,6 +455,8 @@ const HI: UIStrings = {
   migrationRetryButton: "फिर से कोशिश करें",
   migrationRetrying: "फिर से कोशिश हो रही है\u2026",
   migrationSucceeded: "हो गया। आपकी पहले की बातचीत अब आपके खाते में है।",
+  misconfiguredBanner: (hours) =>
+    `इस साइट की सेटिंग गलत है: इसके दो हिस्से इस बात पर सहमत नहीं हैं कि खाते चालू हैं या नहीं। आपके अपलोड किए गए दस्तावेज़ ${hours} घंटे बाद मिटाए जा सकते हैं। अगर आप यह साइट चलाते हैं, तो वेब सेवा को API वाले OPENLAW_AUTH_ENABLED मान के साथ फिर से बनाएँ।`,
 };
 
 export function getStrings(language: Language["code"] | string): UIStrings {

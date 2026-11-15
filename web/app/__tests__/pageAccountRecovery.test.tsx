@@ -26,6 +26,7 @@ vi.mock("@/lib/api", async () => {
     deleteConversation: vi.fn(),
     readConversation: vi.fn(),
     listConversations: vi.fn(),
+    readAuthAgreement: vi.fn(async () => null),
   };
 });
 

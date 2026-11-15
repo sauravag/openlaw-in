@@ -26,6 +26,7 @@ vi.mock("@/lib/api", async () => {
       kind: "list" as const,
       data: { conversations: [], next_offset: null },
     })),
+    readAuthAgreement: vi.fn(async () => null),
   };
 });
 
@@ -88,7 +89,7 @@ describe("HomePage in Mode A", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("shows no expiry on an attached document", async () => {
+  it("shows the server's expiry on an attached document, and in the upload notice (final review H3b)", async () => {
     window.sessionStorage.setItem(CONVERSATION_STORAGE_KEY, "conv-1");
     const serverSentence = "This file is stored encrypted and will be deleted automatically in 24 hours.";
     mockedReadConversation.mockResolvedValue({
@@ -111,7 +112,13 @@ describe("HomePage in Mode A", () => {
     render(<HomePage />);
 
     expect(await screen.findByText("lease.pdf")).toBeInTheDocument();
-    expect(screen.queryByText(serverSentence)).not.toBeInTheDocument();
+    // A document that will be deleted is never shown without its notice,
+    // even when the frontend was built without accounts.
+    expect(screen.getByText(serverSentence)).toBeInTheDocument();
+    expect(
+      screen.getByText(strings.expiringUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: strings.signInCta })).not.toBeInTheDocument();
   });
 
   it.each([

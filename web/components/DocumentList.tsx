@@ -1,4 +1,4 @@
-import type { AttachedDocument, Retention } from '@/lib/documents'
+import type { AttachedDocument } from '@/lib/documents'
 import { getStrings } from '@/lib/strings'
 
 interface DocumentListProps {
@@ -10,9 +10,6 @@ interface DocumentListProps {
   /** The document currently being deleted, whose button is disabled so a
    * double tap on a slow connection cannot fire two requests. */
   deletingId: string | null
-  /** `none` (Mode A) shows no retention sentence: nothing there expires, and
-   * the server's wording about expiry must not be put in front of the reader. */
-  retention: Retention
 }
 
 /** A rubbish bin. Paired with a word, never the only signal. */
@@ -30,9 +27,12 @@ const BIN_PATH =
  * least 48px tall and wide for a thumb, with the filename in its accessible
  * name so a screen-reader user is never asked to delete "button" and hope.
  *
- * `retentionNotice` is the server's own sentence, rendered verbatim: it is
- * the promise made at upload time, and paraphrasing it here could promise
- * something the server does not do.
+ * `retentionNotice` is the server's own sentence, rendered verbatim and in
+ * EVERY mode (final review H3b): it is the promise made at upload time, and
+ * paraphrasing or hiding it could promise something the server does not do.
+ * A frontend built without accounts beside a backend that expires uploads
+ * must still say the document will be deleted; ground truth wins over the
+ * build flag.
  *
  * Styled as the reader's paperwork (warm ground, dashed edges, paperclip
  * family) rather than as a legal surface -- the same visual language
@@ -44,7 +44,6 @@ export default function DocumentList({
   language,
   onDelete,
   deletingId,
-  retention,
 }: DocumentListProps) {
   if (documents.length === 0) {
     return null
@@ -63,7 +62,7 @@ export default function DocumentList({
               <p className="text-sm tabular-nums text-muted">
                 {strings.documentPageCount(document.pageCount)}
               </p>
-              {retention !== 'none' && (
+              {document.retentionNotice !== '' && (
                 <p className="mt-1 text-sm leading-relaxed text-muted">
                   {document.retentionNotice}
                 </p>

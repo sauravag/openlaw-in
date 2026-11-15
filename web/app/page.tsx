@@ -7,6 +7,7 @@ import CrisisAlert from "@/components/CrisisAlert";
 import DocumentList from "@/components/DocumentList";
 import DocumentUpload from "@/components/DocumentUpload";
 import LanguageSelector from "@/components/LanguageSelector";
+import MisconfigurationBanner from "@/components/MisconfigurationBanner";
 import RedirectNotice from "@/components/RedirectNotice";
 import RefusalNotice from "@/components/RefusalNotice";
 import SessionEndedNotice from "@/components/SessionEndedNotice";
@@ -33,6 +34,7 @@ import {
   type Retention,
   type AttachedDocument,
 } from "@/lib/documents";
+import { useAuthMismatch } from "@/lib/useAuthAgreement";
 import { useConversationList } from "@/lib/useConversationList";
 import { useDocuments } from "@/lib/useDocuments";
 import { useRedirectNotice } from "@/lib/useRedirectNotice";
@@ -99,6 +101,7 @@ export default function HomePage() {
   // Must run before `useRestoreFromQueryString`, which may rewrite the URL.
   const redirectNotice = useRedirectNotice();
   const session = useSession();
+  const isMisconfigured = useAuthMismatch();
 
   /** Remember the conversation the server attached this turn or upload to,
    * and whether it was stored while signed in (so a later lapse keeps it). */
@@ -113,18 +116,21 @@ export default function HomePage() {
     onConversationStarted: rememberConversation,
   });
 
-  // Referenced as `AUTH_ENABLED` directly so Mode A's build folds this to
-  // "none" and drops every account branch.
-  // Ground truth wins: a document that carries an expiry never sits under a
-  // "kept" banner, whatever the (possibly stale) session says.
+  // Ground truth wins, in EVERY mode (final review H3b): a document that
+  // carries an expiry never sits under a "kept" banner, nor under no banner at
+  // all in a build without accounts, whatever the (possibly stale) session or
+  // the build flag says. Referenced as `AUTH_ENABLED` directly so Mode A's
+  // build folds the rest away.
   const hasExpiringDocument = attachments.documents.some(
     (document) => document.expiresAt !== null,
   );
-  const retention: Retention = !AUTH_ENABLED
-    ? "none"
-    : session.signedIn && !hasExpiringDocument
-      ? "kept"
-      : "expires";
+  const retention: Retention = hasExpiringDocument
+    ? "expires"
+    : !AUTH_ENABLED
+      ? "none"
+      : session.signedIn
+        ? "kept"
+        : "expires";
   const refreshSession = session.refresh;
   useEffect(() => {
     // The page believes "signed in" but the server stored something that
@@ -299,6 +305,7 @@ export default function HomePage() {
       </header>
 
       <main className={`${COLUMN} flex flex-1 flex-col gap-8 py-6 sm:py-8`}>
+        {isMisconfigured && <MisconfigurationBanner language={language} />}
         <RedirectNotice
           notice={redirectNotice}
           language={language}
@@ -403,7 +410,6 @@ export default function HomePage() {
             language={language}
             onDelete={(documentId) => void attachments.removeDocument(documentId)}
             deletingId={attachments.deletingId}
-            retention={retention}
           />
           <DocumentUpload
             language={language}

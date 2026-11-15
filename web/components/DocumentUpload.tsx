@@ -112,10 +112,17 @@ export default function DocumentUpload({
           <p className="text-sm leading-relaxed text-muted">
             {strings.uploadLimitsNote(MAX_UPLOAD_MEGABYTES, MAX_DOCUMENTS_PER_CONVERSATION)}
           </p>
-          {retention === 'expires' && (
+          {retention === 'expires' && SIGN_IN_PATH === null && (
+            // Mode A beside a backend that expires uploads (final review H3b):
+            // the truth, with no sign-in sentence there is no way to act on.
+            <p className="text-sm leading-relaxed text-paper-ink">
+              {strings.expiringUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)}
+            </p>
+          )}
+          {retention === 'expires' && SIGN_IN_PATH !== null && (
             <p className="text-sm leading-relaxed text-paper-ink">
               {strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)}{' '}
-              {SIGN_IN_PATH && canOfferSignIn && (
+              {canOfferSignIn && (
                 <a
                   href={SIGN_IN_PATH}
                   className="font-semibold text-brand underline decoration-2 underline-offset-4"
