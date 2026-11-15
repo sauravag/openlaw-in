@@ -74,7 +74,7 @@ function useRestoreFromQueryString(
 
     if (restoredQuestion) setQuestion(restoredQuestion);
     if (isLanguageCode(restoredLanguage)) setLanguage(restoredLanguage);
-    window.history.replaceState(null, "", window.location.pathname);
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
     // Runs once on mount only -- setQuestion/setLanguage are stable setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -218,11 +218,29 @@ export default function HomePage() {
   const session = useSession();
   // Referenced as `AUTH_ENABLED` directly so Mode A's build folds this to
   // "none" and drops every account branch.
+  // Ground truth wins: a document that carries an expiry never sits under a
+  // "kept" banner, whatever the (possibly stale) session says.
+  const hasExpiringDocument = attachments.documents.some(
+    (document) => document.expiresAt !== null,
+  );
   const retention: Retention = !AUTH_ENABLED
     ? "none"
-    : session.signedIn
+    : session.signedIn && !hasExpiringDocument
       ? "kept"
       : "expires";
+  const refreshSession = session.refresh;
+  useEffect(() => {
+    // The page believes "signed in" but the server stored something that
+    // expires: find out which of the two is wrong.
+    if (AUTH_ENABLED && session.signedIn && hasExpiringDocument) void refreshSession();
+  }, [session.signedIn, hasExpiringDocument, refreshSession]);
+
+  /** Confirm the session first, so the notice is right before the file goes;
+   * an anonymous answer never blocks the upload. */
+  async function handleFileChosen(file: File) {
+    await refreshSession();
+    await attachments.attachFile(file);
+  }
   useRestoreFromQueryString(setQuestion, setLanguage);
   useRestoreConversation(
     language,
@@ -342,7 +360,7 @@ export default function HomePage() {
             OpenLaw<span className="text-brand">.in</span>
           </h1>
           <p className="mt-1 text-base text-muted">{strings.tagline}</p>
-          {AUTH_ENABLED && (
+          {AUTH_ENABLED && session.isResolved && (
             <div className="mt-3">
               <AccountBar
                 signedIn={session.signedIn}
@@ -474,7 +492,8 @@ export default function HomePage() {
             isUploading={attachments.uploadingFilename !== null}
             uploadingFilename={attachments.uploadingFilename}
             documentCount={attachments.documents.length}
-            onFileChosen={(file) => void attachments.attachFile(file)}
+            canOfferSignIn={session.isResolved}
+            onFileChosen={(file) => void handleFileChosen(file)}
           />
         </section>
 

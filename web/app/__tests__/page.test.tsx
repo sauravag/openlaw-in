@@ -14,6 +14,7 @@ import { CONVERSATION_STORAGE_KEY } from "@/lib/thread";
 import { getStrings } from "@/lib/strings";
 import { accountDeletedNotice } from "@/lib/accountDeletedStrings";
 import { ANONYMOUS_UPLOAD_TTL_HOURS } from "@/lib/documents";
+import { SESSION_RECHECK_MIN_INTERVAL_MS } from "@/lib/useSession";
 import type { AnswerData, DocumentSummaryData, RefusalData } from "@/lib/types";
 
 // Mode B (accounts enabled) is the mode these tests were written against; the
@@ -801,7 +802,7 @@ describe("HomePage retention and account state (Mode B)", () => {
     render(<HomePage />);
 
     expect(screen.getByText(anonymousNotice)).toBeInTheDocument();
-    const links = screen.getAllByRole("link", { name: strings.signInCta });
+    const links = await screen.findAllByRole("link", { name: strings.signInCta });
     expect(links.length).toBeGreaterThan(0);
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
@@ -829,12 +830,14 @@ describe("HomePage retention and account state (Mode B)", () => {
     expect(screen.getByRole("button", { name: strings.signOutButton })).toBeInTheDocument();
   });
 
-  it("does not flash the signed-in notice while the session is still loading", () => {
+  it("does not flash the signed-in notice while the session is still loading, and offers no sign-in link yet", () => {
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(() => {})));
     render(<HomePage />);
 
+    // The conservative 24-hour promise stays up; only the links wait.
     expect(screen.getByText(anonymousNotice)).toBeInTheDocument();
     expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: strings.signInCta })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -844,7 +847,12 @@ describe("HomePage retention and account state (Mode B)", () => {
       () =>
         vi.stubGlobal(
           "fetch",
-          vi.fn(async () => new Response("{}", { status: 500 })),
+          vi.fn(
+            async () =>
+              new Response(JSON.stringify({ signedIn: true, email: "x@example.com" }), {
+                status: 500,
+              }),
+          ),
         ),
     ],
     [
@@ -894,7 +902,125 @@ describe("HomePage retention and account state (Mode B)", () => {
     expect(text.indexOf("call 112")).toBeLessThan(text.indexOf("Legal analysis here."));
   });
 
+  describe("a session that goes stale while the page is open", () => {
+    const live: { body: unknown } = { body: null };
+
+    function stubLiveSession() {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => new Response(JSON.stringify(live.body), { status: 200 })),
+      );
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      live.body = { signedIn: true, email: "asha@example.com" };
+      stubLiveSession();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("flips the banner to expires and the account bar to signed out when a focus re-check says anonymous", async () => {
+      render(<HomePage />);
+      await screen.findByText(strings.keptUploadNotice);
+
+      live.body = { signedIn: false, email: null };
+      vi.advanceTimersByTime(SESSION_RECHECK_MIN_INTERVAL_MS + 1);
+      window.dispatchEvent(new Event("focus"));
+
+      expect(await screen.findByText(anonymousNotice)).toBeInTheDocument();
+      expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
+      expect(screen.queryByText(strings.signedInAs("asha@example.com"))).not.toBeInTheDocument();
+      expect(screen.getAllByRole("link", { name: strings.signInCta }).length).toBeGreaterThan(0);
+    });
+
+    it("re-checks when the tab becomes visible again", async () => {
+      render(<HomePage />);
+      await screen.findByText(strings.keptUploadNotice);
+
+      live.body = { signedIn: false, email: null };
+      vi.advanceTimersByTime(SESSION_RECHECK_MIN_INTERVAL_MS + 1);
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      expect(await screen.findByText(anonymousNotice)).toBeInTheDocument();
+    });
+
+    it("throttles focus and visibility re-checks", async () => {
+      render(<HomePage />);
+      await screen.findByText(strings.keptUploadNotice);
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(SESSION_RECHECK_MIN_INTERVAL_MS + 1);
+      window.dispatchEvent(new Event("focus"));
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      window.dispatchEvent(new Event("focus"));
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("downgrades to expires when an upload comes back with an expiry while the page believes the reader is signed in", async () => {
+      mockedUploadDocument.mockResolvedValue({ kind: "document", data: leaseSummary });
+      render(<HomePage />);
+      await screen.findByText(strings.keptUploadNotice);
+
+      // The cookie lapsed since the last check: the upload is stored anonymously.
+      live.body = { signedIn: false, email: null };
+      await attach();
+
+      expect(await screen.findByText(anonymousNotice)).toBeInTheDocument();
+      expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
+    });
+
+    it("never leaves a document that will expire under a kept banner, even if the session still claims signed in", async () => {
+      mockedUploadDocument.mockResolvedValue({ kind: "document", data: leaseSummary });
+      render(<HomePage />);
+      await screen.findByText(strings.keptUploadNotice);
+
+      await attach();
+
+      expect(await screen.findByText(anonymousNotice)).toBeInTheDocument();
+      expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
+    });
+
+    it("refreshes the session before sending an upload, and still sends it when the reader turned out anonymous", async () => {
+      mockedUploadDocument.mockResolvedValue({ kind: "document", data: leaseSummary });
+      render(<HomePage />);
+      await screen.findByText(strings.keptUploadNotice);
+      const callsBefore = vi.mocked(fetch).mock.calls.length;
+
+      live.body = { signedIn: false, email: null };
+      await attach();
+
+      await waitFor(() => expect(mockedUploadDocument).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+  });
+
   describe("redirect flags", () => {
+    it("keeps the URL hash when stripping the flags", async () => {
+      stubSession({ signedIn: false, email: null });
+      window.history.replaceState(null, "", "/?migration=failed#section");
+      render(<HomePage />);
+
+      await within(screen.getByTestId("redirect-notice")).findByText(strings.authMigrationFailed);
+      expect(window.location.search).toBe("");
+      expect(window.location.hash).toBe("#section");
+    });
+
+    it("keeps the URL hash when restoring a question from the query string", async () => {
+      stubSession({ signedIn: false, email: null });
+      window.history.replaceState(null, "", "/?question=hello#section");
+      render(<HomePage />);
+
+      await waitFor(() => expect(window.location.search).toBe(""));
+      expect(window.location.hash).toBe("#section");
+    });
+
     function region(): HTMLElement {
       return screen.getByTestId("redirect-notice");
     }

@@ -20,6 +20,9 @@ interface DocumentUploadProps {
    * `expires` (Mode B anonymous: the 24-hour notice with the sign-in call to
    * action) or `kept` (Mode B signed in: kept until the owner deletes it). */
   retention: Retention
+  /** False while the session is still loading: the notice stays, but its
+   * "Sign in" link waits. Defaults to true. */
+  canOfferSignIn?: boolean
   isUploading: boolean
   uploadingFilename: string | null
   documentCount: number
@@ -57,6 +60,7 @@ export default function DocumentUpload({
   language,
   conversationId,
   retention,
+  canOfferSignIn = true,
   isUploading,
   uploadingFilename,
   documentCount,
@@ -111,7 +115,7 @@ export default function DocumentUpload({
           {retention === 'expires' && (
             <p className="text-sm leading-relaxed text-paper-ink">
               {strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)}{' '}
-              {SIGN_IN_PATH && (
+              {SIGN_IN_PATH && canOfferSignIn && (
                 <a
                   href={SIGN_IN_PATH}
                   className="font-semibold text-brand underline decoration-2 underline-offset-4"

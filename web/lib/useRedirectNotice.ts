@@ -40,7 +40,8 @@ export function useRedirectNotice(): RedirectNotice | null {
     const remaining = new URLSearchParams(params)
     FLAG_PARAMS.forEach((name) => remaining.delete(name))
     const query = remaining.toString()
-    window.history.replaceState(null, '', `${window.location.pathname}${query ? `?${query}` : ''}`)
+    const { pathname, hash } = window.location
+    window.history.replaceState(null, '', `${pathname}${query ? `?${query}` : ''}${hash}`)
   }, [])
 
   return notice

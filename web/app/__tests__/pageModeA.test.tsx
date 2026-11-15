@@ -75,6 +75,15 @@ describe("HomePage in Mode A", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("makes no session request on focus or visibility change either", async () => {
+    render(<HomePage />);
+    window.dispatchEvent(new Event("focus"));
+    document.dispatchEvent(new Event("visibilitychange"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("shows no expiry on an attached document", async () => {
     window.sessionStorage.setItem(CONVERSATION_STORAGE_KEY, "conv-1");
     const serverSentence = "This file is stored encrypted and will be deleted automatically in 24 hours.";
