@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import base64
 import uuid
-from datetime import date
 from collections.abc import Iterator
+from datetime import date
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -285,20 +285,36 @@ def test_a_failure_part_way_rolls_back_whole_and_leaves_nothing_ownerless(
     )
 
 
-
-def test_locks_the_users_row_so_a_concurrent_insert_waits(
+def test_locks_the_users_row_so_a_concurrent_child_insert_waits(
     session: Session, live_engine: Engine
 ) -> None:
+    """Probe BEFORE the users DELETE (which row-locks the row anyway): a
+    second connection's conversation INSERT for the same user must block on
+    the FK's KEY SHARE lock against the FOR UPDATE row. Without the lock it
+    succeeds and this test fails."""
     from sqlalchemy.exc import OperationalError
 
     user_id = _user(session)
     session.commit()
+    outcome: list[str] = []
+    real = delete_module._delete_documents
 
-    delete_account(session, user_id)  # uncommitted: the lock is held
+    def delete_then_probe(*args, **kwargs):
+        result = real(*args, **kwargs)
+        with Session(live_engine) as other:
+            other.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            other.add(Conversation(user_id=user_id))
+            try:
+                other.flush()
+                outcome.append("inserted")
+            except OperationalError:
+                outcome.append("blocked")
+            finally:
+                other.rollback()  # never hold a lock the main thread needs
+        return result
 
-    with Session(live_engine) as other:
-        with pytest.raises(OperationalError):
-            other.execute(
-                select(User.id).where(User.id == user_id).with_for_update(nowait=True)
-            )
+    with patch.object(delete_module, "_delete_documents", delete_then_probe):
+        delete_account(session, user_id)
     session.rollback()
+
+    assert outcome == ["blocked"]

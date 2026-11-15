@@ -44,5 +44,6 @@ def test_the_key_facts_agree() -> None:
     assert "also been removed" in en_removed and "may remain" not in en_removed
     assert "could not be removed and may remain" in en_remains
     assert "also been removed" not in en_remains
-    ts = _TS.read_text(encoding="utf-8")
-    assert "access log" in ts and "एक्सेस लॉग" in ts
+    literals = _literals()
+    assert any("access log" in lit and "without any document content" in lit for lit in literals)
+    assert any("एक्सेस लॉग" in lit for lit in literals)
