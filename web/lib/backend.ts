@@ -165,6 +165,22 @@ export async function proxyToBackend(
   });
 }
 
+const ANON_COOKIE_NAME = "openlaw_anon_id";
+
+/**
+ * The single `openlaw_anon_id=<value>` pair from a Cookie header, byte for
+ * byte, or null when absent or ambiguous (duplicates). An allowlist: no other
+ * cookie ever rides along on a server-initiated call.
+ */
+function anonCookieOnly(cookieHeader: string | null): string | null {
+  if (!cookieHeader) return null;
+  const pairs = cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.slice(0, part.indexOf("=")).trim() === ANON_COOKIE_NAME);
+  return pairs.length === 1 ? pairs[0] : null;
+}
+
 export interface PostToBackendOptions {
   /** Access token held in memory by the caller (not read from any cookie). */
   bearer: string;
@@ -180,8 +196,7 @@ export interface PostToBackendOptions {
  * request: `proxyToBackend` reads the bearer from the inbound request's
  * cookie, which cannot see a cookie written earlier in the same request, and
  * the inbound request is a GET from an email link. Shares header building
- * with `proxyToBackend`, so `openlaw_session` and `openlaw_pkce` are never
- * forwarded, whereas `openlaw_anon_id` is. Rejects on a network error or
+ * with `proxyToBackend`, but forwards ONLY `openlaw_anon_id` (an allowlist). Rejects on a network error or
  * timeout; the CALLER decides what a failure means.
  */
 export async function postToBackend(
@@ -191,7 +206,8 @@ export async function postToBackend(
   if (hasDotSegment(backendPath)) throw new Error("invalid backend path");
   const base = (process.env.OPENLAW_API_URL ?? DEFAULT_API_URL).replace(/\/+$/, "");
   const source = new Headers();
-  if (inboundCookieHeader) source.set("cookie", inboundCookieHeader);
+  const anonCookie = anonCookieOnly(inboundCookieHeader);
+  if (anonCookie) source.set("cookie", anonCookie);
   const headers = forwardableHeaders(source);
   headers.set("authorization", `Bearer ${bearer}`);
   return fetch(`${base}${backendPath}`, {

@@ -520,6 +520,22 @@ describe("GET /api/auth/callback", () => {
       },
     );
 
+    it.each([
+      ["ok", () => new Response("{}", { status: 200 })],
+      ["non-2xx", () => new Response("x", { status: 401 })],
+    ])("cancels the migrate response body on a %s response", async (_n, make) => {
+      cookieHeader = withCookies;
+      const response = make();
+      const cancel = vi.spyOn(response.body!, "cancel");
+      backendFetch.mockResolvedValue(response);
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const { callback } = await load(true);
+
+      await callback(callbackRequest());
+
+      expect(cancel).toHaveBeenCalled();
+    });
+
     it("does not call the backend when the code exchange fails", async () => {
       cookieHeader = withCookies;
       exchangeCode.mockResolvedValue({ kind: "failed", detail: "x" });

@@ -65,6 +65,7 @@ class MigrationResponse(BaseModel):
     documents_moved: int
 
 
+_BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
 _NOTHING_MOVED = MigrationResponse(conversations_moved=0, documents_moved=0)
 
 
@@ -81,18 +82,23 @@ def _verified_user_id(request: Request, session_factory) -> str:
         if token is None:
             raise AuthError("no bearer token")
         identity = decode_token(token, settings.supabase_jwt_secret)
-        with session_factory() as session:
-            user = upsert_user(session, identity)
-            user_id = user.id
-            session.commit()
-        return user_id
     except AuthError as error:
         logger.warning("account migration refused: %s", error.detail)
-        raise_refusal("sign_in_required")
+        raise_refusal("sign_in_required", headers=_BEARER_CHALLENGE)
+    try:
+        with session_factory() as session:
+            user_id = upsert_user(session, identity).id
+            session.commit()
+    except AuthError as error:
+        # Only the email-collision case: a verified token whose email belongs
+        # to another subject. Signing in again cannot fix it, hence 409.
+        logger.warning("account migration refused: %s", error.detail)
+        raise_refusal("account_email_conflict")
+    return user_id
 
 
 @migration_router.post("/account/migrate", response_model=MigrationResponse)
-async def migrate_account(request: Request) -> MigrationResponse:
+def migrate_account(request: Request) -> MigrationResponse:
     """Claim the caller's anonymous material for their signed-in account.
 
     Registered only when `settings.auth_enabled`. Requires a verified bearer:
@@ -104,6 +110,8 @@ async def migrate_account(request: Request) -> MigrationResponse:
 
     The migration runs in its own transaction, committed here on success and
     rolled back on any exception (`migrate_anonymous_material` only flushes).
+    Plain `def`, not `async def`: the SQLAlchemy work is synchronous and must
+    run in FastAPI's threadpool, not on the event loop. Nothing here awaits.
     """
     session_factory = request.app.state.session_factory
     user_id = _verified_user_id(request, session_factory)

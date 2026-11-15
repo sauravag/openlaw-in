@@ -8,13 +8,60 @@ that it was built for the wrong backend.
 from __future__ import annotations
 
 import json
+import time
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import jwt
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
+from openlaw.accounts.migrate import migrate_anonymous_material
+from openlaw.api import auth_routes
+from openlaw.api.app import ANON_COOKIE_NAME, create_app
+from openlaw.api.auth import AuthError, decode_token
 from openlaw.api.deps import _require_auth_configuration
 from openlaw.config import Settings
-from tests.api.conftest import JWT_SECRET, api_settings, build_client
+from openlaw.db.conversations import Owner, create_conversation
+from openlaw.db.models import (
+    Base,
+    Conversation,
+    Document,
+    DocumentAccessLog,
+    User,
+)
+from openlaw.documents.store import store_document
+from tests.api.conftest import (
+    JWT_SECRET,
+    NOTICE_TEXT,
+    RecordingAnswerFn,
+    api_settings,
+    bearer,
+    build_client,
+)
+import tests.api.conftest as _conftest
+
+
+@pytest.fixture(autouse=True)
+def _dispose_engines(monkeypatch: pytest.MonkeyPatch):
+    """Dispose every sqlite engine `build_client` opens, so none leaks."""
+    engines = []
+    real_create = _conftest.create_engine
+
+    def tracking(*args, **kwargs):
+        engine = real_create(*args, **kwargs)
+        engines.append(engine)
+        return engine
+
+    monkeypatch.setattr(_conftest, "create_engine", tracking)
+    yield
+    for engine in engines:
+        engine.dispose()
+
 
 SUPABASE_URL = "https://abcdefgh.supabase.co"
 
@@ -135,52 +182,33 @@ def test_require_auth_configuration_names_both_when_both_missing() -> None:
 
 # --- POST /account/migrate (Plan 7 Task 10) ---------------------------------
 
-import time
-from types import SimpleNamespace
-from unittest.mock import patch
-
-import jwt
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session
-
-from openlaw.accounts.migrate import migrate_anonymous_material
-from openlaw.api import auth_routes
-from openlaw.api.app import ANON_COOKIE_NAME, create_app
-from openlaw.db.conversations import Owner, create_conversation
-from openlaw.db.models import (
-    Base,
-    Conversation,
-    Document,
-    DocumentAccessLog,
-    User,
-)
-from openlaw.documents.store import store_document
-from tests.api.conftest import NOTICE_TEXT, RecordingAnswerFn, bearer
-
 ANON = "anon-token-for-migration"
 
 
 def _seed_anonymous(tmp_path: Path, settings: Settings, token: str = ANON) -> None:
     """Put one anonymous conversation and document in the client's database."""
     engine = create_engine(settings.database_url)
-    with Session(engine) as session:
-        owner = Owner(user_id=None, anon_token=token)
-        conversation = create_conversation(session, owner, settings)
-        store_document(
-            session, owner, conversation.id, "n.txt", "text/plain", NOTICE_TEXT, settings
-        )
-        session.commit()
-    engine.dispose()
+    try:
+        with Session(engine) as session:
+            owner = Owner(user_id=None, anon_token=token)
+            conversation = create_conversation(session, owner, settings)
+            store_document(
+                session, owner, conversation.id, "n.txt", "text/plain", NOTICE_TEXT, settings
+            )
+            session.commit()
+    finally:
+        engine.dispose()
 
 
 def _owners(settings: Settings) -> list[tuple[str | None, str | None]]:
     engine = create_engine(settings.database_url)
-    with Session(engine) as session:
-        rows = [
-            (c.user_id, c.anon_token) for c in session.query(Conversation).all()
-        ] + [(d.user_id, d.anon_token) for d in session.query(Document).all()]
-    engine.dispose()
-    return rows
+    try:
+        with Session(engine) as session:
+            return [
+                (c.user_id, c.anon_token) for c in session.query(Conversation).all()
+            ] + [(d.user_id, d.anon_token) for d in session.query(Document).all()]
+    finally:
+        engine.dispose()
 
 
 def _migrate(client, headers: dict[str, str] | None = None, cookie: str | None = ANON):
@@ -222,15 +250,23 @@ def test_migrate_repeat_call_returns_zeros_and_200(tmp_path: Path) -> None:
 
 
 def test_migrate_never_moves_material_owned_by_another_account(tmp_path: Path) -> None:
+    """A row already owned by someone else that still carries the caller's
+    token must stay put: only the `user_id IS NULL` guard protects it."""
     settings = api_settings(tmp_path)
     client = build_client(tmp_path, settings)
-    _seed_anonymous(tmp_path, settings)
-    _migrate(client, bearer("user-1", "one@example.com"))
+    engine = create_engine(settings.database_url)
+    try:
+        with Session(engine) as session:
+            session.add(User(id="owner-9", email="nine@example.com"))
+            session.add(Conversation(user_id="owner-9", anon_token=ANON))
+            session.commit()
+    finally:
+        engine.dispose()
 
-    response = _migrate(client, bearer("user-2", "two@example.com"))
+    response = _migrate(client, bearer("user-1", "one@example.com"))
 
     assert response.json() == {"conversations_moved": 0, "documents_moved": 0}
-    assert set(_owners(settings)) == {("user-1", None)}
+    assert _owners(settings) == [("owner-9", ANON)]
 
 
 def test_migrate_without_an_anon_token_returns_zeros_without_calling_migration(
@@ -245,9 +281,7 @@ def test_migrate_without_an_anon_token_returns_zeros_without_calling_migration(
     )
 
     with patch.object(auth_routes, "migrate_anonymous_material") as migrate:
-        import asyncio
-
-        result = asyncio.run(auth_routes.migrate_account(request))
+        result = auth_routes.migrate_account(request)
 
     assert result.model_dump() == {"conversations_moved": 0, "documents_moved": 0}
     migrate.assert_not_called()
@@ -268,45 +302,100 @@ def _expired_token() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-@pytest.mark.parametrize(
-    "headers",
-    [
-        {},
-        {"Authorization": "Bearer not-a-jwt"},
-        {"Authorization": "Basic abc"},
-        _expired_token(),
-    ],
-    ids=["missing", "garbage", "wrong-scheme", "expired"],
-)
-def test_migrate_refuses_an_unverified_caller_with_helplines(
-    tmp_path: Path, headers: dict[str, str]
+def _token(**overrides: object) -> dict[str, str]:
+    claims: dict[str, object] = {
+        "sub": "user-1",
+        "email": "person@example.com",
+        "aud": "authenticated",
+        "role": "authenticated",
+        "exp": int(time.time()) + 3600,
+        **overrides,
+    }
+    claims = {k: v for k, v in claims.items() if v is not None}
+    return {"Authorization": f"Bearer {jwt.encode(claims, JWT_SECRET, algorithm='HS256')}"}
+
+
+_BAD_BEARERS: dict[str, dict[str, str]] = {
+    "missing": {},
+    "wrong-scheme": {"Authorization": "Basic abc"},
+    "garbage": {"Authorization": "Bearer not-a-jwt"},
+    "bad-signature": {
+        "Authorization": "Bearer "
+        + jwt.encode({"sub": "u", "exp": int(time.time()) + 60}, "x" * 40, algorithm="HS256")
+    },
+    "expired": _token(exp=int(time.time()) - 60),
+    "wrong-aud": _token(aud="anon"),
+    "missing-sub": _token(sub=None),
+    "wrong-role": _token(role="service_role"),
+}
+
+
+def _auth_error_details() -> set[str]:
+    """Every AuthError.detail the verifier can produce for the bad bearers."""
+    details = {"no bearer token"}
+    for headers in _BAD_BEARERS.values():
+        token = headers.get("Authorization", "").removeprefix("Bearer ")
+        try:
+            decode_token(token, JWT_SECRET)
+        except AuthError as error:
+            details.add(error.detail)
+    return details
+
+
+@pytest.mark.parametrize("name", list(_BAD_BEARERS))
+def test_migrate_refuses_an_unverified_caller_with_401_and_helplines(
+    tmp_path: Path, name: str
 ) -> None:
     settings = api_settings(tmp_path)
     client = build_client(tmp_path, settings)
     _seed_anonymous(tmp_path, settings)
 
-    response = _migrate(client, headers)
+    response = _migrate(client, _BAD_BEARERS[name])
 
-    assert response.status_code == 503
-    body = response.text
-    assert "escalation_footer" in body and "helpline" in body.lower()
-    assert "authentication failed" not in body
-    assert "verification failed" not in body
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    body = response.json()
+    assert body["escalation_footer"] and body["helplines"]
+    for detail in _auth_error_details():
+        assert detail not in response.text
     assert set(_owners(settings)) == {(None, ANON)}
 
 
-def test_migrate_refuses_when_the_email_belongs_to_another_account(
+def test_migrate_refuses_an_email_collision_with_409_and_honest_copy(
     tmp_path: Path,
 ) -> None:
     settings = api_settings(tmp_path)
     client = build_client(tmp_path, settings)
     _seed_anonymous(tmp_path, settings)
     _migrate(client, bearer("user-1", "shared@example.com"))
+    _seed_anonymous(tmp_path, settings, token="anon-2")
 
-    response = _migrate(client, bearer("user-2", "shared@example.com"))
+    response = _migrate(client, bearer("user-2", "shared@example.com"), cookie="anon-2")
 
-    assert response.status_code == 503
+    assert response.status_code == 409
+    body = response.json()
+    assert "already linked to another account" in body["detail"]
+    assert "sign in again" not in body["detail"].lower()
+    assert "still in this browser" in body["detail"]
+    assert body["escalation_footer"] and body["helplines"]
     assert "registered to a different account" not in response.text
+    assert (None, "anon-2") in _owners(settings)
+
+
+def test_migrate_collision_copy_is_available_in_hindi() -> None:
+    from openlaw.api.refusal import refusal_detail
+
+    assert refusal_detail("account_email_conflict", "hi") != refusal_detail(
+        "account_email_conflict", "en"
+    )
+
+
+def test_unavailable_stays_503() -> None:
+    from openlaw.api.refusal import REFUSAL_STATUS
+
+    assert REFUSAL_STATUS["auth_unavailable"] == 503
+    assert REFUSAL_STATUS["sign_in_required"] == 401
+    assert REFUSAL_STATUS["account_email_conflict"] == 409
 
 
 def test_a_failure_after_the_moves_rolls_back_everything(tmp_path: Path) -> None:
@@ -325,9 +414,11 @@ def test_a_failure_after_the_moves_rolls_back_everything(tmp_path: Path) -> None
     assert set(_owners(settings)) == {(None, ANON)}
     # The user row was committed on its own, before the migration began.
     engine = create_engine(settings.database_url)
-    with Session(engine) as session:
-        assert session.get(User, "user-1") is not None
-    engine.dispose()
+    try:
+        with Session(engine) as session:
+            assert session.get(User, "user-1") is not None
+    finally:
+        engine.dispose()
 
 
 @pytest.mark.integration
@@ -335,8 +426,6 @@ def test_migrate_through_the_endpoint_on_live_postgres(
     live_engine, tmp_path: Path
 ) -> None:
     """The brief's 'Done when', on the engine production runs on."""
-    from contextlib import contextmanager
-
     Base.metadata.create_all(live_engine, checkfirst=True)
     assert live_engine.url.database == "openlaw_test"
     token = f"anon-{time.time_ns()}"
@@ -356,17 +445,18 @@ def test_migrate_through_the_endpoint_on_live_postgres(
         finally:
             session.close()
 
-    with Session(live_engine) as seed:
-        owner = Owner(user_id=None, anon_token=token)
-        conversation = create_conversation(seed, owner, settings)
-        document = store_document(
-            seed, owner, conversation.id, "n.txt", "text/plain", NOTICE_TEXT, settings
-        )
-        conversation_id, document_id = conversation.id, document.id
-        seed.commit()
-
+    conversation_id: str | None = None
+    document_id: str | None = None
     try:
-        from fastapi.testclient import TestClient
+        with Session(live_engine) as seed:
+            owner = Owner(user_id=None, anon_token=token)
+            conversation = create_conversation(seed, owner, settings)
+            conversation_id = conversation.id
+            document = store_document(
+                seed, owner, conversation.id, "n.txt", "text/plain", NOTICE_TEXT, settings
+            )
+            document_id = document.id
+            seed.commit()
 
         client = TestClient(
             create_app(RecordingAnswerFn(), session_factory, settings),
@@ -390,9 +480,13 @@ def test_migrate_through_the_endpoint_on_live_postgres(
             assert "migrate" in actions
     finally:
         with Session(live_engine) as cleanup:
-            cleanup.query(DocumentAccessLog).filter(
-                DocumentAccessLog.document_id == document_id
-            ).delete()
-            cleanup.query(Conversation).filter(Conversation.id == conversation_id).delete()
+            if document_id is not None:
+                cleanup.query(DocumentAccessLog).filter(
+                    DocumentAccessLog.document_id == document_id
+                ).delete()
+            if conversation_id is not None:
+                cleanup.query(Conversation).filter(
+                    Conversation.id == conversation_id
+                ).delete()
             cleanup.query(User).filter(User.id == subject).delete()
             cleanup.commit()

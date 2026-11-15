@@ -274,6 +274,21 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
             "खाते में नहीं ले जाई गई। कृपया फिर से साइन इन करें।"
         ),
     },
+    # `POST /account/migrate` when the verified email already belongs to a
+    # different account. Signing in again cannot help, so this must not say so;
+    # the earlier material is still in this browser until it expires.
+    "account_email_conflict": {
+        "en": (
+            "This email is already linked to another account, so your earlier "
+            "conversations were not moved. They are still in this browser until "
+            "they expire."
+        ),
+        "hi": (
+            "यह ईमेल पहले से किसी दूसरे खाते से जुड़ा है, इसलिए आपकी पहले की बातचीत "
+            "नहीं ले जाई गई। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि समाप्त "
+            "नहीं हो जाती।"
+        ),
+    },
     # Returned for a conversation or document the caller does not own, AND
     # for one that does not exist -- deliberately the same response, so the
     # reply cannot be used to enumerate real ids (see `openlaw.db
@@ -301,8 +316,10 @@ REFUSAL_STATUS: dict[str, int] = {
     "too_many_documents": 422,
     "not_found": 404,
     "auth_unavailable": 503,
-    # Same status as the other auth refusal, by ruling, rather than a 401.
-    "sign_in_required": 503,
+    # Missing, invalid or expired bearer: 401 (+ `WWW-Authenticate`), never a
+    # 503, which would read as "the server is down" to proxies and monitors.
+    "sign_in_required": 401,
+    "account_email_conflict": 409,
 }
 
 #: `openlaw.documents.extract.ExtractionError.reason` -> refusal key. The
@@ -348,6 +365,7 @@ def raise_refusal(
     question: str = "",
     state: str | None = None,
     language: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> NoReturn:
     """Raise the HTTPException for refusal `key`, carrying help.
 
@@ -360,6 +378,7 @@ def raise_refusal(
     raise HTTPException(
         status_code=REFUSAL_STATUS[key],
         detail=refusal_body(key, question, state, language),
+        headers=headers,
     )
 
 

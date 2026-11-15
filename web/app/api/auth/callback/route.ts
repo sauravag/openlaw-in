@@ -28,6 +28,8 @@ async function migrateAnonymousMaterial(
       bearer: accessToken,
       inboundCookieHeader,
     });
+    // Release the connection; the body is never needed.
+    await response.body?.cancel();
     if (response.ok) return true;
     console.error("[Auth] account migration refused, status", response.status);
   } catch (error) {

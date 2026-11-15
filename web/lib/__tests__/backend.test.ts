@@ -367,6 +367,26 @@ describe("postToBackend", () => {
     expect(sentHeaders(mock).get("authorization")).toBe("Bearer fresh-token");
   });
 
+  it("forwards exactly the anon cookie and no other cookie", async () => {
+    const mock = stubBackend(new Response("{}"));
+    const { postToBackend } = await load(true);
+    await postToBackend("/account/migrate", {
+      bearer: "t",
+      inboundCookieHeader: `foo=bar; _ga=GA1.2.3; openlaw_anon_id=anon-1; ${SESSION_COOKIE}; openlaw_pkce=v`,
+    });
+    expect(sentHeaders(mock).get("cookie")).toBe("openlaw_anon_id=anon-1");
+  });
+
+  it("sends no Cookie header when there is no anon cookie, whatever else is inbound", async () => {
+    const mock = stubBackend(new Response("{}"));
+    const { postToBackend } = await load(true);
+    await postToBackend("/account/migrate", {
+      bearer: "t",
+      inboundCookieHeader: "foo=bar; _ga=GA1.2.3",
+    });
+    expect(sentHeaders(mock).has("cookie")).toBe(false);
+  });
+
   it("forwards the anon cookie but never the session or PKCE cookies", async () => {
     const mock = stubBackend(new Response("{}"));
     const { postToBackend } = await load(true);
@@ -392,10 +412,13 @@ describe("postToBackend", () => {
 
   it("uses a bounded timeout signal", async () => {
     const mock = stubBackend(new Response("{}"));
+    const timeout = vi.spyOn(AbortSignal, "timeout");
     const { postToBackend, BACKEND_POST_TIMEOUT_MS } = await load(true);
     expect(BACKEND_POST_TIMEOUT_MS).toBe(10_000);
     await postToBackend("/account/migrate", { bearer: "t", inboundCookieHeader: null });
+    expect(timeout).toHaveBeenCalledWith(10_000);
     expect((mock.mock.calls[0][1] as RequestInit).signal).toBeInstanceOf(AbortSignal);
+    timeout.mockRestore();
   });
 
   it("rejects a dot-segment path without calling fetch", async () => {
