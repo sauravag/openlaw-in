@@ -360,10 +360,8 @@ services:
       context: ./web
       args:
         OPENLAW_API_URL: http://api:8000
-      # NOT also set under `environment:` below (Task 7 review, M5): Next.js
-      # resolves this only at `next build` time (see web/Dockerfile's
-      # header comment, verified) -- a runtime environment variable here
-      # would be silently inert and is actively misleading to leave in.
+      # Becomes the runner image's default; the Route Handlers read it at
+      # request time (see web/Dockerfile's header comment).
     restart: unless-stopped
     # Runtime (not build-time) settings for the Mode B sign-in routes
     # (web/app/api/auth/*). Unset values keep Mode A unaffected; in Mode B,

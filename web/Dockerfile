@@ -1,20 +1,21 @@
 # OpenLaw.in frontend image (Task 7: one-command self-hosting).
 #
-# `OPENLAW_API_URL` (read by next.config.ts's `rewrites()`, NOT the
-# `NEXT_PUBLIC_...` convention -- this value is only ever read on the
+# `OPENLAW_API_URL` (read by `web/lib/backend.ts` and `authAgreement.ts`,
+# NOT the `NEXT_PUBLIC_...` convention -- this value is only ever read on the
 # server, never inlined into the browser bundle) must resolve to the `api`
 # service's address AS SEEN FROM INSIDE THIS CONTAINER on the Compose
 # network -- i.e. `http://api:8000` (the service name Docker Compose's
 # built-in DNS resolves), never `localhost`, which inside this container
 # means "this container", not the api one.
 #
-# It is set ONLY at build time (`ARG`, below), not at container runtime
-# (Task 7 review, M5, verified): Next.js resolves `rewrites()` once, at
-# `next build`, baking the destination into `.next/routes-manifest.json` --
-# a runtime-only `docker-compose.yml` `environment:` override has NO effect
-# on an already-built image. To point a built image at a different `api`
-# address, rebuild with a different `--build-arg OPENLAW_API_URL=...`;
-# there is no runtime knob for this.
+# It is read at REQUEST time, so it must be set in the RUNNER stage's
+# environment. It used to be build-time only, when `next.config.ts`'s
+# `rewrites()` baked it into `.next/routes-manifest.json`; Plan 7 Task 6
+# replaced the rewrites with Route Handlers that read `process.env` per
+# request, and an image that set it only in the builder stage fell back to
+# `127.0.0.1:8000` -- this container -- so every proxied request failed.
+# The same `--build-arg` still sets it (baked in as the runner's default);
+# a runtime `environment:` override now also works.
 #
 # `node:26-slim`, not `node:22`: verified by actually building this image
 # (Task 7 review round 2) -- `node:22-slim` ships npm 10.9.9, which fails
@@ -57,6 +58,8 @@ RUN npm ci --omit=dev
 FROM node:26-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+ARG OPENLAW_API_URL=http://api:8000
+ENV OPENLAW_API_URL=$OPENLAW_API_URL
 
 RUN addgroup --system --gid 1001 nodejs \
     && adduser --system --uid 1001 nextjs
