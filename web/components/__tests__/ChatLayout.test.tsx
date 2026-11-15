@@ -22,6 +22,28 @@ describe('ChatLayout', () => {
   })
 })
 
+describe('ChatLayout containing block', () => {
+  it('positions the root, so sr-only text cannot grow the document and let the reply scroll move the whole page', () => {
+    // Found on the live app at 390px: `sr-only` is `position: absolute`. With
+    // no positioned ancestor it anchored to the page, made the document
+    // 3309px tall inside an 844px viewport, and the reply's scrollIntoView
+    // then scrolled the window -- pushing the header and the helpline strip
+    // off-screen. jsdom has no layout, so this pins the class, not the pixels.
+    const { container } = render(
+      <ChatLayout
+        header={null}
+        messages={null}
+        composer={null}
+        sidePane={null}
+        isSheetOpen={false}
+        onCloseSheet={vi.fn()}
+      />,
+    )
+    const classes = (container.firstElementChild as HTMLElement).className.split(/\s+/)
+    expect(classes).toContain('relative')
+  })
+})
+
 describe('root viewport (I1)', () => {
   it('lets the soft keyboard resize the layout, so the pinned composer and dvh shrink with it', () => {
     expect(viewport.interactiveWidget).toBe('resizes-content')

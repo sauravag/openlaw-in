@@ -26,7 +26,7 @@ interface ChatLayoutProps {
  */
 export default function ChatLayout(props: ChatLayoutProps) {
   return (
-    <div className="flex h-screen supports-[height:100dvh]:h-dvh flex-col overflow-hidden bg-white">
+    <div className="relative flex h-screen supports-[height:100dvh]:h-dvh flex-col overflow-hidden bg-white">
       {props.header}
       {props.helplineStrip}
       <div className="flex min-h-0 flex-1">
