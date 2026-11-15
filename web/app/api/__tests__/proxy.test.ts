@@ -3,7 +3,6 @@ import { readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const OPENLAW_DIR = path.resolve(__dirname, "../openlaw");
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
 type Handler = (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
@@ -81,31 +80,34 @@ describe("enumerated proxy routes", () => {
 });
 
 describe("proxy surface is enumerated", () => {
+  const APP_DIR = path.resolve(__dirname, "../..");
+
   function walk(dir: string, prefix = ""): string[] {
     return readdirSync(dir).flatMap((name) => {
       const full = path.join(dir, name);
       const rel = prefix ? `${prefix}/${name}` : name;
-      return statSync(full).isDirectory() ? [rel, ...walk(full, rel)] : [];
+      return statSync(full).isDirectory() ? walk(full, rel) : [rel];
     });
   }
 
-  const ALLOWED = new Set([
-    "ask",
-    "auth-status",
-    "documents",
-    "documents/[documentId]",
-    "conversations",
-    "conversations/[conversationId]",
-  ]);
+  // The four proxy routes plus Task 3's own (non-proxy) auth-status handler.
+  const ALLOWED_ROUTE_FILES = [
+    "api/openlaw/ask/route.ts",
+    "api/openlaw/auth-status/route.ts",
+    "api/openlaw/conversations/[conversationId]/route.ts",
+    "api/openlaw/documents/[documentId]/route.ts",
+    "api/openlaw/documents/route.ts",
+  ];
 
-  it("has no catch-all route that would expose /readyz", () => {
-    const dirs = walk(OPENLAW_DIR);
-    const catchAll = dirs.filter((d) => /\[\[?\.\.\./.test(d));
+  it("has no catch-all segment anywhere under app/ (would expose /readyz)", () => {
+    const catchAll = walk(APP_DIR).filter((f) => /\[\[?\.\.\./.test(f));
     expect(catchAll, "catch-all would re-expose /readyz (M7)").toEqual([]);
   });
 
-  it("has no unexpected route directory (never proxy /readyz)", () => {
-    const unexpected = walk(OPENLAW_DIR).filter((d) => !ALLOWED.has(d));
-    expect(unexpected, "unexpected route; /readyz must stay unreachable").toEqual([]);
+  it("has exactly the allowed route.ts files (never proxy /readyz)", () => {
+    const routes = walk(APP_DIR)
+      .filter((f) => /(^|\/)route\.(ts|tsx|js)$/.test(f))
+      .sort();
+    expect(routes, "unexpected route file; /readyz must stay unreachable").toEqual(ALLOWED_ROUTE_FILES);
   });
 });
