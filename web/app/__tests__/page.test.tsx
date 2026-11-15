@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "../page";
@@ -14,7 +14,7 @@ import { CONVERSATION_STORAGE_KEY } from "@/lib/thread";
 import { getStrings } from "@/lib/strings";
 import { accountDeletedNotice } from "@/lib/accountDeletedStrings";
 import { ANONYMOUS_UPLOAD_TTL_HOURS } from "@/lib/documents";
-import { SESSION_RECHECK_MIN_INTERVAL_MS } from "@/lib/useSession";
+import { SESSION_RECHECK_MIN_INTERVAL_MS, SESSION_REQUEST_TIMEOUT_MS } from "@/lib/useSession";
 import type { AnswerData, DocumentSummaryData, RefusalData } from "@/lib/types";
 
 // Mode B (accounts enabled) is the mode these tests were written against; the
@@ -963,20 +963,9 @@ describe("HomePage retention and account state (Mode B)", () => {
       expect(fetch).toHaveBeenCalledTimes(2);
     });
 
-    it("downgrades to expires when an upload comes back with an expiry while the page believes the reader is signed in", async () => {
-      mockedUploadDocument.mockResolvedValue({ kind: "document", data: leaseSummary });
-      render(<HomePage />);
-      await screen.findByText(strings.keptUploadNotice);
-
-      // The cookie lapsed since the last check: the upload is stored anonymously.
-      live.body = { signedIn: false, email: null };
-      await attach();
-
-      expect(await screen.findByText(anonymousNotice)).toBeInTheDocument();
-      expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
-    });
-
-    it("never leaves a document that will expire under a kept banner, even if the session still claims signed in", async () => {
+    it("downgrades to expires when an upload comes back with an expiry, even though the pre-upload refresh still says signed in", async () => {
+      // The session stays signed in throughout, so ONLY the ground-truth
+      // rule (a document with an expiry beats the session) can produce this.
       mockedUploadDocument.mockResolvedValue({ kind: "document", data: leaseSummary });
       render(<HomePage />);
       await screen.findByText(strings.keptUploadNotice);
@@ -987,17 +976,84 @@ describe("HomePage retention and account state (Mode B)", () => {
       expect(screen.queryByText(strings.keptUploadNotice)).not.toBeInTheDocument();
     });
 
-    it("refreshes the session before sending an upload, and still sends it when the reader turned out anonymous", async () => {
-      mockedUploadDocument.mockResolvedValue({ kind: "document", data: leaseSummary });
+    it("finishes the session check before the upload call is made, and still uploads when the reader turned out anonymous", async () => {
+      const events: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          events.push("session-resolved");
+          return new Response(JSON.stringify(live.body), { status: 200 });
+        }),
+      );
+      mockedUploadDocument.mockImplementation(async () => {
+        events.push("upload");
+        return { kind: "document", data: leaseSummary };
+      });
       render(<HomePage />);
       await screen.findByText(strings.keptUploadNotice);
-      const callsBefore = vi.mocked(fetch).mock.calls.length;
+      events.length = 0;
 
       live.body = { signedIn: false, email: null };
       await attach();
 
-      await waitFor(() => expect(mockedUploadDocument).toHaveBeenCalledTimes(1));
-      expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(callsBefore);
+      await waitFor(() => expect(events).toContain("upload"));
+      expect(events).toEqual(["session-resolved", "upload"]);
+    });
+  });
+
+  describe("a hung session request around an upload", () => {
+    const hang = { on: false };
+
+    beforeEach(() => {
+      hang.on = false;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((_url: string, init?: RequestInit) =>
+          hang.on
+            ? new Promise<Response>(() => {
+                void init;
+              })
+            : Promise.resolve(
+                new Response(JSON.stringify({ signedIn: true, email: "a@example.com" }), {
+                  status: 200,
+                }),
+              ),
+        ),
+      );
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function chooseFileWhileHung() {
+      mockedUploadDocument.mockResolvedValue({ kind: "document", data: leaseSummary });
+      render(<HomePage />);
+      await screen.findByText(strings.keptUploadNotice);
+      hang.on = true;
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const input = screen.getByLabelText(strings.attachFileLabel);
+      fireEvent.change(input, { target: { files: [pdf()] } });
+    }
+
+    it("shows the uploading state at once and blocks a second file while the session check is pending", async () => {
+      await chooseFileWhileHung();
+
+      expect(screen.getByText(strings.uploadingStatus("lease.pdf"))).toBeInTheDocument();
+      expect(screen.getByLabelText(strings.attachFileLabel)).toBeDisabled();
+      expect(mockedUploadDocument).not.toHaveBeenCalled();
+    });
+
+    it("uploads anyway once the session request has hung for the timeout", async () => {
+      await chooseFileWhileHung();
+      expect(mockedUploadDocument).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SESSION_REQUEST_TIMEOUT_MS + 1);
+      });
+
+      expect(mockedUploadDocument).toHaveBeenCalledTimes(1);
     });
   });
 

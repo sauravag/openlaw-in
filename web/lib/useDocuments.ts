@@ -31,7 +31,9 @@ export interface DocumentsState {
    * second implementation of "a refusal must still deliver help".
    */
   refusal: RefusalData | null
-  attachFile: (file: File) => Promise<void>
+  /** `beforeUpload` runs after the uploading state is set and before any byte
+   * is sent; the upload proceeds whatever it resolves to. */
+  attachFile: (file: File, beforeUpload?: () => Promise<unknown>) => Promise<void>
   removeDocument: (documentId: string) => Promise<void>
   /**
    * Adopt the documents a restored conversation still holds.
@@ -67,9 +69,12 @@ export function useDocuments({
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [refusal, setRefusal] = useState<RefusalData | null>(null)
 
-  async function attachFile(file: File): Promise<void> {
+  async function attachFile(file: File, beforeUpload?: () => Promise<unknown>): Promise<void> {
     setRefusal(null)
+    // Set first: the reader sees progress, and the input is disabled, while
+    // `beforeUpload` runs.
     setUploadingFilename(file.name)
+    await beforeUpload?.()
     const outcome = await uploadDocument({
       file,
       conversationId,

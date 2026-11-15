@@ -19,6 +19,10 @@ const ANONYMOUS: SessionState = { signedIn: false, email: null }
 /** Focus and visibility re-checks run at most this often. */
 export const SESSION_RECHECK_MIN_INTERVAL_MS = 30_000
 
+/** A session request that takes longer than this counts as anonymous, so a
+ * hung request can never hold up an upload for more than this long. */
+export const SESSION_REQUEST_TIMEOUT_MS = 3_000
+
 /** Accept only the exact `{signedIn, email}` shape; anything else is anonymous. */
 function parseSession(body: unknown): SessionState {
   if (typeof body !== 'object' || body === null) return ANONYMOUS
@@ -28,13 +32,33 @@ function parseSession(body: unknown): SessionState {
 }
 
 /** One request; ANY failure (network, non-2xx, bad body) is anonymous. */
-async function fetchSession(): Promise<SessionState> {
+async function fetchSession(signal: AbortSignal): Promise<SessionState> {
   try {
-    const response = await fetch('/api/auth/session', { cache: 'no-store' })
+    const response = await fetch('/api/auth/session', { cache: 'no-store', signal })
     if (!response.ok) return ANONYMOUS
     return parseSession(await response.json())
   } catch {
     return ANONYMOUS
+  }
+}
+
+/**
+ * `fetchSession` bounded by `timeoutMs`. The abort signal cancels a request
+ * that honours it; the race resolves regardless of whether it does.
+ */
+async function fetchSessionWithin(timeoutMs: number): Promise<SessionState> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<SessionState>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      resolve(ANONYMOUS)
+    }, timeoutMs)
+  })
+  try {
+    return await Promise.race([fetchSession(controller.signal), timedOut])
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -60,7 +84,7 @@ export function useSession(): SessionHandle {
     lastCheckAt.current = Date.now()
     latestRequest.current += 1
     const requestId = latestRequest.current
-    const next = await fetchSession()
+    const next = await fetchSessionWithin(SESSION_REQUEST_TIMEOUT_MS)
     // A newer request owns the state; an older answer must not overwrite it.
     if (requestId === latestRequest.current) {
       setSession(next)

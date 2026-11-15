@@ -238,8 +238,7 @@ export default function HomePage() {
   /** Confirm the session first, so the notice is right before the file goes;
    * an anonymous answer never blocks the upload. */
   async function handleFileChosen(file: File) {
-    await refreshSession();
-    await attachments.attachFile(file);
+    await attachments.attachFile(file, refreshSession);
   }
   useRestoreFromQueryString(setQuestion, setLanguage);
   useRestoreConversation(
