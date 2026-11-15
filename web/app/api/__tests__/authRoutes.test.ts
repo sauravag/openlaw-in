@@ -1,0 +1,499 @@
+// @vitest-environment node
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+interface SetCall {
+  readonly name: string;
+  readonly value: string;
+  readonly options: Record<string, unknown>;
+}
+
+const sets: SetCall[] = [];
+let cookieHeader = "";
+
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    set: (name: string, value: string, options: Record<string, unknown>) => {
+      sets.push({ name, value, options });
+    },
+  }),
+  headers: async () => new Headers(cookieHeader ? { cookie: cookieHeader } : {}),
+}));
+
+const requestOtp = vi.fn();
+const exchangeCode = vi.fn();
+const revokeSession = vi.fn();
+vi.mock("@/lib/auth/gotrue", () => ({ requestOtp, exchangeCode, revokeSession }));
+
+const checkAuthAgreement = vi.fn();
+vi.mock("@/lib/authAgreement", () => ({
+  checkAuthAgreement,
+  authUnavailableResponse: async () =>
+    Response.json({ detail: "unavailable-marker" }, { status: 503 }),
+}));
+
+const NOW_SECONDS = Math.floor(Date.now() / 1000);
+const SESSION = {
+  kind: "session" as const,
+  accessToken: "access-token-secret",
+  refreshToken: "refresh-token-secret",
+  expiresAt: NOW_SECONDS + 3600,
+  email: "person@example.com",
+};
+const SAME_ORIGIN = { "sec-fetch-site": "same-origin" };
+
+type Handler = (request: Request) => Promise<Response>;
+interface Routes {
+  signIn: Handler;
+  callback: Handler;
+  signOut: Handler;
+  session: Handler;
+}
+
+async function load(authEnabled: boolean): Promise<Routes> {
+  vi.resetModules();
+  vi.stubEnv("NEXT_PUBLIC_OPENLAW_AUTH_ENABLED", authEnabled ? "true" : "false");
+  vi.stubEnv("OPENLAW_SUPABASE_URL", "https://project.supabase.test");
+  vi.stubEnv("OPENLAW_SUPABASE_ANON_KEY", "anon-key");
+  const [signIn, callback, signOut, session] = await Promise.all([
+    import("../auth/sign-in/route"),
+    import("../auth/callback/route"),
+    import("../auth/sign-out/route"),
+    import("../auth/session/route"),
+  ]);
+  return {
+    signIn: signIn.POST,
+    callback: callback.GET,
+    signOut: signOut.POST,
+    session: session.GET,
+  };
+}
+
+function jsonPost(body: unknown, headers: Record<string, string> = SAME_ORIGIN): Request {
+  return new Request("http://localhost:3000/api/auth/sign-in", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+function expectHelp(body: Record<string, unknown>): void {
+  expect(typeof body.escalation_footer).toBe("string");
+  expect((body.escalation_footer as string).length).toBeGreaterThan(0);
+  expect(Array.isArray(body.helplines)).toBe(true);
+  expect((body.helplines as unknown[]).length).toBeGreaterThan(0);
+}
+
+beforeEach(() => {
+  sets.length = 0;
+  cookieHeader = "";
+  requestOtp.mockReset().mockResolvedValue({ kind: "sent" });
+  exchangeCode.mockReset().mockResolvedValue(SESSION);
+  revokeSession.mockReset().mockResolvedValue(undefined);
+  checkAuthAgreement.mockReset().mockResolvedValue({ agrees: true });
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe("Mode A (auth disabled)", () => {
+  it("returns 404 from all four routes and calls nothing", async () => {
+    const routes = await load(false);
+
+    const responses = await Promise.all([
+      routes.signIn(jsonPost({ email: "a@b.co" })),
+      routes.callback(new Request("http://localhost:3000/api/auth/callback?code=x")),
+      routes.signOut(jsonPost({})),
+      routes.session(new Request("http://localhost:3000/api/auth/session")),
+    ]);
+
+    expect(responses.map((r) => r.status)).toEqual([404, 404, 404, 404]);
+    expect(requestOtp).not.toHaveBeenCalled();
+    expect(sets).toHaveLength(0);
+  });
+});
+
+describe("POST /api/auth/sign-in", () => {
+  it("returns 202 with an HttpOnly verifier cookie and calls requestOtp once", async () => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(jsonPost({ email: "Person@Example.com", language: "en" }));
+
+    expect(response.status).toBe(202);
+    expect(requestOtp).toHaveBeenCalledTimes(1);
+    const otp = requestOtp.mock.calls[0][1];
+    expect(otp.identifier).toBe("person@example.com");
+    expect(otp.method).toBe("email");
+    expect(otp.redirectTo).toBe("http://localhost:3000/api/auth/callback");
+    expect(typeof otp.codeChallenge).toBe("string");
+    const verifier = sets.find((c) => c.name === "openlaw_pkce");
+    expect(verifier?.options.httpOnly).toBe(true);
+    expect(verifier?.value).not.toBe(otp.codeChallenge);
+  });
+
+  it("accepts a form-urlencoded body from the no-JavaScript form", async () => {
+    const { signIn } = await load(true);
+    const request = new Request("http://localhost:3000/api/auth/sign-in", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", ...SAME_ORIGIN },
+      body: new URLSearchParams({ email: "form@example.com", language: "hi" }),
+    });
+
+    const response = await signIn(request);
+
+    expect(response.status).toBe(202);
+    expect(requestOtp.mock.calls[0][1].identifier).toBe("form@example.com");
+    expect((await response.json()).detail).toMatch(/[ऀ-ॿ]/);
+  });
+
+  it("rejects a malformed email with 400 and helplines before requestOtp", async () => {
+    const { signIn } = await load(true);
+
+    for (const email of ["", "nope", "a@b", "a b@c.co", 42, null]) {
+      const response = await signIn(jsonPost({ email }));
+      expect(response.status).toBe(400);
+      expectHelp(await response.json());
+    }
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
+  it("rejects unparseable bodies with 400", async () => {
+    const { signIn } = await load(true);
+    const request = new Request("http://localhost:3000/api/auth/sign-in", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...SAME_ORIGIN },
+      body: "{not json",
+    });
+
+    const response = await signIn(request);
+
+    expect(response.status).toBe(400);
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
+  it("returns 403 for a cross-site POST and never calls requestOtp", async () => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(
+      jsonPost({ email: "victim@example.com" }, { "sec-fetch-site": "cross-site" }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(requestOtp).not.toHaveBeenCalled();
+    expect(sets).toHaveLength(0);
+  });
+
+  it("returns 403 for a foreign Origin header", async () => {
+    const { signIn } = await load(true);
+
+    const response = await signIn(
+      jsonPost({ email: "victim@example.com" }, { origin: "http://evil.test" }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
+  it("returns 429 with Retry-After and helplines when GoTrue rate limits", async () => {
+    requestOtp.mockResolvedValue({ kind: "rate_limited", retryAfterSeconds: 42 });
+    const { signIn } = await load(true);
+
+    const response = await signIn(jsonPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("42");
+    expectHelp(await response.json());
+  });
+
+  it("returns 503 with helplines when GoTrue fails", async () => {
+    requestOtp.mockResolvedValue({ kind: "failed", detail: "gotrue_http_500" });
+    const { signIn } = await load(true);
+
+    const response = await signIn(jsonPost({ email: "a@example.com" }));
+
+    const body = await response.json();
+    expect(response.status).toBe(503);
+    expectHelp(body);
+    expect(JSON.stringify(body)).not.toContain("gotrue_http_500");
+  });
+
+  it("returns 503 with helplines when the GoTrue config is missing", async () => {
+    const { signIn } = await load(true);
+    vi.stubEnv("OPENLAW_SUPABASE_URL", "");
+
+    const response = await signIn(jsonPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(503);
+    expectHelp(await response.json());
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 with helplines when requestOtp throws", async () => {
+    requestOtp.mockRejectedValue(new Error("boom"));
+    const { signIn } = await load(true);
+
+    const response = await signIn(jsonPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(503);
+    expectHelp(await response.json());
+  });
+
+  it("returns an identical 202 body whatever the address", async () => {
+    const { signIn } = await load(true);
+
+    const first = await signIn(jsonPost({ email: "registered@example.com" }));
+    const second = await signIn(jsonPost({ email: "stranger@example.org" }));
+
+    expect(first.status).toBe(202);
+    expect(await first.text()).toBe(await second.text());
+  });
+
+  it("returns the unavailable response when frontend and backend disagree", async () => {
+    checkAuthAgreement.mockResolvedValue({ agrees: false });
+    const { signIn } = await load(true);
+
+    const response = await signIn(jsonPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(503);
+    expect((await response.json()).detail).toBe("unavailable-marker");
+    expect(requestOtp).not.toHaveBeenCalled();
+  });
+
+  it("still signs in when the backend is unreachable (agrees null)", async () => {
+    checkAuthAgreement.mockResolvedValue({ agrees: null });
+    const { signIn } = await load(true);
+
+    const response = await signIn(jsonPost({ email: "a@example.com" }));
+
+    expect(response.status).toBe(202);
+    expect(requestOtp).toHaveBeenCalledTimes(1);
+  });
+
+  describe("per-IP limiter", () => {
+    const fromIp = (ip: string | null) =>
+      jsonPost(
+        { email: "a@example.com" },
+        ip === null ? SAME_ORIGIN : { ...SAME_ORIGIN, "x-forwarded-for": ip },
+      );
+
+    it("returns 429 with Retry-After and helplines past the per-IP ceiling", async () => {
+      const { signIn } = await load(true);
+      const statuses: number[] = [];
+      let last: Response | null = null;
+      for (let i = 0; i < 12; i += 1) {
+        last = await signIn(fromIp("203.0.113.9, 10.0.0.1"));
+        statuses.push(last.status);
+      }
+
+      expect(statuses.slice(0, 10).every((s) => s === 202)).toBe(true);
+      expect(statuses.slice(10)).toEqual([429, 429]);
+      expect(Number(last?.headers.get("retry-after"))).toBeGreaterThan(0);
+      expectHelp(await last!.json());
+      expect(requestOtp).toHaveBeenCalledTimes(10);
+    });
+
+    it("keys on the first X-Forwarded-For value, not the whole header", async () => {
+      const { signIn } = await load(true);
+      for (let i = 0; i < 10; i += 1) await signIn(fromIp("203.0.113.9"));
+
+      const sameClient = await signIn(fromIp("203.0.113.9, 198.51.100.1"));
+      const otherClient = await signIn(fromIp("203.0.113.10"));
+
+      expect(sameClient.status).toBe(429);
+      expect(otherClient.status).toBe(202);
+    });
+
+    it("shares one bucket when X-Forwarded-For is missing", async () => {
+      const { signIn } = await load(true);
+      for (let i = 0; i < 10; i += 1) await signIn(fromIp(null));
+
+      const response = await signIn(fromIp(null));
+
+      expect(response.status).toBe(429);
+    });
+
+    it("bounds the number of tracked addresses", async () => {
+      const { createSignInLimiter } = await import("@/lib/auth/rateLimit");
+      const limiter = createSignInLimiter({ windowSeconds: 600, maxAttempts: 1, maxKeys: 3 });
+
+      for (let i = 0; i < 20; i += 1) limiter.check(`10.0.0.${i}`, 1000);
+
+      expect(limiter.size()).toBeLessThanOrEqual(3);
+    });
+  });
+});
+
+describe("GET /api/auth/callback", () => {
+  const callbackRequest = (query = "code=abc123") =>
+    new Request(`http://localhost:3000/api/auth/callback?${query}`);
+
+  it("writes the session, clears the verifier and redirects to / on success", async () => {
+    cookieHeader = "openlaw_pkce=verifier-value";
+    const { callback } = await load(true);
+
+    const response = await callback(callbackRequest());
+
+    expect(exchangeCode.mock.calls[0][1]).toBe("abc123");
+    expect(exchangeCode.mock.calls[0][2]).toBe("verifier-value");
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/");
+    const session = sets.find((c) => c.name === "openlaw_session");
+    expect(session?.options.httpOnly).toBe(true);
+    expect(JSON.parse(session!.value).email).toBe("person@example.com");
+    const cleared = sets.filter((c) => c.name === "openlaw_pkce");
+    expect(cleared[cleared.length - 1].options.maxAge).toBe(0);
+    expect(await response.text()).not.toContain("access-token-secret");
+  });
+
+  it("redirects to /signup?error=expired for an expired code", async () => {
+    cookieHeader = "openlaw_pkce=verifier-value";
+    exchangeCode.mockResolvedValue({ kind: "expired" });
+    const { callback } = await load(true);
+
+    const response = await callback(callbackRequest());
+
+    expect(response.headers.get("location")).toBe("/signup?error=expired");
+    expect(sets.some((c) => c.name === "openlaw_session")).toBe(false);
+  });
+
+  it("redirects to /signup?error=failed when the exchange fails or throws", async () => {
+    cookieHeader = "openlaw_pkce=verifier-value";
+    const { callback } = await load(true);
+
+    exchangeCode.mockResolvedValueOnce({ kind: "failed", detail: "x" });
+    const failed = await callback(callbackRequest());
+    exchangeCode.mockRejectedValueOnce(new Error("boom"));
+    const thrown = await callback(callbackRequest());
+
+    expect(failed.headers.get("location")).toBe("/signup?error=failed");
+    expect(thrown.headers.get("location")).toBe("/signup?error=failed");
+  });
+
+  it("treats a missing verifier as failed without calling GoTrue", async () => {
+    const { callback } = await load(true);
+
+    const response = await callback(callbackRequest());
+
+    expect(response.headers.get("location")).toBe("/signup?error=failed");
+    expect(exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("treats a missing code as failed without calling GoTrue", async () => {
+    cookieHeader = "openlaw_pkce=verifier-value";
+    const { callback } = await load(true);
+
+    const response = await callback(callbackRequest(""));
+
+    expect(response.headers.get("location")).toBe("/signup?error=failed");
+    expect(exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("returns the unavailable response on a mode mismatch", async () => {
+    cookieHeader = "openlaw_pkce=verifier-value";
+    checkAuthAgreement.mockResolvedValue({ agrees: false });
+    const { callback } = await load(true);
+
+    const response = await callback(callbackRequest());
+
+    expect(response.status).toBe(503);
+    expect(exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("still exchanges when the backend is unreachable (agrees null)", async () => {
+    cookieHeader = "openlaw_pkce=verifier-value";
+    checkAuthAgreement.mockResolvedValue({ agrees: null });
+    const { callback } = await load(true);
+
+    const response = await callback(callbackRequest());
+
+    expect(response.headers.get("location")).toBe("/");
+  });
+});
+
+describe("POST /api/auth/sign-out", () => {
+  const signedIn = `openlaw_session=${encodeURIComponent(
+    JSON.stringify({
+      accessToken: "access-token-secret",
+      refreshToken: "r",
+      expiresAt: NOW_SECONDS + 3600,
+      email: "person@example.com",
+    }),
+  )}`;
+
+  it("revokes best-effort, clears the cookie and redirects to /", async () => {
+    cookieHeader = signedIn;
+    const { signOut } = await load(true);
+
+    const response = await signOut(jsonPost({}));
+
+    expect(revokeSession).toHaveBeenCalledTimes(1);
+    expect(revokeSession.mock.calls[0][1]).toBe("access-token-secret");
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe("/");
+    expect(sets.find((c) => c.name === "openlaw_session")?.options.maxAge).toBe(0);
+  });
+
+  it("clears the cookie even when revokeSession throws", async () => {
+    cookieHeader = signedIn;
+    revokeSession.mockRejectedValue(new Error("gotrue down"));
+    const { signOut } = await load(true);
+
+    const response = await signOut(jsonPost({}));
+
+    expect(response.status).toBe(303);
+    expect(sets.find((c) => c.name === "openlaw_session")?.options.maxAge).toBe(0);
+  });
+
+  it("clears the cookie without calling GoTrue when there is no session", async () => {
+    const { signOut } = await load(true);
+
+    const response = await signOut(jsonPost({}));
+
+    expect(revokeSession).not.toHaveBeenCalled();
+    expect(response.status).toBe(303);
+    expect(sets.find((c) => c.name === "openlaw_session")?.options.maxAge).toBe(0);
+  });
+
+  it("returns 403 for a cross-site POST and does not sign anyone out", async () => {
+    cookieHeader = signedIn;
+    const { signOut } = await load(true);
+
+    const response = await signOut(jsonPost({}, { "sec-fetch-site": "cross-site" }));
+
+    expect(response.status).toBe(403);
+    expect(revokeSession).not.toHaveBeenCalled();
+    expect(sets).toHaveLength(0);
+  });
+});
+
+describe("GET /api/auth/session", () => {
+  const sessionRequest = () => new Request("http://localhost:3000/api/auth/session");
+
+  it("returns exactly signedIn and email, and no token", async () => {
+    cookieHeader = `openlaw_session=${encodeURIComponent(
+      JSON.stringify({
+        accessToken: "access-token-secret",
+        refreshToken: "refresh-token-secret",
+        expiresAt: NOW_SECONDS + 3600,
+        email: "person@example.com",
+      }),
+    )}`;
+    const { session } = await load(true);
+
+    const response = await session(sessionRequest());
+    const text = await response.text();
+
+    expect(Object.keys(JSON.parse(text)).sort()).toEqual(["email", "signedIn"]);
+    expect(JSON.parse(text)).toEqual({ signedIn: true, email: "person@example.com" });
+    expect(text).not.toContain("secret");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("returns signedIn false and a null email without a session", async () => {
+    const { session } = await load(true);
+
+    const response = await session(sessionRequest());
+
+    expect(await response.json()).toEqual({ signedIn: false, email: null });
+  });
+});

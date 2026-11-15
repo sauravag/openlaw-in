@@ -2,12 +2,12 @@ import "server-only";
 
 import { sessionFromCookieHeader, stripAuthCookies } from "@/lib/auth/sessionCookie";
 import { AUTH_ENABLED } from "@/lib/authMode";
+import { isCrossSiteWrite } from "@/lib/csrf";
 
 const DEFAULT_API_URL = "http://127.0.0.1:8000";
 const BAD_GATEWAY = 502;
 const BAD_REQUEST = 400;
 const FORBIDDEN = 403;
-const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 const MAX_DECODE_ROUNDS = 3;
 
 // RFC 9110 section 7.6.1 hop-by-hop headers (+ `host`, which fetch recomputes).
@@ -85,38 +85,6 @@ function hasDotSegment(backendPath: string): boolean {
     }
     return true; // still changing after several rounds: refuse
   });
-}
-
-function firstValue(header: string | null): string | null {
-  return header?.split(",")[0].trim() || null;
-}
-
-/**
- * CSRF guard. This proxy turns an ambient cookie into identity (the Bearer
- * token in Mode B, `openlaw_anon_id` in Mode A), so a cross-site page must not
- * be able to make a browser POST/DELETE through it. Safe methods pass.
- * Otherwise allow when `Sec-Fetch-Site` is same-origin/none, or `Origin`'s
- * host equals the request host (`X-Forwarded-Host` first, since the app runs
- * behind nginx). If BOTH headers are absent the caller is a non-browser client
- * (curl): CSRF needs a browser, and browsers always send one of the two on a
- * cross-site POST or DELETE, so such a request is allowed.
- */
-function isCrossSiteWrite(request: Request): boolean {
-  if (SAFE_METHODS.has(request.method)) return false;
-  const fetchSite = request.headers.get("sec-fetch-site");
-  const origin = request.headers.get("origin");
-  if (fetchSite === null && origin === null) return false;
-  if (fetchSite === "same-origin" || fetchSite === "none") return false;
-  if (origin === null) return true;
-  const host =
-    firstValue(request.headers.get("x-forwarded-host")) ??
-    request.headers.get("host") ??
-    new URL(request.url).host;
-  try {
-    return new URL(origin).host !== host;
-  } catch {
-    return true; // `Origin: null` or garbage
-  }
 }
 
 /**

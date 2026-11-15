@@ -90,8 +90,13 @@ describe("proxy surface is enumerated", () => {
     });
   }
 
-  // The four proxy routes plus Task 3's own (non-proxy) auth-status handler.
+  // The four proxy routes, Task 3's own (non-proxy) auth-status handler, and
+  // Task 8's four auth routes (each 404s in Mode A, none proxies to the backend).
   const ALLOWED_ROUTE_FILES = [
+    "api/auth/callback/route.ts",
+    "api/auth/session/route.ts",
+    "api/auth/sign-in/route.ts",
+    "api/auth/sign-out/route.ts",
     "api/openlaw/ask/route.ts",
     "api/openlaw/auth-status/route.ts",
     "api/openlaw/conversations/[conversationId]/route.ts",
