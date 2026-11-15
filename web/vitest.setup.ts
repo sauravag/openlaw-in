@@ -1,5 +1,5 @@
 import { cleanup } from '@testing-library/react'
-import { afterEach } from 'vitest'
+import { afterEach, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
 
 // `@testing-library/react`'s automatic cleanup only registers itself when it
@@ -10,6 +10,10 @@ import '@testing-library/jest-dom/vitest'
 // see every previous test's markup too.
 afterEach(() => {
   cleanup()
+  // Put the build-mode flag back to the mode this run was started in, so a
+  // test that switched mode (`test-utils/authMode.ts`) cannot leak it into
+  // the next one.
+  vi.unstubAllEnvs()
 })
 
 // jsdom does not implement `scrollIntoView` at all -- calling it throws

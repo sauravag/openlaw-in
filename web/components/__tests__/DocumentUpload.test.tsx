@@ -10,6 +10,10 @@ import {
 } from '@/lib/documents'
 import { getStrings } from '@/lib/strings'
 
+// This file is the Mode A rendering; Mode B has its own (DocumentUploadModeB).
+// Pinned, not inherited, so it holds whichever mode the run was started in.
+vi.mock('@/lib/authMode', () => ({ AUTH_ENABLED: false }))
+
 function setup(props: Partial<React.ComponentProps<typeof DocumentUpload>> = {}) {
   const onFileChosen = vi.fn()
   render(
