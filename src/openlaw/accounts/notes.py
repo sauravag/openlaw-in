@@ -17,6 +17,9 @@ _RETAINED_HI = (
     "आपकी बातचीत, अपलोड किए गए दस्तावेज़ और उनके अंश मिटा दिए गए हैं। हर दस्तावेज़ को किसने "
     "देखा, इसका रिकॉर्ड (एक्सेस लॉग) बिना किसी दस्तावेज़ सामग्री के रखा गया है।"
 )
+#: What `account_deleted` (refusal copy) repeats after its opening sentence,
+#: shared so the erased/kept facts are stated in exactly one place.
+RETAINED_NOTES: tuple[str, str] = (_RETAINED_EN, _RETAINED_HI)
 _IDENTITY_REMOVED_EN = " Your sign-in identity has also been removed."
 _IDENTITY_REMOVED_HI = " आपकी साइन इन पहचान भी हटा दी गई है।"
 _IDENTITY_REMAINS_EN = (

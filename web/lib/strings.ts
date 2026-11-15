@@ -121,6 +121,28 @@ export interface UIStrings {
   uploadNoFileError: string;
   /** Escalation footer attached to a locally detected upload refusal. */
   uploadFailedFooter: string;
+  /**
+   * Sign-in and account refusal copy. The keys named in `refusal.py` are
+   * pinned verbatim to it by `tests/api/test_auth_refusal_copy.py`; the rest
+   * are raised by the Next.js routes alone. `lib/auth/authRefusal.ts` reads
+   * these, so no sentence lives in two TS files.
+   */
+  authLinkSent: string;
+  authLinkExpired: string;
+  authFailed: string;
+  authRateLimited: string;
+  authUnavailable: string;
+  authMigrationFailed: string;
+  accountDeleted: string;
+  accountDeleteFailed: string;
+  signInRequired: string;
+  accountDeleteSignInRequired: string;
+  accountEmailConflict: string;
+  authInvalidEmail: string;
+  authRequestTooLarge: string;
+  accountDeleteConfirmationRequired: string;
+  accountDeleteTooLarge: string;
+  accountDeleteConflict: string;
 }
 
 const EN: UIStrings = {
@@ -208,6 +230,22 @@ const EN: UIStrings = {
   uploadNoFileError: "No file was chosen, so nothing was sent.",
   uploadFailedFooter:
     "Your document was not stored. This is legal information, not legal advice \u2014 free legal aid is available on 15100.",
+  authLinkSent: "If that address can receive email, a sign-in link is on its way. Check your inbox.",
+  authLinkExpired: "This sign-in link has expired. Please ask for a new link and try again. You can still ask your question without an account.",
+  authFailed: "We could not sign you in just now. Please try again in a little while. You can still ask your question without an account.",
+  authRateLimited: "Too many sign-in attempts. Please try again in 10 minutes. You can still ask your question without an account.",
+  authUnavailable: "Signing in is not available on this service right now. You can still ask your question without an account.",
+  authMigrationFailed: "You are signed in, but your earlier conversations could not be moved to your account. They are still in this browser until they expire.",
+  accountDeleted: "Your account has been deleted. Your conversations, uploaded documents and excerpts have been erased. A record of who accessed each document (the access log) is kept, without any document content.",
+  accountDeleteFailed: "Your account was not deleted: something went wrong on our side, and you are still signed in. Please try again in a little while.",
+  signInRequired: "We could not confirm your sign-in, so your earlier conversations were not moved to your account. Please sign in again.",
+  accountDeleteSignInRequired: "We could not confirm your sign-in, so nothing was deleted. Please sign in again.",
+  accountEmailConflict: "This email is already linked to another account, so your earlier conversations were not moved. They are still in this browser until they expire.",
+  authInvalidEmail: "That does not look like an email address. Please check it and try again.",
+  authRequestTooLarge: "That request was too large. Please enter just your email address.",
+  accountDeleteConfirmationRequired: "Your account was not deleted. To confirm, type the word shown (DELETE) exactly.",
+  accountDeleteTooLarge: "That request was too large, so nothing was deleted. Please send only the confirmation word.",
+  accountDeleteConflict: "We could not delete this account because its sign-in details conflict with another account. Nothing was deleted, and trying again will not help. Please contact the site operator.",
 };
 
 const HI: UIStrings = {
@@ -295,6 +333,22 @@ const HI: UIStrings = {
   uploadNoFileError: "कोई फ़ाइल नहीं चुनी गई, इसलिए कुछ नहीं भेजा गया।",
   uploadFailedFooter:
     "आपका दस्तावेज़ सुरक्षित नहीं रखा गया। यह कानूनी जानकारी है, कानूनी सलाह नहीं \u2014 मुफ़्त कानूनी सहायता 15100 पर उपलब्ध है।",
+  authLinkSent: "अगर इस पते पर ईमेल पहुँच सकता है, तो साइन इन लिंक भेजा जा रहा है। अपना इनबॉक्स देखें।",
+  authLinkExpired: "इस साइन इन लिंक की अवधि समाप्त हो गई है। कृपया नया लिंक मँगवाकर दोबारा कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
+  authFailed: "हम अभी आपको साइन इन नहीं करा सके। कृपया थोड़ी देर बाद फिर कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
+  authRateLimited: "साइन इन की बहुत ज़्यादा कोशिशें हुईं। कृपया 10 मिनट बाद दोबारा कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
+  authUnavailable: "इस सेवा पर अभी साइन इन उपलब्ध नहीं है। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
+  authMigrationFailed: "आप साइन इन हैं, लेकिन आपकी पहले की बातचीत आपके खाते में नहीं ले जाई जा सकी। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि समाप्त नहीं हो जाती।",
+  accountDeleted: "आपका खाता हटा दिया गया है। आपकी बातचीत, अपलोड किए गए दस्तावेज़ और उनके अंश मिटा दिए गए हैं। हर दस्तावेज़ को किसने देखा, इसका रिकॉर्ड (एक्सेस लॉग) बिना किसी दस्तावेज़ सामग्री के रखा गया है।",
+  accountDeleteFailed: "आपका खाता नहीं हटाया गया: हमारी ओर से कुछ गड़बड़ हुई, और आप अब भी साइन इन हैं। कृपया थोड़ी देर बाद फिर कोशिश करें।",
+  signInRequired: "हम आपके साइन इन की पुष्टि नहीं कर सके, इसलिए आपकी पहले की बातचीत आपके खाते में नहीं ले जाई गई। कृपया फिर से साइन इन करें।",
+  accountDeleteSignInRequired: "हम आपके साइन इन की पुष्टि नहीं कर सके, इसलिए कुछ भी नहीं हटाया गया। कृपया फिर से साइन इन करें।",
+  accountEmailConflict: "यह ईमेल पहले से किसी दूसरे खाते से जुड़ा है, इसलिए आपकी पहले की बातचीत नहीं ले जाई गई। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि समाप्त नहीं हो जाती।",
+  authInvalidEmail: "यह ईमेल पता सही नहीं लग रहा। कृपया जांच कर दोबारा कोशिश करें।",
+  authRequestTooLarge: "यह अनुरोध बहुत बड़ा था। कृपया केवल अपना ईमेल पता दर्ज करें।",
+  accountDeleteConfirmationRequired: "आपका खाता नहीं हटाया गया। पुष्टि के लिए दिखाया गया शब्द (हटाएं) ठीक वैसे ही लिखें।",
+  accountDeleteTooLarge: "यह अनुरोध बहुत बड़ा था, इसलिए कुछ भी नहीं हटाया गया। कृपया केवल पुष्टि का शब्द भेजें।",
+  accountDeleteConflict: "हम यह खाता नहीं हटा सके क्योंकि इसके साइन इन विवरण किसी दूसरे खाते से टकराते हैं। कुछ भी नहीं हटाया गया, और दोबारा कोशिश करने से मदद नहीं मिलेगी। कृपया साइट संचालक से संपर्क करें।",
 };
 
 export function getStrings(language: Language["code"] | string): UIStrings {

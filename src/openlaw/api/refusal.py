@@ -55,6 +55,8 @@ from typing import NoReturn
 
 from fastapi import HTTPException
 
+from openlaw.accounts.notes import RETAINED_NOTES
+
 from openlaw.answers.escalation import (
     Helpline,
     crisis_helplines,
@@ -301,6 +303,79 @@ _REFUSAL_DETAIL: dict[str, dict[str, str]] = {
             "नहीं हो जाती।"
         ),
     },
+    # --- Plan 7 Task 12: one entry per authentication / account terminal state.
+    # Every sentence that tells a person they can carry on without an account
+    # is true only because the anonymous product has no auth dependency.
+    # `auth_rate_limited` names the wait of the frontend sign-in limiter
+    # (`SIGN_IN_WINDOW_SECONDS` in `web/lib/auth/rateLimit.ts`); a test derives
+    # the minutes from that constant. The frontend mirrors each string verbatim
+    # in `web/lib/strings.ts`, also pinned by test.
+    "auth_link_sent": {
+        "en": (
+            "If that address can receive email, a sign-in link is on its way. "
+            "Check your inbox."
+        ),
+        "hi": (
+            "अगर इस पते पर ईमेल पहुँच सकता है, तो साइन इन लिंक भेजा जा रहा है। "
+            "अपना इनबॉक्स देखें।"
+        ),
+    },
+    "auth_link_expired": {
+        "en": (
+            "This sign-in link has expired. Please ask for a new link and try "
+            "again. You can still ask your question without an account."
+        ),
+        "hi": (
+            "इस साइन इन लिंक की अवधि समाप्त हो गई है। कृपया नया लिंक मँगवाकर "
+            "दोबारा कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।"
+        ),
+    },
+    "auth_failed": {
+        "en": (
+            "We could not sign you in just now. Please try again in a little "
+            "while. You can still ask your question without an account."
+        ),
+        "hi": (
+            "हम अभी आपको साइन इन नहीं करा सके। कृपया थोड़ी देर बाद फिर कोशिश "
+            "करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।"
+        ),
+    },
+    "auth_rate_limited": {
+        "en": (
+            "Too many sign-in attempts. Please try again in 10 minutes. You "
+            "can still ask your question without an account."
+        ),
+        "hi": (
+            "साइन इन की बहुत ज़्यादा कोशिशें हुईं। कृपया 10 मिनट बाद दोबारा "
+            "कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।"
+        ),
+    },
+    "auth_migration_failed": {
+        "en": (
+            "You are signed in, but your earlier conversations could not be "
+            "moved to your account. They are still in this browser until they "
+            "expire."
+        ),
+        "hi": (
+            "आप साइन इन हैं, लेकिन आपकी पहले की बातचीत आपके खाते में नहीं ले "
+            "जाई जा सकी। वह इस ब्राउज़र में तब तक मौजूद है जब तक उसकी अवधि "
+            "समाप्त नहीं हो जाती।"
+        ),
+    },
+    "account_deleted": {
+        "en": "Your account has been deleted. " + RETAINED_NOTES[0],
+        "hi": "आपका खाता हटा दिया गया है। " + RETAINED_NOTES[1],
+    },
+    "account_delete_failed": {
+        "en": (
+            "Your account was not deleted: something went wrong on our side, "
+            "and you are still signed in. Please try again in a little while."
+        ),
+        "hi": (
+            "आपका खाता नहीं हटाया गया: हमारी ओर से कुछ गड़बड़ हुई, और आप अब भी "
+            "साइन इन हैं। कृपया थोड़ी देर बाद फिर कोशिश करें।"
+        ),
+    },
     # Returned for a conversation or document the caller does not own, AND
     # for one that does not exist -- deliberately the same response, so the
     # reply cannot be used to enumerate real ids (see `openlaw.db
@@ -333,6 +408,16 @@ REFUSAL_STATUS: dict[str, int] = {
     "sign_in_required": 401,
     "account_email_conflict": 409,
     "account_delete_sign_in_required": 401,
+    # Task 12. Statuses mirror what the frontend's analogous responses use;
+    # the two success-shaped keys (`auth_link_sent`, `account_deleted`) are
+    # carried in a 2xx body, not raised.
+    "auth_link_sent": 202,
+    "auth_link_expired": 410,
+    "auth_failed": 503,
+    "auth_rate_limited": 429,
+    "auth_migration_failed": 502,
+    "account_deleted": 200,
+    "account_delete_failed": 502,
 }
 
 #: `openlaw.documents.extract.ExtractionError.reason` -> refusal key. The

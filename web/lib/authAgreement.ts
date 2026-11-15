@@ -1,5 +1,6 @@
 import { AUTH_ENABLED } from "./authMode";
 import { getFallbackHelplineSet } from "./fallbackHelplines";
+import { getStrings } from "./strings";
 import type { RefusalData } from "./types";
 
 /**
@@ -89,15 +90,10 @@ export async function checkAuthAgreement(
   return { backendAuthEnabled, frontendAuthEnabled, agrees };
 }
 
-const FALLBACK_DETAIL: Record<string, string> = {
-  en: "Signing in is not available on this service right now. You can still ask your question without an account.",
-  hi: "इस सेवा पर अभी साइन इन उपलब्ध नहीं है। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
-};
-
 function staticRefusal(language: string): RefusalData {
   const help = getFallbackHelplineSet(language);
   return {
-    detail: FALLBACK_DETAIL[language] ?? FALLBACK_DETAIL.en,
+    detail: getStrings(language).authUnavailable,
     escalation_footer: help.escalationFooter,
     crisis_response: null,
     helplines: help.helplines,

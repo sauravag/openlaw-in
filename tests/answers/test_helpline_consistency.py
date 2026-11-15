@@ -46,7 +46,10 @@ from openlaw.answers.escalation import (
 from openlaw.api.refusal import (
     GENERIC_SAFETY_NOTE,
     _GENERIC_SAFETY_NOTE_HI,
+    _REFUSAL_DETAIL,
     generic_safety_helplines,
+    refusal_body,
+    refusal_detail,
 )
 
 #: Matches a run of digits long enough to be a helpline (3-5 digits) -- long
@@ -146,3 +149,34 @@ def test_hindi_generic_safety_note_uses_ascii_digits_matching_the_english_versio
     en_numbers = _numbers_in(GENERIC_SAFETY_NOTE)
     hi_numbers = _numbers_in(_GENERIC_SAFETY_NOTE_HI)
     assert hi_numbers == en_numbers
+
+
+# --- every refusal key, not just the ones that existed when this was written ---
+
+
+def _every_refusal_key() -> list[str]:
+    return sorted(_REFUSAL_DETAIL)
+
+
+def test_every_refusal_key_carries_the_footer_and_helplines_in_both_languages() -> None:
+    for key in _every_refusal_key():
+        for language in ("en", "hi"):
+            body = refusal_body(key, "", None, language)
+            footer_numbers = _numbers_in(str(body["escalation_footer"]))
+            helplines = body["helplines"]
+            assert body["detail"] and body["escalation_footer"], f"{key}/{language}"
+            assert helplines, f"{key}/{language}: no helplines"
+            assert footer_numbers <= {line["number"] for line in helplines}, (  # type: ignore[index]
+                f"{key}/{language}: the footer cites {sorted(footer_numbers)} "
+                "but the structured helplines omit one"
+            )
+
+
+def test_every_hindi_refusal_uses_the_same_ascii_digits_as_its_english_pair() -> None:
+    """A wait of '10 minutes' must not become Devanagari digits or a different
+    number in Hindi: the numerals are the one part of a refusal a reader acts on."""
+    digits = re.compile(r"\d+")
+    for key in _every_refusal_key():
+        assert digits.findall(refusal_detail(key, "hi")) == digits.findall(
+            refusal_detail(key, "en")
+        ), key
