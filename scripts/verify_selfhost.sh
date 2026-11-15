@@ -65,11 +65,12 @@ auth_status="$(curl -fsS http://localhost:8080/api/openlaw/auth-status)"
 if printf '%s' "$auth_status" | grep -q '"agrees":false'; then
   echo "[Selfhost] FAIL -- the frontend and backend disagree about sign-in:"
   echo "[Selfhost]   ${auth_status}"
-  echo "[Selfhost]   OPENLAW_AUTH_ENABLED (backend) and"
-  echo "[Selfhost]   NEXT_PUBLIC_OPENLAW_AUTH_ENABLED (frontend build) must match."
-  echo "[Selfhost]   Fix: set both to the same value, then rebuild the frontend"
-  echo "[Selfhost]   (docker compose build web && docker compose up -d), or change"
-  echo "[Selfhost]   OPENLAW_AUTH_ENABLED to match how the frontend was built."
+  echo "[Selfhost]   OPENLAW_AUTH_ENABLED drives both: the backend reads it at"
+  echo "[Selfhost]   run time, and docker-compose.yml passes it to the frontend as"
+  echo "[Selfhost]   the NEXT_PUBLIC_OPENLAW_AUTH_ENABLED build arg. The frontend"
+  echo "[Selfhost]   image still carries the value it was BUILT with, so after"
+  echo "[Selfhost]   changing OPENLAW_AUTH_ENABLED in .env, rebuild it:"
+  echo "[Selfhost]   docker compose build web && docker compose up -d"
   exit 1
 fi
 

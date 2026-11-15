@@ -360,6 +360,13 @@ services:
       context: ./web
       args:
         OPENLAW_API_URL: http://api:8000
+        # Derived from the SAME variable the api service reads, so the frontend
+        # build and the backend agree by default instead of being two knobs
+        # that must be remembered together. It is a build arg because Next
+        # inlines NEXT_PUBLIC_* at build time: after changing
+        # OPENLAW_AUTH_ENABLED, rebuild this image (`docker compose build web`)
+        # -- scripts/verify_selfhost.sh reports a mismatch if you do not.
+        NEXT_PUBLIC_OPENLAW_AUTH_ENABLED: ${OPENLAW_AUTH_ENABLED:-false}
       # Becomes the runner image's default; the Route Handlers read it at
       # request time (see web/Dockerfile's header comment).
     restart: unless-stopped

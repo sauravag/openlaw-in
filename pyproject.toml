@@ -30,7 +30,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-cov>=6.0"]
+# pyyaml: tests/test_ci_workflow.py parses .github/workflows/test.yml.
+dev = ["pytest>=8.3", "pytest-cov>=6.0", "pyyaml>=6.0"]
 # Local query embedding (voyage-4-nano, Plan 3 T1) -- kept OPTIONAL (spec §12.7):
 # the voyage_api backend and CI must not pay for ~2GB of torch/transformers they
 # never import just because dependency resolution runs. Install with

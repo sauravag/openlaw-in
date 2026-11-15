@@ -9,3 +9,4 @@ data/*
 !data/glossary/*.json
 .coverage
 .pytest_cache/
+.mode-markers/

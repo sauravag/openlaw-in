@@ -1,0 +1,154 @@
+# Both build modes, both suites, every time (Plan 7 Task 15).
+#
+# Mode A (auth off) is the product default; Mode B (auth on) is the hosted
+# tier. A flag exercised in only one state breaks quietly in the other, so each
+# suite runs once per mode, and the final `both-modes-ran` job refuses to pass
+# unless every (suite, mode) run left a passing marker. Deleting a matrix entry
+# fails that job; deleting the job fails tests/test_ci_workflow.py.
+#
+# No real secret appears in this file or is needed by it: no test contacts
+# Supabase, Anthropic, Voyage, Qdrant or Neo4j. Every credential below is a
+# throwaway for a database that exists only inside the job.
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  OPENLAW_TEST_MODE_MARKER_DIR: ${{ github.workspace }}/.mode-markers
+
+jobs:
+  python:
+    name: pytest (Mode ${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [a, b]
+    services:
+      # The live-Postgres tests (tests/conftest.py::live_engine) skip when the
+      # database is unreachable. Provide it, so CI runs them instead of
+      # skipping. Credentials and database name are tests/conftest.py's
+      # defaults; the database is destroyed with the job.
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: openlaw
+          POSTGRES_PASSWORD: openlaw
+          POSTGRES_DB: openlaw_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U openlaw -d openlaw_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      # No `local-nano` extra: the suite never loads the embedding model.
+      - run: pip install -e ".[dev]"
+      - name: pytest, Mode ${{ matrix.mode }}
+        env:
+          OPENLAW_TEST_MODE: ${{ matrix.mode }}
+        run: python -m pytest
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: markers-python-${{ matrix.mode }}
+          path: .mode-markers
+          if-no-files-found: error
+
+  vitest:
+    name: vitest (Mode ${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [a, b]
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - name: vitest, Mode ${{ matrix.mode }}
+        env:
+          NEXT_PUBLIC_OPENLAW_AUTH_ENABLED: ${{ matrix.mode == 'b' && 'true' || 'false' }}
+        run: npm run test:coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: markers-vitest-${{ matrix.mode }}
+          path: web/.mode-markers
+          if-no-files-found: error
+
+  web-build:
+    name: next build (Mode ${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [a, b]
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # Mode A: the flag is deliberately left unset -- the default build must
+      # be the sign-in-free one -- and the bundle must prove it.
+      - name: npm run build (Mode A, flag unset)
+        if: matrix.mode == 'a'
+        run: npm run build
+      - name: check Mode A bundle
+        if: matrix.mode == 'a'
+        run: npm run check:mode-a-bundle
+      # Mode B: proves the sign-in build compiles.
+      - name: npm run build (Mode B)
+        if: matrix.mode == 'b'
+        env:
+          NEXT_PUBLIC_OPENLAW_AUTH_ENABLED: "true"
+        run: npm run build
+
+  both-modes-ran:
+    name: both modes ran
+    needs: [python, vitest, web-build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: markers-*
+          path: .mode-markers
+          merge-multiple: true
+      - name: no upstream job failed
+        # Markers say a run happened; this catches a failure the marker cannot
+        # see (e.g. the coverage floor, which pytest-cov applies after the
+        # session hook that writes the marker).
+        run: |
+          test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "false"
+      - name: every suite passed in every mode
+        run: python scripts/check_modes_ran.py .mode-markers

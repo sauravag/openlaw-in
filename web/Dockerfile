@@ -36,6 +36,13 @@ FROM node:26-slim AS builder
 WORKDIR /app
 ARG OPENLAW_API_URL=http://api:8000
 ENV OPENLAW_API_URL=$OPENLAW_API_URL
+# Build-time sign-in switch (Mode B when "true"). Next inlines every
+# NEXT_PUBLIC_* value at `next build`, so like OPENLAW_API_URL above it has NO
+# runtime knob: changing it means rebuilding this image. Default "false" is
+# Mode A, the sign-in-free build. docker-compose.yml derives it from the same
+# OPENLAW_AUTH_ENABLED the api reads, so the two agree by default.
+ARG NEXT_PUBLIC_OPENLAW_AUTH_ENABLED=false
+ENV NEXT_PUBLIC_OPENLAW_AUTH_ENABLED=$NEXT_PUBLIC_OPENLAW_AUTH_ENABLED
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # `web/public` is empty and untracked -- git does not version empty

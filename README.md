@@ -667,6 +667,30 @@ manages is exactly what breaks the migration step for a later `alembic
 upgrade head`. The tests skip cleanly if `openlaw_test` isn't reachable
 yet.
 
+### Testing both modes
+
+The product has two build modes: **Mode A** (the default: no accounts, no
+quota, nothing expires) and **Mode B** (`OPENLAW_AUTH_ENABLED=true`, sign-in
+on). A flag tested in only one state breaks quietly in the other, so each
+suite runs once per mode. Mode A is the default for both.
+
+    # Python (from the repo root)
+    OPENLAW_TEST_MODE=a python -m pytest      # Mode A (the default)
+    OPENLAW_TEST_MODE=b python -m pytest      # Mode B
+
+    # Frontend (from web/)
+    NEXT_PUBLIC_OPENLAW_AUTH_ENABLED=false npm run test:coverage   # Mode A
+    NEXT_PUBLIC_OPENLAW_AUTH_ENABLED=true  npm run test:coverage   # Mode B
+
+Both runs must pass and each must keep coverage at or above 80%. The
+route-surface sweeps (`tests/api/test_modes.py`,
+`web/app/api/__tests__/modes.test.ts`) exercise both modes inside every run;
+the mode variable decides which state the rest of the suite is in. The Mode A
+bundle must also stay free of sign-in code: `npm run build` (flag unset), then
+`npm run check:mode-a-bundle`; `NEXT_PUBLIC_OPENLAW_AUTH_ENABLED=true npm run
+build` proves Mode B compiles. `.github/workflows/test.yml` runs all of it and
+fails unless every suite ran, and passed, in both modes.
+
 ### Running the service
 
     uvicorn openlaw.api.deps:production_app --factory --host 0.0.0.0 --port 8000
