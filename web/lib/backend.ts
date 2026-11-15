@@ -1,13 +1,7 @@
 import "server-only";
 
+import { sessionFromCookieHeader } from "@/lib/auth/sessionCookie";
 import { AUTH_ENABLED } from "@/lib/authMode";
-
-/**
- * Name of the HttpOnly session cookie. Task 7 owns setting it and owns the
- * format of its value; for Task 6 the Bearer token is simply this cookie's
- * value, attached only when `AUTH_ENABLED` and the cookie is present.
- */
-export const SESSION_COOKIE_NAME = "openlaw_session";
 
 const DEFAULT_API_URL = "http://127.0.0.1:8000";
 const BAD_GATEWAY = 502;
@@ -24,19 +18,6 @@ const HOP_BY_HOP_HEADERS = [
   "trailer", "upgrade", "expect", "host",
 ];
 
-/** Value of one cookie in a raw `Cookie` header, or null. */
-function readCookie(cookieHeader: string | null, name: string): string | null {
-  if (!cookieHeader) return null;
-  for (const part of cookieHeader.split(";")) {
-    const index = part.indexOf("=");
-    if (index === -1) continue;
-    if (part.slice(0, index).trim() !== name) continue;
-    const value = part.slice(index + 1).trim();
-    return value === "" ? null : value;
-  }
-  return null;
-}
-
 /** Request headers for the backend: cookie in, any client Authorization out. */
 function buildBackendHeaders(request: Request): Headers {
   const headers = new Headers(request.headers);
@@ -49,8 +30,10 @@ function buildBackendHeaders(request: Request): Headers {
     .filter(Boolean);
   for (const name of [...HOP_BY_HOP_HEADERS, ...named]) headers.delete(name);
   if (AUTH_ENABLED) {
-    const token = readCookie(request.headers.get("cookie"), SESSION_COOKIE_NAME);
-    if (token) headers.set("authorization", `Bearer ${token}`);
+    // The cookie holds a JSON session; only the access token goes upstream,
+    // and only when the session is valid, unexpired and unambiguous.
+    const session = sessionFromCookieHeader(request.headers.get("cookie"));
+    if (session) headers.set("authorization", `Bearer ${session.accessToken}`);
   }
   return headers;
 }

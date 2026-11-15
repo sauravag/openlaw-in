@@ -116,56 +116,80 @@ describe("proxyToBackend", () => {
 });
 
 describe("proxyToBackend Authorization", () => {
-  const withSession = { cookie: "openlaw_anon_id=a; openlaw_session=tok123" };
+  const FUTURE = Math.floor(Date.now() / 1000) + 3600;
+  const session = (over: Record<string, unknown> = {}) =>
+    encodeURIComponent(
+      JSON.stringify({
+        accessToken: "tok123",
+        refreshToken: "refresh456",
+        expiresAt: FUTURE,
+        email: "a@example.com",
+        ...over,
+      }),
+    );
+  const withCookie = (value: string) => ({ cookie: `openlaw_anon_id=a; openlaw_session=${value}` });
+  const withSession = withCookie(session());
 
-  it("attaches Bearer when AUTH_ENABLED and the session cookie is present", async () => {
+  async function authorizationFor(headers: Record<string, string>, authEnabled = true) {
     const mock = stubBackend(new Response("{}"));
-    const { proxyToBackend } = await load(true);
-    await proxyToBackend(new Request("http://web/x", { headers: withSession }), "/ask");
-    expect(sentHeaders(mock).get("authorization")).toBe("Bearer tok123");
+    const { proxyToBackend } = await load(authEnabled);
+    await proxyToBackend(new Request("http://web/x", { headers }), "/ask");
+    return sentHeaders(mock).get("authorization");
+  }
+
+  it("attaches the access token (not the cookie JSON) as Bearer", async () => {
+    expect(await authorizationFor(withSession)).toBe("Bearer tok123");
+  });
+
+  it("never sends the refresh token to the backend", async () => {
+    expect(await authorizationFor(withSession)).not.toContain("refresh456");
   });
 
   it("attaches nothing when AUTH_ENABLED but no session cookie", async () => {
-    const mock = stubBackend(new Response("{}"));
-    const { proxyToBackend } = await load(true);
-    await proxyToBackend(
-      new Request("http://web/x", { headers: { cookie: "openlaw_anon_id=a" } }),
-      "/ask",
-    );
-    expect(sentHeaders(mock).get("authorization")).toBeNull();
+    expect(await authorizationFor({ cookie: "openlaw_anon_id=a" })).toBeNull();
+  });
+
+  it("attaches nothing for an expired session", async () => {
+    expect(await authorizationFor(withCookie(session({ expiresAt: 1 })))).toBeNull();
+  });
+
+  it("attaches nothing within the 60s expiry skew", async () => {
+    const soon = Math.floor(Date.now() / 1000) + 30;
+    expect(await authorizationFor(withCookie(session({ expiresAt: soon })))).toBeNull();
+  });
+
+  it("attaches nothing for malformed JSON", async () => {
+    expect(await authorizationFor(withCookie(encodeURIComponent("{oops")))).toBeNull();
+  });
+
+  it("attaches nothing for a raw garbage cookie value", async () => {
+    expect(await authorizationFor(withCookie("tok123"))).toBeNull();
+  });
+
+  it("attaches nothing when the session cookie appears twice", async () => {
+    const twice = { cookie: `openlaw_session=${session()}; openlaw_session=${session({ accessToken: "evil" })}` };
+    expect(await authorizationFor(twice)).toBeNull();
   });
 
   it("attaches nothing when the session cookie is present but auth is disabled", async () => {
-    const mock = stubBackend(new Response("{}"));
-    const { proxyToBackend } = await load(false);
-    await proxyToBackend(new Request("http://web/x", { headers: withSession }), "/ask");
-    expect(sentHeaders(mock).get("authorization")).toBeNull();
+    expect(await authorizationFor(withSession, false)).toBeNull();
   });
 
   it("never forwards a client-supplied Authorization header (either mode)", async () => {
     for (const mode of [false, true]) {
-      const mock = stubBackend(new Response("{}"));
-      const { proxyToBackend } = await load(mode);
-      await proxyToBackend(
-        new Request("http://web/x", {
-          headers: { authorization: "Bearer attacker", cookie: "openlaw_anon_id=a" },
-        }),
-        "/ask",
-      );
-      expect(sentHeaders(mock).get("authorization")).toBeNull();
+      expect(
+        await authorizationFor(
+          { authorization: "Bearer attacker", cookie: "openlaw_anon_id=a" },
+          mode,
+        ),
+      ).toBeNull();
     }
   });
 
   it("replaces a client-supplied Authorization with the session token", async () => {
-    const mock = stubBackend(new Response("{}"));
-    const { proxyToBackend } = await load(true);
-    await proxyToBackend(
-      new Request("http://web/x", {
-        headers: { authorization: "Bearer attacker", ...withSession },
-      }),
-      "/ask",
+    expect(await authorizationFor({ authorization: "Bearer attacker", ...withSession })).toBe(
+      "Bearer tok123",
     );
-    expect(sentHeaders(mock).get("authorization")).toBe("Bearer tok123");
   });
 });
 
