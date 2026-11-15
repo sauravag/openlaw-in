@@ -48,7 +48,7 @@ COPY src ./src
 # matches the README's existing guidance: Hugging Face's Xet download
 # backend can otherwise stall indefinitely on a normal connection.
 ENV HF_HUB_DISABLE_XET=1
-# `--timeout`/`--retries` are load-bearing, not defensive padding. This layer
+# The pip timeout and retry settings are load-bearing, not defensive padding. This layer
 # pulls PyTorch for the local voyage-4-nano embedder -- multiple gigabytes --
 # and pip's default 15s read timeout aborts the whole build if a single socket
 # stalls that long. Observed: a build died after 3.6 hours with
@@ -58,7 +58,14 @@ ENV HF_HUB_DISABLE_XET=1
 # That is exactly the condition a self-hoster in India is most likely to be
 # in, which makes the default a documented one-command setup that fails for
 # the people this project is for.
-RUN pip install --no-cache-dir --timeout 120 --retries 10 -e ".[local-nano]"
+#
+# They are set as environment variables, not CLI flags, because flags do not
+# reach the build-isolation subprocess pip spawns to fetch build dependencies
+# (setuptools and friends). That subprocess kept the 15s default and failed
+# with ReadTimeoutError on a slow connection while the flags sat unused.
+# Environment variables are inherited by it.
+RUN PIP_DEFAULT_TIMEOUT=300 PIP_RETRIES=10 \
+    pip install --no-cache-dir -e ".[local-nano]"
 
 # Only the curated, version-controlled glossary under `data/` -- see
 # .dockerignore's docstring for why the rest of `data/` (bind-mounted
