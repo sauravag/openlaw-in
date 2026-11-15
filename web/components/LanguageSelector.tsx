@@ -9,6 +9,13 @@ interface LanguageSelectorProps {
    * before React hydrates would fall back to whatever `defaultValue` the
    * `<select>` started at, not what the user actually picked. */
   name?: string
+  /** The `id` of the form this field belongs to, when it cannot sit inside
+   * it (HTML's `form` attribute). The composer uses this: the selector is in
+   * the row under the question box, outside its `<form>`, and still reaches
+   * the server on the no-JS GET fallback. */
+  form?: string
+  /** One-line layout for the composer row: label and select side by side. */
+  compact?: boolean
 }
 
 /**
@@ -29,17 +36,27 @@ interface LanguageSelectorProps {
  * has to be able to FIND this control, and a control labelled only in the
  * language you cannot read is the one control that must never be.
  *
- * Must stay inside the `<form>`: `name` only reaches the server on the
- * no-JS GET fallback if the field is part of that form.
+ * Must stay part of the question `<form>` -- inside it, or tied to it with
+ * `form` -- because `name` only reaches the server on the no-JS GET fallback
+ * if the field belongs to that form.
  */
-export default function LanguageSelector({ value, onChange, name }: LanguageSelectorProps) {
+export default function LanguageSelector({
+  value,
+  onChange,
+  name,
+  form,
+  compact = false,
+}: LanguageSelectorProps) {
   const strings = getStrings(value)
+  const layout = compact ? 'flex items-center gap-2' : 'flex flex-col gap-1.5'
+  const control = compact ? 'min-h-10 py-1.5' : 'min-h-12 py-2'
   return (
-    <label className="flex flex-col gap-1.5 text-sm font-semibold text-muted">
+    <label className={`${layout} text-sm font-semibold text-muted`}>
       {strings.languageLabel}
       <select
         name={name}
-        className="min-h-12 rounded-lg border border-line bg-white px-3 py-2 text-base font-normal text-ink"
+        form={form}
+        className={`${control} rounded-lg border border-line bg-white px-3 text-base font-normal text-ink`}
         value={value}
         onChange={(event) => onChange(event.target.value as Language['code'])}
       >

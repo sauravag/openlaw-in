@@ -3,10 +3,10 @@ import { getFallbackHelplineSet } from "@/lib/fallbackHelplines";
 import { getStrings } from "@/lib/strings";
 
 /**
- * The static helpline card, rendered unconditionally above the form so it is
- * in the server-rendered HTML before any script runs (final whole-plan
- * review, H6): with JavaScript off, every other helpline on the page lives
- * behind state that is never set.
+ * The static helpline card, rendered unconditionally (at the top of the side
+ * pane, which is also the mobile help sheet) so it is in the server-rendered
+ * HTML before any script runs (final whole-plan review, H6): with JavaScript
+ * off, every other helpline on the page lives behind state that is never set.
  */
 export default function StandingHelplines({ language }: { language: string }) {
   const strings = getStrings(language);

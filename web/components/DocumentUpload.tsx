@@ -1,13 +1,12 @@
 import { DOCUMENTS_ENDPOINT } from '@/lib/api'
 import {
   ALLOWED_UPLOAD_EXTENSIONS,
-  ANONYMOUS_UPLOAD_TTL_HOURS,
   type Retention,
   MAX_DOCUMENTS_PER_CONVERSATION,
   MAX_UPLOAD_MEGABYTES,
-  SIGN_IN_PATH,
 } from '@/lib/documents'
 import { getStrings } from '@/lib/strings'
+import RetentionNotice from './RetentionNotice'
 
 interface DocumentUploadProps {
   /** Every label here renders in this language. */
@@ -28,6 +27,15 @@ interface DocumentUploadProps {
   documentCount: number
   /** Called the moment a file is chosen. The page performs the upload. */
   onFileChosen: (file: File) => void
+  /**
+   * False when the caller is already showing the retention notice elsewhere
+   * on screen (the composer does, while documents are attached or
+   * uploading), so the promise is shown exactly once. Defaults to true.
+   */
+  showRetentionNotice?: boolean
+  /** False when the caller shows the upload progress line itself. Defaults
+   * to true. */
+  showProgress?: boolean
 }
 
 /**
@@ -65,6 +73,8 @@ export default function DocumentUpload({
   uploadingFilename,
   documentCount,
   onFileChosen,
+  showRetentionNotice = true,
+  showProgress = true,
 }: DocumentUploadProps) {
   const strings = getStrings(language)
   const isFull = documentCount >= MAX_DOCUMENTS_PER_CONVERSATION
@@ -112,28 +122,12 @@ export default function DocumentUpload({
           <p className="text-sm leading-relaxed text-muted">
             {strings.uploadLimitsNote(MAX_UPLOAD_MEGABYTES, MAX_DOCUMENTS_PER_CONVERSATION)}
           </p>
-          {retention === 'expires' && SIGN_IN_PATH === null && (
-            // Mode A beside a backend that expires uploads (final review H3b):
-            // the truth, with no sign-in sentence there is no way to act on.
-            <p className="text-sm leading-relaxed text-paper-ink">
-              {strings.expiringUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)}
-            </p>
-          )}
-          {retention === 'expires' && SIGN_IN_PATH !== null && (
-            <p className="text-sm leading-relaxed text-paper-ink">
-              {strings.anonymousUploadNotice(ANONYMOUS_UPLOAD_TTL_HOURS)}{' '}
-              {canOfferSignIn && (
-                <a
-                  href={SIGN_IN_PATH}
-                  className="font-semibold text-brand underline decoration-2 underline-offset-4"
-                >
-                  {strings.signInCta}
-                </a>
-              )}
-            </p>
-          )}
-          {retention === 'kept' && (
-            <p className="text-sm leading-relaxed text-paper-ink">{strings.keptUploadNotice}</p>
+          {showRetentionNotice && (
+            <RetentionNotice
+              language={language}
+              retention={retention}
+              canOfferSignIn={canOfferSignIn}
+            />
           )}
           {/* Needed only for the no-JavaScript path -- with scripts running,
             * `onChange` has already started the upload before this is reachable. */}
@@ -146,7 +140,7 @@ export default function DocumentUpload({
         </>
       )}
 
-      {isUploading && uploadingFilename !== null && (
+      {showProgress && isUploading && uploadingFilename !== null && (
         <p
           role="status"
           className="rounded-xl border border-line bg-tint px-3 py-2 text-sm text-muted"
