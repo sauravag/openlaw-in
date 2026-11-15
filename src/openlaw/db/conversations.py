@@ -59,7 +59,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from openlaw.answers.history import HistoryTurn
@@ -337,3 +337,34 @@ def delete_conversation(session: Session, conversation_id: str, owner: Owner) ->
     session.delete(conversation)
     session.flush()
     return True
+
+
+def reassign_owner(
+    session: Session, model: Any, from_owner: Owner, to_owner: Owner
+) -> list[str]:
+    """Move every `model` row owned by `from_owner` to `to_owner`; return the ids.
+
+    The single `UPDATE ... WHERE owner_clause(...)` both row types share.
+    `from_owner` must be anonymous and `to_owner` signed-in: this is a claim
+    of anonymous material by an account, never a transfer between accounts,
+    and refusing the other shapes here keeps that true for every caller.
+
+    One statement sets the destination's `user_id`, NULLs `anon_token` (via
+    `owner_columns`) and clears `expires_at`, so `ck_*_has_owner` holds
+    throughout and a retry matches nothing. Ids come from `RETURNING`, not a
+    prior SELECT: under Postgres row locking a concurrent second UPDATE
+    re-evaluates the predicate after the first commits and returns no rows,
+    so nothing is moved or audited twice. Does not commit.
+    """
+    if from_owner.user_id is not None or not from_owner.anon_token:
+        raise ValueError("from_owner must be an anonymous owner with a token")
+    if not to_owner.user_id:
+        raise ValueError("to_owner must be a signed-in owner")
+    statement = (
+        update(model)
+        .where(owner_clause(model, from_owner))
+        .values(**owner_columns(to_owner), expires_at=None)
+        .returning(model.id)
+        .execution_options(synchronize_session=False)
+    )
+    return list(session.execute(statement).scalars())
