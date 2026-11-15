@@ -184,6 +184,25 @@ def test_a_malformed_conversation_id_on_upload_is_a_404(tmp_path: Path) -> None:
     _assert_carries_help(response.json())
 
 
+def test_a_malformed_conversation_id_on_a_hindi_upload_gets_a_hindi_refusal(
+    tmp_path: Path,
+) -> None:
+    from openlaw.api.refusal import refusal_detail
+
+    client = build_client(tmp_path)
+
+    response = client.post(
+        "/documents",
+        files={"file": ("notice.txt", NOTICE_TEXT, TEXT_TYPE)},
+        data={"conversation_id": "not-a-uuid", "language": "hi"},
+        headers=bearer(),
+    )
+
+    assert response.status_code == 404
+    assert refusal_detail("not_found", "hi") in response.text
+    assert refusal_detail("not_found", "en") not in response.text
+
+
 def test_a_non_uuid_document_id_is_rejected_at_the_boundary(client: TestClient) -> None:
     response = client.post(
         "/ask", json={"question": "hello?", "document_ids": ["../../etc/passwd"]}

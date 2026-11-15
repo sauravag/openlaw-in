@@ -96,9 +96,12 @@ def test_route_exists_only_in_the_modes_that_own_it(
     response = client.request(method, url, headers=bearer())
 
     exists = in_a if mode == "a" else in_b
-    router_miss = response.status_code in (404, 405) and response.json() == {
-        "detail": "Not Found"
-    }
+    # A 405 means the PATH exists under another method, i.e. not this
+    # (method, path) pair: it counts as absent, never as present.
+    router_miss = response.status_code in (404, 405) and response.json() in (
+        {"detail": "Not Found"},
+        {"detail": "Method Not Allowed"},
+    )
     assert router_miss is (not exists), (method, path, response.status_code)
 
 
@@ -237,7 +240,7 @@ def test_no_mode_a_refusal_body_contains_signup_url(client_for) -> None:
     bodies.append(client.post("/documents").json())
 
     for body in bodies:
-        assert "signup_url" not in json.dumps(body) or body["signup_url"] is None
+        assert "signup_url" not in body, body
         assert body.get("signup_required") is not True
 
 

@@ -685,7 +685,9 @@ suite runs once per mode. Mode A is the default for both.
 Both runs must pass and each must keep coverage at or above 80%. The
 route-surface sweeps (`tests/api/test_modes.py`,
 `web/app/api/__tests__/modes.test.ts`) exercise both modes inside every run;
-the mode variable decides which state the rest of the suite is in. The Mode A
+the mode variable sets the default for every bare `Settings()` and every
+unpinned frontend test, while tests that need a particular mode (most of
+`tests/api/`, which is Mode B by construction) pin it themselves. The Mode A
 bundle must also stay free of sign-in code: `npm run build` (flag unset), then
 `npm run check:mode-a-bundle`; `NEXT_PUBLIC_OPENLAW_AUTH_ENABLED=true npm run
 build` proves Mode B compiles. `.github/workflows/test.yml` runs all of it and

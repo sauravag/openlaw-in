@@ -63,7 +63,7 @@ jobs:
         if: always()
         with:
           name: markers-python-${{ matrix.mode }}
-          path: .mode-markers
+          path: ${{ env.OPENLAW_TEST_MODE_MARKER_DIR }}
           if-no-files-found: error
 
   vitest:
@@ -76,6 +76,10 @@ jobs:
     defaults:
       run:
         working-directory: web
+    env:
+      # Absolute, so the reporter and the upload below name the same place
+      # whatever `working-directory` is (tests/test_ci_workflow.py checks it).
+      OPENLAW_TEST_MODE_MARKER_DIR: ${{ github.workspace }}/web/.mode-markers
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -93,7 +97,7 @@ jobs:
         if: always()
         with:
           name: markers-vitest-${{ matrix.mode }}
-          path: web/.mode-markers
+          path: ${{ env.OPENLAW_TEST_MODE_MARKER_DIR }}
           if-no-files-found: error
 
   web-build:
@@ -142,13 +146,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: markers-*
-          path: .mode-markers
+          # Outside the checkout: a stale or force-added marker cannot satisfy
+          # the guard.
+          path: ${{ runner.temp }}/markers
           merge-multiple: true
-      - name: no upstream job failed
-        # Markers say a run happened; this catches a failure the marker cannot
-        # see (e.g. the coverage floor, which pytest-cov applies after the
-        # session hook that writes the marker).
+      - name: every upstream job succeeded
+        # `success` only: a skipped job (`if: false`) writes no marker for
+        # web-build, so its result is the only evidence it did not run. This
+        # also catches the coverage floor, which pytest-cov applies after the
+        # session hook that writes the marker.
         run: |
-          test "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "false"
+          results="${{ join(needs.*.result, ' ') }}"
+          test "$results" = "success success success"
       - name: every suite passed in every mode
-        run: python scripts/check_modes_ran.py .mode-markers
+        run: python scripts/check_modes_ran.py "${{ runner.temp }}/markers"

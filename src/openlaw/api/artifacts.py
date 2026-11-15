@@ -143,7 +143,7 @@ _RETENTION_AUTHENTICATED: dict[str, str] = {
 }
 
 
-def _require_uuid(value: str, field: str) -> None:
+def _require_uuid(value: str, field: str, language: str | None = None) -> None:
     """Refuse a malformed id with the same 404 an unknown one gets.
 
     `validated_uuid` raises a bare `ValueError`, which a route turns into an
@@ -154,7 +154,7 @@ def _require_uuid(value: str, field: str) -> None:
     try:
         validated_uuid(value, field)
     except ValueError:
-        raise_refusal("not_found")
+        raise_refusal("not_found", "", None, language)
 
 
 def upload_quota_cost(page_count: int) -> int:
@@ -310,7 +310,7 @@ def _resolve_conversation(
     with session_factory() as session:
         if conversation_id is None:
             return create_conversation(session, owner, settings).id
-        _require_uuid(conversation_id, "conversation_id")
+        _require_uuid(conversation_id, "conversation_id", language)
         conversation = find_owned_conversation(session, conversation_id, owner)
         if conversation is None:
             raise_refusal("not_found", "", None, language)

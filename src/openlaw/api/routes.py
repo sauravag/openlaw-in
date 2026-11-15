@@ -243,6 +243,16 @@ def _signup_url(settings: Settings) -> str | None:
     return settings.signup_url if settings.auth_enabled else None
 
 
+def _refusal_body(body: QuotaExceeded, settings: Settings) -> dict[str, object]:
+    """`body` as the 429's JSON. Mode A has no accounts, so its refusals carry
+    no `signup_url` key at all (not a null one): nothing there hints at a
+    sign-up that does not exist. Mode B keeps the key, null when unconfigured."""
+    payload = body.model_dump()
+    if not settings.auth_enabled:
+        payload.pop("signup_url", None)
+    return payload
+
+
 def _raise_rate_limited(
     request: Request, question: str, state: str | None, language: str | None,
     settings: Settings, retry_after_seconds: int,
@@ -268,7 +278,7 @@ def _raise_rate_limited(
     )
     raise HTTPException(
         status_code=429,
-        detail=body.model_dump(),
+        detail=_refusal_body(body, settings),
         headers={"Retry-After": str(retry_after_seconds)},
     )
 
@@ -330,7 +340,7 @@ def _raise_quota_exceeded(
     )
     raise HTTPException(
         status_code=429,
-        detail=body.model_dump(),
+        detail=_refusal_body(body, settings),
         headers={"Retry-After": str(_seconds_until(reset_date))},
     )
 
