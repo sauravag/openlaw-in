@@ -239,3 +239,39 @@ def upload(
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     return build_client(tmp_path)
+
+
+# --- the two build modes ---------------------------------------------------
+#
+# `api_settings` above keeps its Mode B defaults on purpose: the quota,
+# ownership and audit tests that predate Plan 7 are Mode B tests by
+# construction (`quota_enabled=True` is invalid without accounts). These two
+# fixtures are the explicit per-mode entry points for tests that must say
+# which mode they mean. Neither contacts Supabase: the URL is a dummy, the
+# JWT secret a throwaway 64-character value, and tokens are minted locally.
+
+DUMMY_SUPABASE_URL = "https://dummy-project.supabase.test"
+DUMMY_JWT_SECRET_64 = "x" * 64
+
+
+@pytest.fixture
+def mode_a_settings(tmp_path: Path) -> Settings:
+    """Mode A: no accounts, no quota, nothing expires."""
+    return api_settings(
+        tmp_path,
+        auth_enabled=False,
+        quota_enabled=False,
+        supabase_url=None,
+        supabase_jwt_secret=None,
+    )
+
+
+@pytest.fixture
+def mode_b_settings(tmp_path: Path) -> Settings:
+    """Mode B: accounts on, against a dummy Supabase project."""
+    return api_settings(
+        tmp_path,
+        auth_enabled=True,
+        supabase_url=DUMMY_SUPABASE_URL,
+        supabase_jwt_secret=DUMMY_JWT_SECRET_64,
+    )

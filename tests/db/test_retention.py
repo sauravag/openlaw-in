@@ -39,7 +39,12 @@ from openlaw.db.retention import (
 _MODE_B = Settings(
     _env_file=None, vaquill_root="/tmp/v", kanoongpt_root="/tmp/k", auth_enabled=True
 )
-_MODE_A = Settings(_env_file=None, vaquill_root="/tmp/v", kanoongpt_root="/tmp/k")
+_MODE_A = Settings(
+    _env_file=None,  # type: ignore[call-arg]
+    vaquill_root="/tmp/v",
+    kanoongpt_root="/tmp/k",
+    auth_enabled=False,
+)
 
 
 def _session() -> Session:

@@ -374,6 +374,9 @@ def test_production_app_builds_a_working_app_without_touching_qdrant_or_neo4j(
     monkeypatch.setenv("OPENLAW_VOYAGE_API_KEY", "voyage-test")
     monkeypatch.setenv("OPENLAW_DATABASE_URL", "sqlite://")
     monkeypatch.setenv("OPENLAW_NO_REVERSE_PROXY", "true")
+    # This test is about composition, not accounts: Mode B would demand a
+    # Supabase project it deliberately does not have.
+    monkeypatch.setenv("OPENLAW_AUTH_ENABLED", "false")
     get_settings.cache_clear()
 
     seen: dict = {}

@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from openlaw.config import Settings
 
 
@@ -189,7 +191,9 @@ def test_env_example_constructs_settings_without_error() -> None:
 # own self-host defaults, not silently override them ------------------------
 
 
-def test_env_example_agrees_with_compose_self_host_defaults() -> None:
+def test_env_example_agrees_with_compose_self_host_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`docker compose` auto-loads `.env` for `${VAR:-default}`
     interpolation, so a `.env.example` value that disagrees with
     `docker-compose.yml`'s own fallback silently wins the moment someone
@@ -203,6 +207,10 @@ def test_env_example_agrees_with_compose_self_host_defaults() -> None:
     edit to either one, without the other, fails here instead of shipping
     invisible.
     """
+    # Resolve `.env.example` on its own: the environment beats the file, and
+    # the suite's build mode (tests/conftest.py) is applied through it.
+    for name in ("OPENLAW_AUTH_ENABLED", "OPENLAW_QUOTA_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
     root = Path(__file__).resolve().parent.parent
     compose_text = (root / "docker-compose.yml").read_text()
     example_settings = Settings(_env_file=root / ".env.example")  # type: ignore[call-arg]

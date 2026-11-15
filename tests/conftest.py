@@ -1,3 +1,4 @@
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -8,6 +9,87 @@ from sqlalchemy import Engine, create_engine, text
 from openlaw.config import Settings
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
+# --- the two build modes ---------------------------------------------------
+#
+# Plan 7 Task 15: the suite runs once per mode (`OPENLAW_TEST_MODE=a|b`), so
+# a flag exercised in only one state cannot break quietly in the other. Mode
+# A (auth off, the product default) is also the test default.
+#
+# The mode is applied through `OPENLAW_AUTH_ENABLED`, i.e. the environment a
+# bare `Settings()` reads. Tests that need a specific mode say so with an
+# explicit `auth_enabled=` argument (which beats the environment); every other
+# test, by not caring, is run in whichever mode the session is in.
+
+MODE_ENV_VAR = "OPENLAW_TEST_MODE"
+MODE_MARKER_DIR_ENV_VAR = "OPENLAW_TEST_MODE_MARKER_DIR"
+VALID_MODES = ("a", "b")
+DEFAULT_MODE = "a"
+
+
+def session_mode() -> str:
+    """The mode this pytest session runs in: `a` or `b`. Fails fast on typos
+    -- an unrecognised value silently meaning Mode A is exactly the quiet
+    half-coverage this machinery exists to prevent."""
+    mode = os.environ.get(MODE_ENV_VAR, DEFAULT_MODE).lower()
+    if mode not in VALID_MODES:
+        raise pytest.UsageError(
+            f"{MODE_ENV_VAR}={mode!r} is not one of {VALID_MODES}"
+        )
+    return mode
+
+
+def pytest_report_header(config: pytest.Config) -> str:
+    return f"openlaw build mode: {session_mode().upper()} ({MODE_ENV_VAR})"
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Record that this mode's run happened, and whether it passed.
+
+    Written only when `OPENLAW_TEST_MODE_MARKER_DIR` is set (CI). The final CI
+    step (`scripts/check_modes_ran.py`) requires a passing marker for each
+    mode, so a job that quietly stopped running one mode fails there.
+    """
+    marker_dir = os.environ.get(MODE_MARKER_DIR_ENV_VAR)
+    if not marker_dir:
+        return
+    directory = Path(marker_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "suite": "python",
+        "mode": session_mode(),
+        "passed": exitstatus == 0,
+        "tests": session.testscollected,
+    }
+    (directory / f"python-{session_mode()}.json").write_text(json.dumps(payload))
+
+
+_MODE_PATCH = pytest.MonkeyPatch()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Point every bare `Settings()` at this session's mode.
+
+    Done at configure time, not in a fixture: module-level `Settings(...)`
+    constants are built while test modules are imported during collection,
+    which is before any session fixture runs.
+    """
+    _MODE_PATCH.setenv(
+        "OPENLAW_AUTH_ENABLED", "true" if session_mode() == "b" else "false"
+    )
+    # Unset quota resolves to `auth_enabled`; an inherited override would make
+    # `Settings()` invalid in Mode A (quota needs accounts).
+    _MODE_PATCH.delenv("OPENLAW_QUOTA_ENABLED", raising=False)
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    _MODE_PATCH.undo()
+
+
+@pytest.fixture(scope="session")
+def build_mode() -> str:
+    """`"a"` or `"b"`: the mode the whole session is running in."""
+    return session_mode()
 
 
 @pytest.fixture(autouse=True, scope="session")
