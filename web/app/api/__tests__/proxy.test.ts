@@ -94,6 +94,7 @@ describe("proxy surface is enumerated", () => {
   // Task 8's four auth routes (each 404s in Mode A, none proxies to the backend).
   const ALLOWED_ROUTE_FILES = [
     "api/auth/callback/route.ts",
+    "api/auth/delete-account/route.ts",
     "api/auth/session/route.ts",
     "api/auth/sign-in/route.ts",
     "api/auth/sign-out/route.ts",

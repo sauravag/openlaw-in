@@ -199,7 +199,8 @@ export interface PostToBackendOptions {
  * with `proxyToBackend`, but forwards ONLY `openlaw_anon_id` (an allowlist). Rejects on a network error or
  * timeout; the CALLER decides what a failure means.
  */
-export async function postToBackend(
+async function sendToBackend(
+  method: "POST" | "DELETE",
   backendPath: string,
   { bearer, inboundCookieHeader, timeoutMs = BACKEND_POST_TIMEOUT_MS }: PostToBackendOptions,
 ): Promise<Response> {
@@ -211,10 +212,26 @@ export async function postToBackend(
   const headers = forwardableHeaders(source);
   headers.set("authorization", `Bearer ${bearer}`);
   return fetch(`${base}${backendPath}`, {
-    method: "POST",
+    method,
     headers,
     redirect: "manual",
     cache: "no-store",
     signal: AbortSignal.timeout(timeoutMs),
   });
+}
+
+export function postToBackend(
+  backendPath: string,
+  options: PostToBackendOptions,
+): Promise<Response> {
+  return sendToBackend("POST", backendPath, options);
+}
+
+/** Same as `postToBackend` (explicit bearer, `openlaw_anon_id` only), for the
+ * one backend DELETE a route makes on the person's behalf: account erasure. */
+export function deleteToBackend(
+  backendPath: string,
+  options: PostToBackendOptions,
+): Promise<Response> {
+  return sendToBackend("DELETE", backendPath, options);
 }

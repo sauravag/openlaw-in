@@ -438,3 +438,20 @@ describe("postToBackend", () => {
     ).rejects.toThrow("fetch failed");
   });
 });
+
+describe("deleteToBackend", () => {
+  it("sends a DELETE with the explicit bearer and only the anon cookie", async () => {
+    const mock = stubBackend(new Response("{}"));
+    const { deleteToBackend } = await load(true);
+    await deleteToBackend("/account", {
+      bearer: "fresh-token",
+      inboundCookieHeader: "openlaw_session=s; openlaw_anon_id=a1; other=o",
+    });
+
+    const init = mock.mock.calls[0][1] as RequestInit;
+    expect(mock.mock.calls[0][0]).toBe("http://backend.test/account");
+    expect(init.method).toBe("DELETE");
+    expect(sentHeaders(mock).get("authorization")).toBe("Bearer fresh-token");
+    expect(sentHeaders(mock).get("cookie")).toBe("openlaw_anon_id=a1");
+  });
+});

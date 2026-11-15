@@ -27,7 +27,10 @@ export type AuthRefusalKind =
   | "rate_limited"
   | "too_large"
   | "failed"
-  | "sent";
+  | "sent"
+  | "confirmation_required"
+  | "sign_in_required"
+  | "delete_failed";
 
 const DETAIL: Record<AuthRefusalKind, Record<"en" | "hi", string>> = {
   invalid_email: {
@@ -45,6 +48,19 @@ const DETAIL: Record<AuthRefusalKind, Record<"en" | "hi", string>> = {
   failed: {
     en: "We could not send the sign-in email just now. Please try again later. You can still ask your question without an account.",
     hi: "हम अभी साइन इन ईमेल नहीं भेज सके। कृपया बाद में कोशिश करें। आप बिना खाते के अपना सवाल अब भी पूछ सकते हैं।",
+  },
+  confirmation_required: {
+    en: "Your account was not deleted. To confirm, type the word shown (DELETE) exactly.",
+    hi: "आपका खाता नहीं हटाया गया। पुष्टि के लिए दिखाया गया शब्द (हटाएं) ठीक वैसे ही लिखें।",
+  },
+  sign_in_required: {
+    en: "Please sign in again to delete your account. Nothing was deleted.",
+    hi: "अपना खाता हटाने के लिए कृपया फिर से साइन इन करें। कुछ भी नहीं हटाया गया।",
+  },
+  // Session is deliberately kept on this failure so the person can retry.
+  delete_failed: {
+    en: "We could not delete your account just now, and you are still signed in. Please try again in a little while.",
+    hi: "हम अभी आपका खाता नहीं हटा सके, और आप अब भी साइन इन हैं। कृपया थोड़ी देर बाद फिर कोशिश करें।",
   },
   // The one success body. Identical for every address, registered or not.
   sent: {

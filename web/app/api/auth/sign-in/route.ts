@@ -1,3 +1,4 @@
+import { readBoundedBody } from "@/lib/auth/boundedBody";
 import { authRefusal, normalizeLanguage, signInSentResponse, type AuthLanguage } from "@/lib/auth/authRefusal";
 import { requestOtp } from "@/lib/auth/gotrue";
 import { readGotrueConfig } from "@/lib/auth/gotrueConfig";
@@ -13,48 +14,12 @@ import { isCrossSiteWrite } from "@/lib/csrf";
 export const dynamic = "force-dynamic";
 
 const MAX_EMAIL_LENGTH = 254;
-/** Largest sign-in body read; a real one is under 300 bytes. */
-const MAX_BODY_BYTES = 4 * 1024;
 const DEFAULT_RETRY_AFTER_SECONDS = 60;
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 interface SignInInput {
   readonly email: unknown;
   readonly language: AuthLanguage;
-}
-
-type ReadResult = { kind: "ok"; text: string } | { kind: "too_large" } | { kind: "unreadable" };
-
-/** Reads the body, never holding more than `MAX_BODY_BYTES`: Content-Length is
- * only a hint a client can lie about, so the stream itself is bounded too. */
-async function readBoundedBody(request: Request): Promise<ReadResult> {
-  const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return { kind: "too_large" };
-  if (!request.body) return { kind: "unreadable" };
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_BODY_BYTES) {
-        await reader.cancel();
-        return { kind: "too_large" };
-      }
-      chunks.push(value);
-    }
-  } catch {
-    return { kind: "unreadable" };
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { kind: "ok", text: new TextDecoder().decode(bytes) };
 }
 
 /** `email` and `language` from JSON or the no-JavaScript form; null if unparseable. */

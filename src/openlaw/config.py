@@ -153,6 +153,13 @@ class Settings(BaseSettings):
     # Supabase auth (email + Google). Left unset in self-hosted/dev use.
     supabase_url: str | None = None
     supabase_jwt_secret: str | None = None
+    # Optional; when set, deleting an account also deletes the Supabase
+    # identity. Leave unset and the local data is still erased -- delete the
+    # identity from the Supabase dashboard. Never expose this value to the
+    # frontend; it bypasses every row-level policy. `repr=False` keeps it out
+    # of any logged Settings repr (the repo's other secrets are plain `str`,
+    # so this matches the convention rather than introducing SecretStr).
+    supabase_service_role_key: str | None = Field(default=None, repr=False)
     # Reverse-proxy trust (Task 4 review, C1). `openlaw.api.routes._client_key`
     # uses the raw TCP peer address (`request.client.host`) UNLESS that peer
     # is listed here, in which case it walks `X-Forwarded-For` from the right

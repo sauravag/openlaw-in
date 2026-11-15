@@ -275,6 +275,9 @@ services:
       # Set both to enable Supabase email/Google auth.
       OPENLAW_SUPABASE_URL: ${OPENLAW_SUPABASE_URL:-}
       OPENLAW_SUPABASE_JWT_SECRET: ${OPENLAW_SUPABASE_JWT_SECRET:-}
+      # Optional; api ONLY (never web). Lets account deletion also remove the
+      # Supabase identity. Bypasses every row-level policy: keep it secret.
+      OPENLAW_SUPABASE_SERVICE_ROLE_KEY: ${OPENLAW_SUPABASE_SERVICE_ROLE_KEY:-}
       # See the "Reverse-proxy trust" note above this file's `services:`
       # block -- `web`'s fixed address on this compose network, kept
       # honest by `proxy` actually setting `X-Forwarded-For`, not a
