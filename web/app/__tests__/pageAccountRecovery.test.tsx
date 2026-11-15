@@ -196,3 +196,51 @@ describe("your conversations (Mode B, signed in)", () => {
     expect(mockedList).not.toHaveBeenCalled();
   });
 });
+
+describe("deliberate sign-out versus a lapsed session (N1)", () => {
+  const restored = {
+    kind: "conversation" as const,
+    data: {
+      conversation_id: "conv-kept",
+      turns: [
+        { turn_index: 0, question: "Kept question?", answer: "Kept answer.", document_answer: null, language: "en" },
+      ],
+    },
+  };
+
+  it("shows no session-ended notice in the same tab after the person signs out", async () => {
+    // Signed in, with a kept conversation open.
+    storeKept("conv-kept");
+    stubSession(true);
+    mockedRead.mockResolvedValue(restored);
+    const first = render(<HomePage />);
+    await screen.findByText("Kept answer.");
+    const signOut = await screen.findByRole("button", { name: getStrings("en").signOutButton });
+    const form = signOut.closest("form") as HTMLFormElement;
+    form.addEventListener("submit", (event) => event.preventDefault());
+
+    await userEvent.click(signOut);
+    first.unmount();
+
+    // The sign-out redirect lands back on this page, now anonymous.
+    stubSession(false);
+    mockedRead.mockResolvedValue({ kind: "refused", status: 404, data: notFound });
+    render(<HomePage />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.queryByTestId("session-ended")).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem(CONVERSATION_STORAGE_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem(CONVERSATION_KEPT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("still shows the notice when the session lapsed without the person signing out", async () => {
+    storeKept("conv-kept");
+    stubSession(false);
+    mockedRead.mockResolvedValue({ kind: "refused", status: 404, data: notFound });
+
+    render(<HomePage />);
+
+    expect(await screen.findByTestId("session-ended")).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(CONVERSATION_STORAGE_KEY)).toBe("conv-kept");
+  });
+});

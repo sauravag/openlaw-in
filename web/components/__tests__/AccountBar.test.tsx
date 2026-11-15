@@ -72,3 +72,22 @@ describe('AccountBar', () => {
     expect(inn.container).toBeEmptyDOMElement()
   })
 })
+
+describe('AccountBar deliberate sign-out (N1)', () => {
+  it('forgets the stored conversation pointer and its signed-in flag before the post', () => {
+    window.sessionStorage.setItem('openlaw.conversation_id', 'conv-1')
+    window.sessionStorage.setItem('openlaw.conversation_kept', '1')
+    const { container } = render(
+      <AccountBar signedIn email="person@example.com" language="en" />,
+    )
+    const form = container.querySelector('form') as HTMLFormElement
+    // jsdom does not navigate; the submit event is what fires before the
+    // browser's real POST would.
+    form.addEventListener('submit', (event) => event.preventDefault())
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+
+    expect(window.sessionStorage.getItem('openlaw.conversation_id')).toBeNull()
+    expect(window.sessionStorage.getItem('openlaw.conversation_kept')).toBeNull()
+  })
+})
