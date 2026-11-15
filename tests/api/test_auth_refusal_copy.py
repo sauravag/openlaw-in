@@ -13,6 +13,7 @@ import pytest
 from openlaw.api.refusal import (
     REFUSAL_STATUS,
     _REFUSAL_DETAIL,
+    raise_refusal,
     refusal_body,
     refusal_detail,
 )
@@ -141,3 +142,9 @@ def test_frontend_copy_is_verbatim_the_backend_copy(key: str, language: str) -> 
     frontend = _ts_strings(language)
 
     assert frontend.get(_camel(key)) == refusal_detail(key, language)
+
+
+@pytest.mark.parametrize("key", ["auth_link_sent", "account_deleted"])
+def test_success_shaped_keys_cannot_be_raised(key: str) -> None:
+    with pytest.raises(ValueError, match="success-shaped"):
+        raise_refusal(key)

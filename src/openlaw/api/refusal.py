@@ -458,6 +458,9 @@ def refusal_body(
     }
 
 
+_MIN_ERROR_STATUS = 400
+
+
 def raise_refusal(
     key: str,
     question: str = "",
@@ -473,8 +476,14 @@ def raise_refusal(
     missing one, exactly as `app._validation_error` documents for a body that
     failed to parse.
     """
+    status = REFUSAL_STATUS[key]
+    if status < _MIN_ERROR_STATUS:
+        # `auth_link_sent`/`account_deleted` sit in the table only to keep it
+        # complete; raising one would hand clients a "refusal" whose 2xx
+        # status they read as success.
+        raise ValueError(f"refusal key {key!r} is success-shaped ({status})")
     raise HTTPException(
-        status_code=REFUSAL_STATUS[key],
+        status_code=status,
         detail=refusal_body(key, question, state, language),
         headers=headers,
     )
