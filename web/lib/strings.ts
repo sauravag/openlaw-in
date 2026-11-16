@@ -174,6 +174,18 @@ export interface UIStrings {
   conversationListItem: (startedOn: string, documentCount: number) => string;
   openConversationButton: string;
   currentConversationLabel: string;
+  /** Conversation sidebar (signed-in users): labels and entry copy. */
+  conversationsNavLabel: string;
+  newChatButton: string;
+  showTitlesLabel: string;
+  documentsOnlyTitle: string;
+  showMoreConversations: string;
+  conversationsMenuButton: string;
+  closeConversationsPanel: string;
+  todayAt: (time: string) => string;
+  yesterdayAt: (time: string) => string;
+  /** "" for no documents, so the entry shows only the time. */
+  conversationDocuments: (count: number) => string;
   /** Final review H1a: a kept conversation the lapsed session cannot show. */
   sessionEndedNotice: string;
   /** Final review H2: retrying a failed migration from the page. */
@@ -333,6 +345,17 @@ const EN: UIStrings = {
     `Started ${startedOn} \u00b7 ${documentCount === 1 ? "1 document" : `${documentCount} documents`}`,
   openConversationButton: "Open",
   currentConversationLabel: "Open now",
+  conversationsNavLabel: "Your conversations",
+  newChatButton: "New chat",
+  showTitlesLabel: "Show titles",
+  documentsOnlyTitle: "Documents only",
+  showMoreConversations: "Show more",
+  conversationsMenuButton: "Chats",
+  closeConversationsPanel: "Close",
+  todayAt: (time) => `Today, ${time}`,
+  yesterdayAt: (time) => `Yesterday, ${time}`,
+  conversationDocuments: (count) =>
+    count === 0 ? "" : count === 1 ? "1 document" : `${count} documents`,
   sessionEndedNotice: "Your session has ended, so this conversation is not shown. Sign in to see it again.",
   migrationRetryButton: "Try again",
   migrationRetrying: "Trying again\u2026",
@@ -477,6 +500,16 @@ const HI: UIStrings = {
     `${startedOn} को शुरू \u00b7 ${documentCount} दस्तावेज़`,
   openConversationButton: "खोलें",
   currentConversationLabel: "अभी खुली है",
+  conversationsNavLabel: "आपकी बातचीत",
+  newChatButton: "नई बातचीत",
+  showTitlesLabel: "शीर्षक दिखाएं",
+  documentsOnlyTitle: "केवल दस्तावेज़",
+  showMoreConversations: "और दिखाएं",
+  conversationsMenuButton: "बातचीत",
+  closeConversationsPanel: "बंद करें",
+  todayAt: (time) => `आज, ${time}`,
+  yesterdayAt: (time) => `कल, ${time}`,
+  conversationDocuments: (count) => (count === 0 ? "" : `${count} दस्तावेज़`),
   sessionEndedNotice: "आपका सत्र समाप्त हो गया है, इसलिए यह बातचीत नहीं दिख रही। इसे फिर से देखने के लिए साइन इन करें।",
   migrationRetryButton: "फिर से कोशिश करें",
   migrationRetrying: "फिर से कोशिश हो रही है\u2026",
