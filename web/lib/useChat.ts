@@ -42,6 +42,7 @@ export interface ChatState {
   ask: (question: string) => Promise<AskResult>
   showConversation: (id: string, turns: ThreadTurn[], documents: AttachedDocument[]) => void
   openConversation: (id: string) => Promise<void>
+  startNewConversation: () => void
   deleteCurrentConversation: () => Promise<void>
   markSessionEnded: () => void
 }
@@ -141,8 +142,10 @@ function useConversationActions(state: TurnState, { language, pointer, attachmen
     attachments.restore(documents)
   }
 
-  /** Open one of the signed-in person's own conversations from the list. */
+  /** Open one of the signed-in person's own conversations from the list.
+   * A no-op while a reply is loading: its answer would land in the wrong thread. */
   async function openConversation(id: string): Promise<void> {
+    if (state.status === 'loading') return
     const outcome = await readConversation({ conversationId: id, language })
     if (outcome.kind === 'refused') return state.fail(outcome.data.detail)
     const { conversation_id: conversationId, turns, documents } = outcome.data
@@ -152,6 +155,23 @@ function useConversationActions(state: TurnState, { language, pointer, attachmen
       (documents ?? []).map(attachedFromConversationCard),
     )
     storeConversationId(conversationId, true)
+  }
+
+  /**
+   * Leave the current conversation for a blank one. Nothing is deleted: the
+   * conversation and its documents stay on the server, reachable from the
+   * list. A no-op while a reply is loading, for the same reason as above.
+   */
+  function startNewConversation(): void {
+    if (state.status === 'loading') return
+    state.setTurns([])
+    state.setPending(null)
+    state.setStatus('idle')
+    state.setErrorMessage(null)
+    state.setIsSessionEnded(false)
+    pointer.setConversationId(null)
+    forgetStoredConversationId()
+    attachments.clear()
   }
 
   /**
@@ -170,7 +190,7 @@ function useConversationActions(state: TurnState, { language, pointer, attachmen
     attachments.clear()
   }
 
-  return { showConversation, openConversation, deleteCurrentConversation }
+  return { showConversation, openConversation, startNewConversation, deleteCurrentConversation }
 }
 
 /**
