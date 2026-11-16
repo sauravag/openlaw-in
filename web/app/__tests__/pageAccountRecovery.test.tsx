@@ -6,6 +6,7 @@ import { readConversation } from "@/lib/api";
 import { fetchSidebarPage } from "@/lib/sidebarConversations";
 import { CONVERSATION_KEPT_STORAGE_KEY, CONVERSATION_STORAGE_KEY } from "@/lib/thread";
 import { getStrings } from "@/lib/strings";
+import { getSidebarStrings } from "@/lib/sidebarStrings";
 import type { RefusalData } from "@/lib/types";
 
 // Final review H1: a lapsed session must not orphan a kept conversation, and a
@@ -150,7 +151,7 @@ describe("restoring a kept conversation after the session lapsed (Mode B)", () =
 
 /** The one openable entry in the sidebar's list. */
 async function findSidebarEntry(): Promise<HTMLElement> {
-  const nav = await screen.findByRole("navigation", { name: getStrings("en").conversationsNavLabel });
+  const nav = await screen.findByRole("navigation", { name: getSidebarStrings("en").conversationsNavLabel });
   return within(await within(nav).findByRole("list")).findByRole("button");
 }
 
@@ -186,9 +187,10 @@ describe("your conversations (Mode B, signed in)", () => {
     });
     mockedRead.mockResolvedValue(restoredView);
     render(<HomePage />);
-    const strings = getStrings("en");
     await userEvent.click(
-      await within(screen.getByRole("banner")).findByRole("button", { name: strings.conversationsMenuButton }),
+      await within(screen.getByRole("banner")).findByRole("button", {
+        name: getSidebarStrings("en").conversationsMenuButton,
+      }),
     );
     expect(screen.getByRole("dialog")).toBeInTheDocument();
 
@@ -207,7 +209,7 @@ describe("your conversations (Mode B, signed in)", () => {
 
     expect(mockedList).not.toHaveBeenCalled();
     expect(
-      screen.queryByRole("navigation", { name: getStrings("en").conversationsNavLabel }),
+      screen.queryByRole("navigation", { name: getSidebarStrings("en").conversationsNavLabel }),
     ).not.toBeInTheDocument();
   });
 

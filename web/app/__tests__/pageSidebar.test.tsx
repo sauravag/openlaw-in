@@ -7,6 +7,7 @@ import { fetchSidebarPage } from "@/lib/sidebarConversations";
 import { SIDE_PANE_ID } from "@/components/SidePane";
 import { CONVERSATION_STORAGE_KEY } from "@/lib/thread";
 import { getStrings } from "@/lib/strings";
+import { getSidebarStrings } from "@/lib/sidebarStrings";
 import type { AnswerData, SidebarConversationData } from "@/lib/types";
 
 // The conversation sidebar on the page (Mode B, signed in). The sidebar's own
@@ -37,6 +38,7 @@ const mockedAsk = vi.mocked(askQuestion);
 const mockedRead = vi.mocked(readConversation);
 const mockedPage = vi.mocked(fetchSidebarPage);
 const strings = getStrings("en");
+const sidebarStrings = getSidebarStrings("en");
 
 const entry: SidebarConversationData = {
   id: "conv-2",
@@ -76,7 +78,7 @@ function stubSession(signedIn: boolean) {
 }
 
 function sidebar(): HTMLElement {
-  return screen.getByRole("navigation", { name: strings.conversationsNavLabel });
+  return screen.getByRole("navigation", { name: sidebarStrings.conversationsNavLabel });
 }
 
 function composer(): HTMLTextAreaElement {
@@ -85,7 +87,7 @@ function composer(): HTMLTextAreaElement {
 
 /** The sidebar entry for `conv-2`: the one button in its list. */
 async function findEntry(): Promise<HTMLElement> {
-  const nav = await screen.findByRole("navigation", { name: strings.conversationsNavLabel });
+  const nav = await screen.findByRole("navigation", { name: sidebarStrings.conversationsNavLabel });
   const list = await within(nav).findByRole("list");
   return within(list).findByRole("button");
 }
@@ -134,9 +136,9 @@ describe("the conversation sidebar (Mode B)", () => {
     render(<HomePage />);
     const banner = screen.getByRole("banner");
 
-    await userEvent.click(await within(banner).findByRole("button", { name: strings.conversationsMenuButton }));
+    await userEvent.click(await within(banner).findByRole("button", { name: sidebarStrings.conversationsMenuButton }));
     const dialog = screen.getByRole("dialog");
-    expect(within(dialog).getByRole("navigation", { name: strings.conversationsNavLabel })).toBeInTheDocument();
+    expect(within(dialog).getByRole("navigation", { name: sidebarStrings.conversationsNavLabel })).toBeInTheDocument();
 
     await userEvent.click(await findEntry());
 
@@ -148,7 +150,7 @@ describe("the conversation sidebar (Mode B)", () => {
     stubSession(true);
     render(<HomePage />);
     const banner = screen.getByRole("banner");
-    await userEvent.click(await within(banner).findByRole("button", { name: strings.conversationsMenuButton }));
+    await userEvent.click(await within(banner).findByRole("button", { name: sidebarStrings.conversationsMenuButton }));
     expect(screen.getByRole("dialog")).toHaveAttribute("id", "conversations-panel");
 
     await userEvent.keyboard("{Escape}");
@@ -165,9 +167,9 @@ describe("the conversation sidebar (Mode B)", () => {
     render(<HomePage />);
     await userEvent.click(await findEntry());
     await screen.findByText("Earlier answer.");
-    await userEvent.click(screen.getByRole("button", { name: strings.conversationsMenuButton }));
+    await userEvent.click(screen.getByRole("button", { name: sidebarStrings.conversationsMenuButton }));
 
-    await userEvent.click(within(sidebar()).getByRole("button", { name: strings.newChatButton }));
+    await userEvent.click(within(sidebar()).getByRole("button", { name: sidebarStrings.newChatButton }));
 
     expect(screen.queryByText("Earlier answer.")).not.toBeInTheDocument();
     expect(window.sessionStorage.getItem(CONVERSATION_STORAGE_KEY)).toBeNull();
@@ -198,8 +200,8 @@ describe("the conversation sidebar (Mode B)", () => {
     render(<HomePage />);
     await settle();
 
-    expect(screen.queryByRole("navigation", { name: strings.conversationsNavLabel })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: strings.conversationsMenuButton })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: sidebarStrings.conversationsNavLabel })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: sidebarStrings.conversationsMenuButton })).not.toBeInTheDocument();
     expect(mockedPage).not.toHaveBeenCalled();
   });
 
@@ -209,8 +211,8 @@ describe("the conversation sidebar (Mode B)", () => {
     await findEntry();
 
     const pane = document.getElementById(SIDE_PANE_ID) as HTMLElement;
-    expect(within(pane).queryByRole("navigation", { name: strings.conversationsNavLabel })).not.toBeInTheDocument();
-    expect(within(pane).queryByRole("button", { name: strings.newChatButton })).not.toBeInTheDocument();
+    expect(within(pane).queryByRole("navigation", { name: sidebarStrings.conversationsNavLabel })).not.toBeInTheDocument();
+    expect(within(pane).queryByRole("button", { name: sidebarStrings.newChatButton })).not.toBeInTheDocument();
     expect(await within(pane).findByRole("button", { name: strings.signOutButton })).toBeInTheDocument();
   });
 });
@@ -222,8 +224,8 @@ describe("the conversation sidebar in Mode A", () => {
     render(<HomePage />);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(screen.queryByRole("navigation", { name: strings.conversationsNavLabel })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: strings.conversationsMenuButton })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: sidebarStrings.conversationsNavLabel })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: sidebarStrings.conversationsMenuButton })).not.toBeInTheDocument();
     expect(mockedPage).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });

@@ -1,6 +1,6 @@
 import { useRef } from 'react'
 import ConversationSidebar from '@/components/ConversationSidebar'
-import { getStrings } from '@/lib/strings'
+import { getSidebarStrings } from '@/lib/sidebarStrings'
 import { useDialogFocus } from '@/lib/useDialogFocus'
 import { CONVERSATIONS_PANEL_ID } from '@/lib/usePhonePanels'
 import { useSidebarConversations } from '@/lib/useSidebarConversations'
@@ -48,7 +48,7 @@ function CloseButton({ label, onClose }: { label: string; onClose: () => void })
  */
 export default function SignedInSidebar(props: SignedInSidebarProps) {
   const { language, isPanelOpen, onClosePanel } = props
-  const strings = getStrings(language)
+  const strings = getSidebarStrings(language)
   const { showTitles, setShowTitles } = useTitlePreference(props.email)
   const { conversations, hasMore, loadMore } = useSidebarConversations({
     enabled: true,

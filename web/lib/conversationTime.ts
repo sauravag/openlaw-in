@@ -1,4 +1,4 @@
-import { getStrings } from '@/lib/strings'
+import { getSidebarStrings } from '@/lib/sidebarStrings'
 
 const LOCALE_BY_LANGUAGE: Readonly<Record<string, string>> = { hi: 'hi-IN' }
 const DEFAULT_LOCALE = 'en-IN'
@@ -29,7 +29,7 @@ export function formatConversationTime(iso: string, language: string, now: Date)
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return iso
   const locale = localeFor(language)
-  const strings = getStrings(language)
+  const strings = getSidebarStrings(language)
   // Intl pads the hour ("09:03") under h23; the copy reads "9:03".
   const time = (): string =>
     new Intl.DateTimeFormat(locale, {

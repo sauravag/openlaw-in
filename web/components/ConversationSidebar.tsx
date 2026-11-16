@@ -1,5 +1,5 @@
 import { formatConversationTime } from '@/lib/conversationTime'
-import { getStrings } from '@/lib/strings'
+import { getSidebarStrings } from '@/lib/sidebarStrings'
 import type { SidebarConversationData } from '@/lib/types'
 
 interface ConversationSidebarProps {
@@ -30,7 +30,7 @@ interface EntryProps {
 
 /** The two lines of an entry. The title line exists only when titles are on. */
 function EntryText({ item, language, showTitles, now }: EntryProps) {
-  const strings = getStrings(language)
+  const strings = getSidebarStrings(language)
   const documents = strings.conversationDocuments(item.document_count)
   const time = formatConversationTime(item.updated_at, language, now)
   return (
@@ -68,7 +68,7 @@ export default function ConversationSidebar({
   isBusy,
   now = new Date(),
 }: ConversationSidebarProps) {
-  const strings = getStrings(language)
+  const strings = getSidebarStrings(language)
   return (
     <nav aria-label={strings.conversationsNavLabel} className="flex h-full flex-col gap-3">
       <div className="flex flex-col gap-2">

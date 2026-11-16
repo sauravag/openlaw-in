@@ -6,6 +6,7 @@ import AttachmentStatus, { hasAttachmentActivity } from "@/components/Attachment
 import AttachmentTray from "@/components/AttachmentTray";
 import ChatHeader from "@/components/ChatHeader";
 import ChatLayout from "@/components/ChatLayout";
+import ChatsButton from "@/components/ChatsButton";
 import HelplineStrip from "@/components/HelplineStrip";
 import Composer from "@/components/Composer";
 import MessageList from "@/components/MessageList";
@@ -268,6 +269,14 @@ function HomeSidebar({ page }: { page: HomeState }) {
   );
 }
 
+/** Mode B only, with the same early return as `HomeSidebar`, so the button
+ * and the sidebar copy it carries stay out of the Mode A build. */
+function HomeChatsButton({ page }: { page: HomeState }) {
+  if (!AUTH_ENABLED) return null;
+  const panel = page.conversationsPanel;
+  return <ChatsButton language={page.language} isOpen={panel.isOpen} onOpen={panel.open} />;
+}
+
 /**
  * The conversation interface, laid out as a chat (the owner's brief): header
  * at the top, the thread scrolling in the middle, the question box pinned at
@@ -303,9 +312,7 @@ export default function HomePage() {
           language={language}
           isHelpOpen={help.isOpen}
           onOpenHelp={help.open}
-          showConversationsButton={hasSidebar}
-          isConversationsOpen={conversationsPanel.isOpen}
-          onOpenConversations={conversationsPanel.open}
+          conversationsButton={hasSidebar ? <HomeChatsButton page={page} /> : null}
         />
       }
       leftPane={hasSidebar ? <HomeSidebar page={page} /> : null}
