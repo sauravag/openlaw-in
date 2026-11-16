@@ -50,7 +50,10 @@ even asked, so a classifier *outage* — an expired key, a rate limit, a
 transient network failure — would turn **every** ordinary question asked
 during that outage into a fabricated self-harm crisis, for as long as the
 outage lasts. Someone asking how to register a property would get suicide
-helplines and no legal answer at all. That is a worse failure mode than the
+helplines and (while a crisis still replaced the answer) no legal answer at
+all; even now that a crisis leads the answer rather than replacing it,
+suicide helplines heading every ordinary answer would be wrong. That is a
+worse failure mode than the
 one it was trying to prevent, and unlike a single missed crisis it is
 silent, sustained, and affects every user, not one.
 
@@ -115,13 +118,23 @@ or marriage.
 euphemisms such as "I want to end it all" or "I don't want to be here \
 anymore".
 
+These categories mean that a person — the user or someone they describe — \
+is being harmed or is in danger now, or is at ongoing risk. A question about \
+legal proceedings is "none" only when it describes no current, ongoing or \
+recent violence, threats, or fear for safety: a case already filed or \
+registered (divorce, dowry / Section 498A / BNS 85-86, a domestic-violence \
+complaint under the PWDV Act, maintenance, custody), court delays, bail, \
+evidence, or procedure. Abuse described as recent or continuing (for \
+example "last night", "yesterday", "still", "keeps"), or by someone who \
+still lives with or has access to the person, is a crisis even inside a \
+legal question.
+
 Respond with strict JSON only, matching this shape exactly:
 {"crisis": "domestic_violence" | "custodial_abuse" | "trafficking" | \
 "self_harm" | "none"}
 
-Use "none" only when the message shows no sign of any of the above. When \
-genuinely uncertain, prefer naming the closest category over "none": missing \
-a real crisis is far worse than one unnecessary helpline."""
+Use "none" when the message shows no sign of present or ongoing danger or \
+harm of the kinds above."""
 
 #: The classifier only ever emits one short JSON object, but 32 tokens (the
 #: previous value) sat below the documented ~256 guidance for a

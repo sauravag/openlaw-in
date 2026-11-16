@@ -18,13 +18,14 @@ vi.mock("@/lib/api", async () => {
   return {
     ...actual,
     readConversation: vi.fn(),
-    listConversations: vi.fn(async () => ({
-      kind: "list" as const,
-      data: { conversations: [], next_offset: null },
-    })),
     readAuthAgreement: vi.fn(),
   };
 });
+
+// The sidebar's list request (Mode B, signed in): an empty list.
+vi.mock("@/lib/sidebarConversations", () => ({
+  fetchSidebarPage: vi.fn(async () => ({ kind: "page" as const, conversations: [], nextOffset: null })),
+}));
 const mockedAgreement = vi.mocked(readAuthAgreement);
 const banner = () => getStrings("en").misconfiguredBanner(ANONYMOUS_UPLOAD_TTL_HOURS);
 

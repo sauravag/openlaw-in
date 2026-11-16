@@ -26,6 +26,11 @@ export const FORBIDDEN = [
   "/api/auth/migrate",
   "/account/delete",
   "/signup",
+  // The sidebar's titled fetch lives in a Mode B-only module.
+  "include_titles",
+  // Sidebar copy lives in the Mode B-only `lib/sidebarStrings.ts`; this label
+  // appears nowhere else, so finding it means the sidebar reached Mode A.
+  "Show titles",
 ];
 
 const STATIC_EXTENSIONS = /\.(js|css|html|json|txt|map)$/;

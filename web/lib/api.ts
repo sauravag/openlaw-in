@@ -3,7 +3,6 @@ import { getFallbackHelplineSet } from "./fallbackHelplines";
 import { getStrings } from "./strings";
 import type {
   AnswerData,
-  ConversationListData,
   ConversationListItemData,
   ConversationViewData,
   DocumentCitationCard,
@@ -590,11 +589,7 @@ export async function readConversation(
   };
 }
 
-export type ConversationListOutcome =
-  | { kind: "list"; data: ConversationListData }
-  | { kind: "refused"; status: number; data: RefusalData };
-
-function isConversationListItem(value: unknown): value is ConversationListItemData {
+export function isConversationListItem(value: unknown): value is ConversationListItemData {
   if (typeof value !== "object" || value === null) return false;
   const item = value as Record<string, unknown>;
   return (
@@ -603,35 +598,6 @@ function isConversationListItem(value: unknown): value is ConversationListItemDa
     typeof item.updated_at === "string" &&
     typeof item.document_count === "number"
   );
-}
-
-function isConversationList(value: unknown): value is ConversationListData {
-  if (typeof value !== "object" || value === null) return false;
-  const list = value as Record<string, unknown>;
-  const nextOffset = list.next_offset;
-  return (
-    Array.isArray(list.conversations) &&
-    list.conversations.every(isConversationListItem) &&
-    (nextOffset === null || typeof nextOffset === "number")
-  );
-}
-
-/**
- * The signed-in owner's own conversations (final review H1b), metadata only.
- * **Total: never throws.** Mode B only; a 401 means the session is absent or
- * lapsed, and comes back as a help-carrying refusal like every other.
- */
-export async function listConversations(params: DeleteParams): Promise<ConversationListOutcome> {
-  const response = await send(
-    `${CONVERSATIONS_ENDPOINT}?language=${encodeURIComponent(params.language)}`,
-    { method: "GET", credentials: "include", signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
-  );
-  if (response === null) {
-    return { kind: "refused", status: NO_RESPONSE_STATUS, data: fallbackRefusalData(params.language) };
-  }
-  const body: unknown = await response.json().catch(() => null);
-  if (response.ok && isConversationList(body)) return { kind: "list", data: body };
-  return { kind: "refused", status: response.status, data: refusalFrom(body, params.language) };
 }
 
 /** The Mode B route that re-runs the anonymous-to-account migration. */

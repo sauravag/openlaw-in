@@ -597,8 +597,8 @@ def crisis_card_helplines(
 def _render_answer(answer: ValidatedAnswer, language: str) -> str:
     """Render a live turn's legal answer through `render_claim_answer`.
 
-    NOT called for a crisis turn -- see `to_response`, which branches before
-    this function ever runs (H3).
+    NOT called for a crisis turn that carries no legal answer -- see
+    `to_response`, which branches before this function ever runs (H3).
 
     When the generator reported that no excerpt addresses the person's goal,
     the fixed `_GOAL_NOT_COVERED` notice leads the claims. It is added only
@@ -662,17 +662,15 @@ def _crisis_only_response(
     quota_remaining: int,
     conversation_id: str,
 ) -> AskResponse:
-    """Render a question-derived crisis short-circuit (Task 4 review, H3).
+    """Render a question-derived crisis turn that carries NO legal answer
+    (Task 4 review, H3) -- the helpline-only fallback, or a turn where no
+    claim survived validation.
 
     `answer` leads with `_HELP_IS_AVAILABLE` and then the helpline text, and
     `is_answerable` is reported True -- see `to_response`'s docstring for why
     this turn is complete and correct despite carrying no cited legal claim.
-
-    `document_answer` and `document_citations` are spelled out as empty rather
-    than left to their defaults: this short-circuit happens before generation,
-    so no document claim was ever produced even when a document was attached,
-    and this is the one branch where "the turn carries no legal answer" and
-    "the turn carries no document answer" have to be true together.
+    A document answer, if the document pass produced one, still renders in
+    its own field.
     """
     answer_text, help_text = render_crisis_answer(
         localised.crisis, localised.language
@@ -689,9 +687,28 @@ def _crisis_only_response(
         quota_remaining=quota_remaining,
         conversation_id=conversation_id,
         turn_index=localised.turn_index,
-        document_answer=None,
-        document_citations=(),
+        document_answer=render_document_claims(
+            localised.document_claims, localised.language
+        ),
+        document_citations=_document_citation_cards(localised),
     )
+
+
+def _crisis_help(localised: LocalisedAnswer) -> str | None:
+    """The helpline prose for `AskResponse.crisis_response`, or `None`.
+
+    A QUESTION-derived crisis wins (it is the person telling us, now, that
+    they are in danger). Otherwise the two alongside-strength verdicts -- an
+    attached document's stored one and a crisis disclosed in an EARLIER
+    turn's question (CF-18, reversed -- see `LocalisedAnswer.history_crisis`)
+    -- resolve by severity rather than by which layer found one. In every
+    case the pipeline has already prepended the numbers to `helplines` and
+    the prose to `footer`.
+    """
+    shown = localised.crisis or most_urgent_crisis(
+        (localised.document_crisis, localised.history_crisis)
+    )
+    return crisis_text(shown, localised.language) if shown is not None else None
 
 
 def to_response(
@@ -703,20 +720,23 @@ def to_response(
 ) -> AskResponse:
     """Map a localised answer onto the API response.
 
+    **A question-derived crisis turn carries the crisis response AND the
+    legal answer** (the owner's ruling: "Even if the app detects a crisis,
+    it should provide the crisis response and also answer the question").
+    `crisis_response` carries the category's helpline prose -- the interface
+    renders it ABOVE everything else -- and `answer`, `sources` and the
+    document fields render exactly as on any other turn.
+
     **A crisis turn is never rendered as unanswerable (Task 4 review, H3).**
-    `localised.answer` on a crisis short-circuit is always the fixed,
-    generation-free `_UNANSWERABLE` from `openlaw.language.pipeline`
-    (`is_answerable=False`, no claims) -- correct internally (no legal claim
-    was ever generated or validated), but wrong to surface verbatim as
-    `answer`: the most safety-critical response this system produces would
-    lead with "We could not find a verifiable answer", a discouraging
-    falsehood, on the one turn where real help IS being given. When
-    `localised.crisis` is set, `answer` instead carries `_HELP_IS_AVAILABLE`
-    plus the same helpline text as `crisis_response` (a client rendering
-    `answer` alone -- the naive, most likely default -- still sees the actual
-    help), and `is_answerable` is reported `True`: this IS the complete,
-    correct response for this turn, even though it contains no cited legal
-    claim.
+    When a crisis turn carries no legal answer (the helpline-only fallback
+    after a failed generation, or nothing surviving validation),
+    `localised.answer` is unanswerable -- but surfacing that verbatim would
+    lead the most safety-critical response this system produces with "We
+    could not find a verifiable answer", a discouraging falsehood, on the
+    one turn where real help IS being given. So `answer` instead carries
+    `_HELP_IS_AVAILABLE` plus the same helpline text as `crisis_response`
+    (a client rendering `answer` alone still sees the actual help), and
+    `is_answerable` is reported `True`.
 
     **An ALONGSIDE-strength crisis is the other shape, and takes the ordinary
     branch on purpose (Plan 6 Task 10, ruling 1).** Two verdicts arrive at
@@ -732,7 +752,7 @@ def to_response(
     turn's, and the helpline card is attached beside them through the fields
     that already exist for it: `crisis_response` (set below) plus
     `helplines`/`footer`, which
-    `openlaw.language.pipeline._with_document_crisis` has already prepended
+    `openlaw.language.pipeline._with_alongside_crisis` has already prepended
     the category's numbers to. Branching on `document_crisis` the way this
     function branches on `crisis` would throw away the answer that path
     exists to preserve.
@@ -750,23 +770,11 @@ def to_response(
     test_document_claims_render_apart_from_legal_claims`, which fails if
     either half of that leaks into the other.
     """
-    if localised.crisis is not None:
+    if localised.crisis is not None and not localised.answer.is_answerable:
         return _crisis_only_response(
             localised, corpus_version, quota_remaining, conversation_id
         )
 
-    # Both alongside-strength verdicts reach this field, resolved by severity
-    # rather than by which layer found one: an attached document's stored
-    # verdict and a crisis disclosed in an EARLIER turn's question (CF-18,
-    # reversed -- see `LocalisedAnswer.history_crisis`). Neither replaces the
-    # legal answer; `openlaw.language.pipeline._with_alongside_crisis` has
-    # already prepended the numbers to `helplines` and the prose to `footer`.
-    alongside = most_urgent_crisis(
-        (localised.document_crisis, localised.history_crisis)
-    )
-    document_help = (
-        crisis_text(alongside, localised.language) if alongside is not None else None
-    )
     return AskResponse(
         answer=_render_answer(localised.answer, localised.language),
         sources=[
@@ -786,7 +794,7 @@ def to_response(
         language=localised.language,
         corpus_version=corpus_version,
         footer=localised.footer,
-        crisis_response=document_help,
+        crisis_response=_crisis_help(localised),
         helplines=localised.helplines,
         is_answerable=localised.answer.is_answerable,
         quota_remaining=quota_remaining,

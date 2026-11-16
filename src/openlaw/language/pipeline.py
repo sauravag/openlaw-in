@@ -3,15 +3,17 @@
 Order is load-bearing::
 
     detect language
-    -> crisis-check the ORIGINAL text (regex, then classifier)  [short-circuits]
+    -> crisis-check the ORIGINAL text (regex, then classifier)
     -> translate the query to English
-    -> crisis-check the TRANSLATED text (regex ONLY)            [short-circuits]
+    -> crisis-check the TRANSLATED text (regex ONLY)
     -> retrieve (re-fetching the chunks earlier turns' claims cite)
     -> generate the LEGAL answer     (never shown the document)
     -> generate the DOCUMENT addendum (never shown the law; only when
                                        excerpts were selected)
     -> VALIDATE both
     -> translate the answer (both claim lists, in two separate calls)
+    -> attach a QUESTION-derived crisis AHEAD of the answer (its helplines
+       lead the footer and `crisis` is set) -- never instead of it
     -> attach the STORED crisis verdict of every attached document
        (regex-only, computed once at upload, re-read every turn)
        ALONGSIDE the answer -- never instead of it
@@ -25,10 +27,15 @@ turn, and the fourth turn gets exactly the same three checks the first one
 did.
 
 **Crisis routing runs first, and every time before `retriever.retrieve` is
-ever called.** `openlaw.answers.generate`'s module docstring establishes why
-crisis routing must run before retrieval and generation at all: a citizen in
-danger should never wait on a round trip whose output would be discarded
-anyway. Checking the original text once is not enough here, though. The
+ever called.** A detected crisis no longer replaces the answer (the owner's
+ruling: "Even if the app detects a crisis, it should provide the crisis
+response and also answer the question"): its helplines lead the result and
+the legal question is still answered. If anything after detection fails on
+a crisis turn -- the query translation, retrieval, generation, or the
+answer translation -- the failure is logged at `ERROR` and the turn falls
+back to the helpline-only `_crisis_answer`, so the helplines are never lost
+to an outage, including a broken API key: the free regex layer alone still
+routes the person. Checking the original text once is not enough here, though. The
 regex layer in `openlaw.answers.escalation` matches English, transliterated
 Hinglish, and a narrow, precision-tuned Devanagari set (ruling 2), but
 misses every other Indic script entirely, and Hindi phrasings outside that
@@ -46,17 +53,18 @@ second, free chance for the regex layer, now reading English -- a language
 it can actually match -- which is the entire, narrow point of checking
 twice. Running it BEFORE `retriever.retrieve` (rather than relying on
 `generate_answer`'s own built-in check, which would only run after this
-module had already called the retriever) is what keeps "before retrieval"
-true even for a crisis the regex only catches after translation. A failed
-translation can never suppress a helpline either way: `translate_query`
-degrades to the original text on any failure, which the first check has
-already cleared.
+module had already called the retriever) is what lets a crisis the regex
+only catches after translation lead that turn and get its fallback
+protection. A failed translation can never suppress a helpline either way:
+`translate_query` degrades to the original text on an empty completion, and
+on a crisis turn any raised failure falls back to the helplines.
 
 **A document-derived crisis rides ALONGSIDE the answer; a question-derived
-one replaces it.** The asymmetry is in the strength of the evidence, and it
-is the whole design (Plan 6 Task 10, ruling 1). A question saying "my
-husband beats me" is the person telling us, now, that they are in danger:
-short-circuiting to helplines is right, and it is free. A crisis phrase
+one LEADS it.** The asymmetry is in the strength of the evidence (Plan 6
+Task 10, ruling 1). A question saying "my husband beats me" is the person
+telling us, now, that they are in danger: her helplines come first and
+`crisis` is set, so the API renders them above the legal answer (and falls
+back to them alone if the answer cannot be produced). A crisis phrase
 inside an uploaded document is much weaker -- it may be historical (an FIR
 from two years ago, attached for context), incidental (a tenancy agreement
 with a harassment clause), or about someone else entirely. Replacing the
@@ -68,19 +76,15 @@ answered normally AND `_with_alongside_crisis` prepends the crisis response
 and its helplines to the footer, setting `LocalisedAnswer.document_crisis`
 rather than `crisis`.
 
-That means a document-derived crisis costs a generation call. It is not a
-regression: the question was going to be answered anyway. The FREE
-short-circuit is preserved exactly where it matters -- the question-derived
-path, the one that must keep working with a broken API key. A
-question-derived crisis still returns before `translate_query`, before
-`retriever.retrieve`, and before any generation, and a document attached to
-that same turn changes none of that.
+A question-derived crisis now costs the same calls as any other turn,
+since the question is answered too. What must keep working with a broken
+API key still does: detection's regex layer is free, and the helpline-only
+fallback needs no model call.
 
 **When BOTH fire with different categories, both are surfaced -- the
 question's first (ruling 1, revised).** Withholding Tele-MANAS from a woman
 asking about domestic violence whose attached document indicates self-harm
-risk is not a defensible default, and on an already-short-circuited turn the
-second category costs nothing to add. The question's category stays primary:
+risk is not a defensible default. The question's category stays primary:
 its prose leads, its numbers come first, and the response still speaks to
 what she actually said. The document's category follows, contributing its
 numbers rather than taking over the message, and the combined list is
@@ -168,7 +172,7 @@ them here would have. Neither of the other two checks can itself produce a
 classifier failure -- the stored document verdict and the translated-text
 regex never call a model -- so the only source is the one classifier call
 on the original text, and a crisis found by EITHER of the other two must
-still carry that failure out rather than letting the short-circuit swallow
+still carry that failure out rather than letting the crisis path swallow
 it.
 
 **Translation of the ANSWER happens strictly after generation returns**,
@@ -200,13 +204,15 @@ its vector, and gates graph expansion on `Settings.graph_expansion_enabled`
 place for it to drift out of sync.
 """
 
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from openlaw.answers.crisis_classifier import (
     ClassifierFailureEvent,
-    CrisisDetection,
     detect_crisis_with_classifier,
 )
 from openlaw.answers.escalation import (
@@ -236,6 +242,8 @@ from openlaw.language.detect import detect_language
 from openlaw.language.glossary import Glossary
 from openlaw.language.translate import translate_answer, translate_query
 from openlaw.retrieval.context import RetrievalContext
+
+logger = logging.getLogger(__name__)
 
 
 class Retriever(Protocol):
@@ -293,9 +301,9 @@ class LocalisedAnswer(BaseModel):
     meaning survived translation -- neither the original question nor the
     translated answer alone is enough for that judgement. It carries the
     same "only `claims` and `sources` are safe to render" rule as `answer`.
-    For a crisis short-circuit (no generation ever ran) and for an English
-    question (`translate_answer` is a no-op there), `english_answer` and
-    `answer` are equal.
+    For a helpline-only crisis fallback (no answer could be generated) and
+    for an English question (`translate_answer` is a no-op there),
+    `english_answer` and `answer` are equal.
 
     `classifier_failures` carries any `ClassifierFailureEvent` recorded by
     the original-text crisis check (see the module docstring for why the
@@ -315,11 +323,12 @@ class LocalisedAnswer(BaseModel):
     language: str
     english_query: str
     crisis: CrisisKind | None = None
-    #: Set when a crisis was found ONLY in an attached document, never in
-    #: the question (Plan 6 Task 10, ruling 1). Distinct from `crisis`,
-    #: which means "this turn was short-circuited and carries no legal
-    #: answer": a `document_crisis` turn carries a complete, ordinary legal
-    #: answer AND the helpline card, because a crisis phrase inside an
+    #: Set when a crisis was found in an attached document (Plan 6 Task 10,
+    #: ruling 1). Distinct from `crisis`, which means "the QUESTION signalled
+    #: danger, so its helplines lead this turn" (the legal answer follows
+    #: when one could be produced): a `document_crisis`-only turn carries a
+    #: complete, ordinary legal answer AND the helpline card, because a
+    #: crisis phrase inside an
     #: uploaded file is weaker evidence than a person saying it -- it may be
     #: historical, incidental, or about someone else. Suppressing the
     #: helplines would be wrong; so would replacing the question she
@@ -327,12 +336,14 @@ class LocalisedAnswer(BaseModel):
     document_crisis: CrisisKind | None = None
     #: Set when a crisis phrase was found in the QUESTION OF AN EARLIER TURN
     #: of this conversation (carry-forward 18, reversed by the final
-    #: whole-plan review). Document strength, deliberately: CF-18 originally
-    #: ruled this question-strength, which would have short-circuited every
-    #: turn after a disclosure and so suppressed the legal answer the person
-    #: came back for -- the exact harm ruling 1 exists to prevent. "A
-    #: disclosure on turn one is historical by turn four", which is the same
-    #: category of weaker evidence as a document's verdict. A SECOND field
+    #: whole-plan review). Document strength, deliberately: "a disclosure on
+    #: turn one is historical by turn four", which is the same category of
+    #: weaker evidence as a document's verdict, so its category rides
+    #: ALONGSIDE this turn's answer rather than leading it -- the lead slot
+    #: belongs to what the person says now. (CF-18 originally ruled it
+    #: question strength, back when that meant short-circuiting every later
+    #: turn; a crisis no longer replaces the answer, so the remaining reason
+    #: is evidence strength, not keeping the answer.) A SECOND field
     #: rather than a reuse of `document_crisis`: both ride alongside, but the
     #: provenance of each verdict survives, and
     #: `openlaw.api.schemas.to_response` renders the more urgent of the two.
@@ -353,7 +364,7 @@ class LocalisedAnswer(BaseModel):
     classifier_failures: tuple[ClassifierFailureEvent, ...] = ()
     #: This turn's 0-based position in its conversation -- `len(history)`,
     #: set by `answer_in_conversation` on every return including the crisis
-    #: short-circuits. A single-shot `answer_in_language` turn is turn 0.
+    #: fallbacks. A single-shot `answer_in_language` turn is turn 0.
     #: Carried so the caller persisting this turn (Task 14) does not have to
     #: recount, and so an out-of-order write is detectable.
     turn_index: int = 0
@@ -379,12 +390,76 @@ class LocalisedAnswer(BaseModel):
         return self.answer.document_citations
 
 
-#: The fixed, generation-free answer returned on a crisis short-circuit --
+#: The fixed, generation-free answer returned on a crisis fallback --
 #: `unverified_summary` is `None` and there are no claims or sources, matching
 #: `openlaw.answers.generate._UNANSWERABLE_ANSWER` exactly. Built locally
 #: (rather than importing that private constant) since `ValidatedAnswer` is
 #: the public type this module already depends on.
 _UNANSWERABLE = ValidatedAnswer(unverified_summary=None, is_answerable=False)
+
+
+def _question_crisis_card(
+    crisis: CrisisKind,
+    document_crisis: CrisisKind | None,
+    earlier_crisis: CrisisKind | None,
+    language: str,
+) -> tuple[str, tuple[Helpline, ...]]:
+    """Return `(prose, numbers)` for a QUESTION-derived crisis turn.
+
+    The question's category leads; a DIFFERENT category from an attached
+    document or an earlier turn follows it (ruling 1, revised). A woman
+    asking about domestic violence whose attached document indicates
+    self-harm risk must not be given the DV helpline and withheld
+    Tele-MANAS; self-harm sits at the top of `_SEVERITY_ORDER` precisely
+    because it is the most time-critical. The QUESTION's category stays
+    primary so the response still speaks to what she actually said.
+
+    `earlier_crisis` -- a disclosure in an EARLIER turn's own question -- is
+    treated exactly like the document verdict, for the reason
+    `LocalisedAnswer.history_crisis` records. The two resolve by severity
+    (`most_urgent_crisis`), never by argument order.
+
+    Rendered in `language` from STATIC, hand-authored strings (Task 6 fix
+    round, H3), never via live translation, so no model failure can hold
+    this content hostage.
+    """
+    alongside = most_urgent_crisis((document_crisis, earlier_crisis))
+    secondary = alongside if alongside is not crisis else None
+    kinds = [kind for kind in (crisis, secondary) if kind is not None]
+    prose = "\n\n".join(crisis_response(kind, language) for kind in kinds)
+    numbers: tuple[Helpline, ...] = ()
+    for kind in kinds:
+        numbers += crisis_helplines(kind, language)
+    return prose, numbers
+
+
+def _with_question_crisis(
+    answer: LocalisedAnswer,
+    crisis: CrisisKind,
+    document_crisis: CrisisKind | None,
+    earlier_crisis: CrisisKind | None,
+) -> LocalisedAnswer:
+    """Return `answer` with a QUESTION-derived crisis LEADING it.
+
+    The crisis prose opens `footer` (ahead of the standard escalation
+    footer), its numbers open `helplines`, and `crisis` is set so
+    `openlaw.api.schemas.to_response` renders the crisis response above the
+    legal answer. The answer itself is left untouched. Numbers are
+    deduplicated (`dedupe_helplines`): 112 is in three of the four category
+    sets, and the custodial set contains the NALSA number itself.
+    """
+    prose, numbers = _question_crisis_card(
+        crisis, document_crisis, earlier_crisis, answer.language
+    )
+    return answer.model_copy(
+        update={
+            "crisis": crisis,
+            "document_crisis": document_crisis,
+            "history_crisis": earlier_crisis,
+            "footer": f"{prose}\n\n{answer.footer}",
+            "helplines": dedupe_helplines(numbers + answer.helplines),
+        }
+    )
 
 
 def _crisis_answer(
@@ -397,59 +472,28 @@ def _crisis_answer(
     turn_index: int = 0,
     earlier_crisis: CrisisKind | None = None,
 ) -> LocalisedAnswer:
-    """Return the immediate, generation-free result for a crisis question.
+    """Return the helpline-only FALLBACK for a crisis question whose legal
+    answer could not be produced.
 
     Mirrors `openlaw.answers.generate._crisis_result`: the footer leads with
     the category-specific helpline (`crisis_response`) followed by the
-    standard `escalation_footer`, never the standard footer alone.
-    Rendered in `language` when it is `"hi"`, English otherwise (Task 6 fix
-    round, H3) -- but never via live translation: both functions select
-    between two STATIC, hand-authored strings (see their docstrings and
-    `openlaw.answers.escalation`'s Hindi dict comment), so a translation
-    failure can never hold this content hostage the way a model call could.
+    standard `escalation_footer`, never the standard footer alone -- the
+    same composition `_with_question_crisis` puts ahead of a real answer.
     `classifier_failures` is forwarded unconditionally -- a crisis found by
     the translated-text regex does not erase a classifier failure the
     original-text check already recorded.
-
-    **A document verdict naming a DIFFERENT category is surfaced too, second
-    (ruling 1, revised).** A woman asking about domestic violence whose
-    attached document indicates self-harm risk must not be given the DV
-    helpline and withheld Tele-MANAS: the turn is already short-circuited,
-    so adding the second category's numbers costs nothing, and self-harm
-    sits at the top of `_SEVERITY_ORDER` precisely because it is the most
-    time-critical. The QUESTION's category stays primary -- its prose leads
-    and its numbers come first -- so the response still speaks to what she
-    actually said; the document's category follows it rather than taking
-    over. Numbers are deduplicated (`dedupe_helplines`): 112 is in three of
-    the four category sets, and the custodial set contains the NALSA number
-    itself, so overlap is the normal case and not an edge one.
-
-    `earlier_crisis` -- a disclosure in an EARLIER turn's own question -- is
-    treated exactly like the document verdict here, for the reason
-    `LocalisedAnswer.history_crisis` records. The two resolve by severity
-    (`most_urgent_crisis`), never by argument order, so the secondary slot
-    holds the more urgent of them rather than whichever was passed first.
     """
-    alongside = most_urgent_crisis((document_crisis, earlier_crisis))
-    secondary = alongside if alongside is not crisis else None
-    responses = [crisis_response(kind, language) for kind in (crisis, secondary) if kind]
-    responses.append(escalation_footer(state, language))
-    numbers = crisis_helplines(crisis, language)
-    if secondary is not None:
-        numbers += crisis_helplines(secondary, language)
-    return LocalisedAnswer(
+    bare = LocalisedAnswer(
         answer=_UNANSWERABLE,
         english_answer=_UNANSWERABLE,
         language=language,
         english_query=english_query,
-        crisis=crisis,
-        document_crisis=document_crisis,
-        history_crisis=earlier_crisis,
-        footer="\n\n".join(responses),
-        helplines=dedupe_helplines(numbers + (nalsa_helpline(language),)),
+        footer=escalation_footer(state, language),
+        helplines=(nalsa_helpline(language),),
         classifier_failures=classifier_failures,
         turn_index=turn_index,
     )
+    return _with_question_crisis(bare, crisis, document_crisis, earlier_crisis)
 
 
 def resolve_document_crisis(
@@ -497,10 +541,8 @@ def _with_alongside_crisis(
     recorded on their own fields.
 
     `document_crisis`/`history_crisis` are set, NOT `crisis`: `crisis` means
-    "this turn was short-circuited and carries no legal answer", and
-    `openlaw.api.schemas.to_response` branches on exactly that to decide
-    whether to render claims and sources at all. Setting it here would throw
-    away the answer this path exists to preserve.
+    "the QUESTION signalled danger", which is stronger evidence and is
+    handled by `_with_question_crisis` instead.
     """
     alongside = most_urgent_crisis((document_crisis, earlier_crisis))
     if alongside is None:
@@ -519,71 +561,103 @@ def _with_alongside_crisis(
     )
 
 
-def _clear_crisis_and_translate(
-    question: str,
-    language: str,
-    adapter: LLMAdapter,
-    registry: ModelRegistry,
-    state: str | None,
-    document_crisis: CrisisKind | None,
-    turn_index: int = 0,
-    earlier_crisis: CrisisKind | None = None,
-) -> LocalisedAnswer | tuple[str, tuple[ClassifierFailureEvent, ...]]:
-    """Run both question-side crisis checks and, if neither fires, translate.
+@dataclass(frozen=True)
+class _Turn:
+    """Everything one turn needs after crisis detection, bundled so the
+    ordinary path and the crisis path run the same `_answer_turn`."""
 
-    The first check is the full two-layer `detect_crisis_with_classifier` on
-    `question` itself. The second, on the translated `english_query`, is the
-    bare regex `detect_crisis` -- see the module docstring for why the
-    classifier is not asked a second time.
+    question: str
+    language: str
+    retriever: ConversationRetriever
+    adapter: LLMAdapter
+    registry: ModelRegistry
+    glossary: Glossary
+    history: tuple[HistoryTurn, ...]
+    document_excerpts: tuple[DocumentExcerpt, ...]
+    document_crisis: CrisisKind | None
+    earlier_crisis: CrisisKind | None
+    state: str | None
+    turn_index: int
+    classifier_failures: tuple[ClassifierFailureEvent, ...]
 
-    Both of these are QUESTION-side and about THIS turn: the person telling
-    us, now, that they are in danger. Either one short-circuits the turn, and
-    `document_crisis`/`earlier_crisis` are passed along so a second,
-    different category found in an attached document or in an earlier turn's
-    question still contributes its numbers to that response (see
-    `_crisis_answer`). When neither fires, those weaker verdicts are handled
-    by the caller after generation instead (`_with_alongside_crisis`).
 
-    Returns a crisis `LocalisedAnswer` the moment either check fires --
-    before `translate_query` is even called for the first, and before the
-    caller may touch `retriever.retrieve` for either. Otherwise returns
-    `(english_query, classifier_failures)`, where `classifier_failures` is
-    whatever the (only possible) classifier call above recorded, so the
-    caller can forward it onto generation and, eventually, the returned
-    `LocalisedAnswer` without asking the classifier again.
+def _answer_turn(turn: _Turn, english_query: str) -> LocalisedAnswer:
+    """Retrieve, generate, validate and translate one turn's answer.
+
+    Carries the standard escalation footer and the NALSA number only; the
+    caller attaches any crisis (`_with_question_crisis` or
+    `_with_alongside_crisis`). May raise on an adapter or retriever failure.
     """
-    original_detection: CrisisDetection = detect_crisis_with_classifier(
-        question, adapter, registry
+    # Both namespaces are selected from the TRANSLATED query, never the raw
+    # one (HIGH-1) -- see `answer_in_conversation`'s docstring.
+    document_context = select_excerpts(english_query, turn.document_excerpts)
+    context = turn.retriever.retrieve(english_query, carried_chunk_ids(turn.history))
+    result = generate_turn(
+        english_query,
+        context,
+        turn.adapter,
+        turn.registry,
+        escalation_footer(turn.state, turn.language),
+        turn.classifier_failures,
+        document_context,
+        turn.history,
     )
-    failures = _failures_of(original_detection)
-    if original_detection.crisis is not None:
-        return _crisis_answer(
-            original_detection.crisis,
-            language,
-            "",
-            state,
-            failures,
-            document_crisis,
-            turn_index,
-            earlier_crisis,
+    localised = translate_answer(
+        result.answer, turn.language, turn.adapter, turn.registry, turn.glossary
+    )
+    return LocalisedAnswer(
+        answer=localised,
+        english_answer=result.answer,
+        language=turn.language,
+        english_query=english_query,
+        footer=result.footer,
+        # Every footer cites the NALSA number, crisis or not (Task 6 fix
+        # round, C2) -- structured here so the frontend never has to
+        # pattern-match it out of `footer`'s prose.
+        helplines=(nalsa_helpline(turn.language),),
+        events=result.events,
+        classifier_failures=result.classifier_failures,
+        turn_index=turn.turn_index,
+    )
+
+
+def _answer_crisis_turn(
+    turn: _Turn, crisis: CrisisKind, english_query: Callable[[], str]
+) -> LocalisedAnswer:
+    """Answer a QUESTION-derived crisis turn: helplines first, then the law.
+
+    `english_query` is called inside the guarded block, so a failed query
+    translation is covered too. ANY failure from here on is logged at
+    `ERROR` and replaced by the helpline-only `_crisis_answer` -- the
+    helplines must never be lost to an outage in the legal half. The
+    fallback still reports the translated query when one was obtained before
+    the failure, and `""` when the translation itself failed.
+    """
+    translated = ""
+    try:
+        translated = english_query()
+        answered = _answer_turn(turn, translated)
+    except Exception as error:
+        logger.error(
+            "answer generation failed on a crisis turn; returning the crisis "
+            "response alone. crisis=%s error=%r",
+            crisis.value,
+            error,
+            exc_info=True,
         )
-
-    english_query = translate_query(question, language, adapter, registry)
-
-    translated_crisis = detect_crisis(english_query)
-    if translated_crisis is not None:
         return _crisis_answer(
-            translated_crisis,
-            language,
-            english_query,
-            state,
-            failures,
-            document_crisis,
-            turn_index,
-            earlier_crisis,
+            crisis,
+            turn.language,
+            translated,
+            turn.state,
+            turn.classifier_failures,
+            turn.document_crisis,
+            turn.turn_index,
+            turn.earlier_crisis,
         )
-
-    return english_query, failures
+    return _with_question_crisis(
+        answered, crisis, turn.document_crisis, turn.earlier_crisis
+    )
 
 
 def answer_in_conversation(
@@ -602,11 +676,12 @@ def answer_in_conversation(
 
     This is the whole multilingual pipeline, and `answer_in_language` is a
     special case of it rather than a parallel implementation: empty
-    history, no document. The order the module docstring fixes is unchanged
-    and runs on every turn -- crisis routing first, on the original text and
-    then on the translation, before `retriever.retrieve` is reached; a
-    question-derived crisis still short-circuits with zero model calls, on
-    turn five exactly as on turn one.
+    history, no document. The order the module docstring fixes runs on
+    every turn -- crisis routing first, on the original text and then on the
+    translation, before `retriever.retrieve` is reached. A question-derived
+    crisis leads the turn and the question is still answered
+    (`_answer_crisis_turn`), on turn five exactly as on turn one; if the
+    answer cannot be produced, the helplines are returned alone.
 
     `history` is the conversation so far, as `HistoryTurn`s -- validated
     claims and the person's own questions, never model prose
@@ -660,53 +735,42 @@ def answer_in_conversation(
     `LocalisedAnswer.history_crisis` for why question strength was harmful.
 
     `turn_index` on the result is `len(history)`, on every return path
-    including both crisis short-circuits.
+    including the crisis fallbacks.
     """
     target = language or detect_language(question)
-    turn_index = len(history)
-    earlier_crisis = history_crisis(history)
-
-    cleared = _clear_crisis_and_translate(
-        question, target, adapter, registry, state, document_crisis,
-        turn_index, earlier_crisis,
-    )
-    if isinstance(cleared, LocalisedAnswer):
-        return cleared
-    english_query, classifier_failures = cleared
-
-    # Both namespaces are selected from the TRANSLATED query, never the raw
-    # one (HIGH-1) -- see this function's docstring on `document_excerpts`.
-    document_context = select_excerpts(english_query, document_excerpts)
-    context = retriever.retrieve(english_query, carried_chunk_ids(history))
-    footer = escalation_footer(state, target)
-    result = generate_turn(
-        english_query,
-        context,
-        adapter,
-        registry,
-        footer,
-        classifier_failures,
-        document_context,
-        history,
-    )
-    localised = translate_answer(result.answer, target, adapter, registry, glossary)
-
-    answered = LocalisedAnswer(
-        answer=localised,
-        english_answer=result.answer,
+    # The first check: the full two-layer check on the ORIGINAL text. The
+    # second, on the translation, is the bare regex -- see the module
+    # docstring for why the classifier is not asked twice.
+    original = detect_crisis_with_classifier(question, adapter, registry)
+    turn = _Turn(
+        question=question,
         language=target,
-        english_query=english_query,
-        crisis=result.crisis,
-        footer=result.footer,
-        # Every footer cites the NALSA number, crisis or not (Task 6 fix
-        # round, C2) -- structured here so the frontend never has to
-        # pattern-match it out of `footer`'s prose.
-        helplines=(nalsa_helpline(target),),
-        events=result.events,
-        classifier_failures=result.classifier_failures,
-        turn_index=turn_index,
+        retriever=retriever,
+        adapter=adapter,
+        registry=registry,
+        glossary=glossary,
+        history=history,
+        document_excerpts=document_excerpts,
+        document_crisis=document_crisis,
+        earlier_crisis=history_crisis(history),
+        state=state,
+        turn_index=len(history),
+        classifier_failures=_failures_of(original),
     )
-    return _with_alongside_crisis(answered, document_crisis, earlier_crisis)
+    if original.crisis is not None:
+        return _answer_crisis_turn(
+            turn,
+            original.crisis,
+            lambda: translate_query(question, target, adapter, registry),
+        )
+
+    english_query = translate_query(question, target, adapter, registry)
+    translated_crisis = detect_crisis(english_query)
+    if translated_crisis is not None:
+        return _answer_crisis_turn(turn, translated_crisis, lambda: english_query)
+
+    answered = _answer_turn(turn, english_query)
+    return _with_alongside_crisis(answered, document_crisis, turn.earlier_crisis)
 
 
 class _SingleTurnRetriever:

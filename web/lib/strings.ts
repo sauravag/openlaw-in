@@ -169,11 +169,6 @@ export interface UIStrings {
   deleteAccountInstruction: (word: string) => string;
   deleteAccountSubmit: string;
   deleteAccountCancel: string;
-  /** "Your conversations" (final review H1b): a signed-in owner's own list. */
-  yourConversationsHeading: string;
-  conversationListItem: (startedOn: string, documentCount: number) => string;
-  openConversationButton: string;
-  currentConversationLabel: string;
   /** Final review H1a: a kept conversation the lapsed session cannot show. */
   sessionEndedNotice: string;
   /** Final review H2: retrying a failed migration from the page. */
@@ -328,11 +323,6 @@ const EN: UIStrings = {
   deleteAccountInstruction: (word) => `To confirm, type the word ${word} below.`,
   deleteAccountSubmit: "Delete my account permanently",
   deleteAccountCancel: "No, keep my account",
-  yourConversationsHeading: "Your conversations",
-  conversationListItem: (startedOn, documentCount) =>
-    `Started ${startedOn} \u00b7 ${documentCount === 1 ? "1 document" : `${documentCount} documents`}`,
-  openConversationButton: "Open",
-  currentConversationLabel: "Open now",
   sessionEndedNotice: "Your session has ended, so this conversation is not shown. Sign in to see it again.",
   migrationRetryButton: "Try again",
   migrationRetrying: "Trying again\u2026",
@@ -472,11 +462,6 @@ const HI: UIStrings = {
   deleteAccountInstruction: (word) => `पुष्टि के लिए नीचे शब्द ${word} लिखें।`,
   deleteAccountSubmit: "मेरा खाता हमेशा के लिए हटाएं",
   deleteAccountCancel: "नहीं, मेरा खाता रहने दें",
-  yourConversationsHeading: "आपकी बातचीत",
-  conversationListItem: (startedOn, documentCount) =>
-    `${startedOn} को शुरू \u00b7 ${documentCount} दस्तावेज़`,
-  openConversationButton: "खोलें",
-  currentConversationLabel: "अभी खुली है",
   sessionEndedNotice: "आपका सत्र समाप्त हो गया है, इसलिए यह बातचीत नहीं दिख रही। इसे फिर से देखने के लिए साइन इन करें।",
   migrationRetryButton: "फिर से कोशिश करें",
   migrationRetrying: "फिर से कोशिश हो रही है\u2026",

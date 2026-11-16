@@ -2,9 +2,11 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "../page";
-import { listConversations, readConversation } from "@/lib/api";
+import { readConversation } from "@/lib/api";
+import { fetchSidebarPage } from "@/lib/sidebarConversations";
 import { CONVERSATION_KEPT_STORAGE_KEY, CONVERSATION_STORAGE_KEY } from "@/lib/thread";
 import { getStrings } from "@/lib/strings";
+import { getSidebarStrings } from "@/lib/sidebarStrings";
 import type { RefusalData } from "@/lib/types";
 
 // Final review H1: a lapsed session must not orphan a kept conversation, and a
@@ -25,13 +27,14 @@ vi.mock("@/lib/api", async () => {
     deleteDocument: vi.fn(),
     deleteConversation: vi.fn(),
     readConversation: vi.fn(),
-    listConversations: vi.fn(),
     readAuthAgreement: vi.fn(async () => null),
   };
 });
 
+vi.mock("@/lib/sidebarConversations", () => ({ fetchSidebarPage: vi.fn() }));
+
 const mockedRead = vi.mocked(readConversation);
-const mockedList = vi.mocked(listConversations);
+const mockedList = vi.mocked(fetchSidebarPage);
 
 const notFound: RefusalData = {
   detail: "We could not find that.",
@@ -66,10 +69,7 @@ const restoredView = {
 
 beforeEach(() => {
   mockedRead.mockReset();
-  mockedList.mockReset().mockResolvedValue({
-    kind: "list",
-    data: { conversations: [], next_offset: null },
-  });
+  mockedList.mockReset().mockResolvedValue({ kind: "page", conversations: [], nextOffset: null });
   window.sessionStorage.clear();
   window.history.replaceState(null, "", "/");
   mode.enabled = true;
@@ -149,23 +149,26 @@ describe("restoring a kept conversation after the session lapsed (Mode B)", () =
   });
 });
 
+/** The one openable entry in the sidebar's list. */
+async function findSidebarEntry(): Promise<HTMLElement> {
+  const nav = await screen.findByRole("navigation", { name: getSidebarStrings("en").conversationsNavLabel });
+  return within(await within(nav).findByRole("list")).findByRole("button");
+}
+
 describe("your conversations (Mode B, signed in)", () => {
   it("lists them, and opening one restores it and remembers it as kept", async () => {
     stubSession(true);
     mockedList.mockResolvedValue({
-      kind: "list",
-      data: {
-        conversations: [
-          { id: "conv-2", created_at: "2026-11-14T10:00:00+00:00", updated_at: "2026-11-14T10:00:00+00:00", document_count: 1 },
-        ],
-        next_offset: null,
-      },
+      kind: "page",
+      conversations: [
+        { id: "conv-2", created_at: "2026-11-14T10:00:00+00:00", updated_at: "2026-11-14T10:00:00+00:00", document_count: 1 },
+      ],
+      nextOffset: null,
     });
     mockedRead.mockResolvedValue(restoredView);
 
     render(<HomePage />);
-    const strings = getStrings("en");
-    await userEvent.click(await screen.findByRole("button", { name: strings.openConversationButton }));
+    await userEvent.click(await findSidebarEntry());
 
     expect(await screen.findByText("Earlier question?")).toBeInTheDocument();
     expect(mockedRead).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conv-2" }));
@@ -173,27 +176,25 @@ describe("your conversations (Mode B, signed in)", () => {
     expect(window.sessionStorage.getItem(CONVERSATION_KEPT_STORAGE_KEY)).toBe("1");
   });
 
-  it("closes the mobile help sheet when a conversation is opened from it (M6)", async () => {
+  it("closes the mobile conversations panel when a conversation is opened from it (M6)", async () => {
     stubSession(true);
     mockedList.mockResolvedValue({
-      kind: "list",
-      data: {
-        conversations: [
-          { id: "conv-2", created_at: "2026-11-14T10:00:00+00:00", updated_at: "2026-11-14T10:00:00+00:00", document_count: 0 },
-        ],
-        next_offset: null,
-      },
+      kind: "page",
+      conversations: [
+        { id: "conv-2", created_at: "2026-11-14T10:00:00+00:00", updated_at: "2026-11-14T10:00:00+00:00", document_count: 0 },
+      ],
+      nextOffset: null,
     });
     mockedRead.mockResolvedValue(restoredView);
     render(<HomePage />);
-    const strings = getStrings("en");
-    const openButton = await screen.findByRole("button", { name: strings.openConversationButton });
     await userEvent.click(
-      within(screen.getByRole("banner")).getByRole("link", { name: strings.helpButton }),
+      await within(screen.getByRole("banner")).findByRole("button", {
+        name: getSidebarStrings("en").conversationsMenuButton,
+      }),
     );
     expect(screen.getByRole("dialog")).toBeInTheDocument();
 
-    await userEvent.click(openButton);
+    await userEvent.click(await findSidebarEntry());
 
     expect(await screen.findByText("Earlier question?")).toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
@@ -208,7 +209,7 @@ describe("your conversations (Mode B, signed in)", () => {
 
     expect(mockedList).not.toHaveBeenCalled();
     expect(
-      screen.queryByRole("heading", { name: getStrings("en").yourConversationsHeading }),
+      screen.queryByRole("navigation", { name: getSidebarStrings("en").conversationsNavLabel }),
     ).not.toBeInTheDocument();
   });
 

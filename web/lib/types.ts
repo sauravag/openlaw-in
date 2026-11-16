@@ -247,9 +247,9 @@ export interface ConversationListItemData {
   document_count: number
 }
 
-/** One page of `GET /conversations`. Mirrors
- * `openlaw.api.conversation_list.ConversationList`. */
-export interface ConversationListData {
-  conversations: ConversationListItemData[]
-  next_offset: number | null
+/** A sidebar entry: the list item plus the owner's opt-in title. `title` is
+ * present only when the page was fetched with `include_titles=true`; null means
+ * no title could be made. */
+export interface SidebarConversationData extends ConversationListItemData {
+  title?: string | null
 }

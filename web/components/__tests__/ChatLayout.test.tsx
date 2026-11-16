@@ -1,4 +1,5 @@
-import { render } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import ChatLayout from '../ChatLayout'
 import { viewport } from '@/app/layout'
@@ -41,6 +42,62 @@ describe('ChatLayout containing block', () => {
     )
     const classes = (container.firstElementChild as HTMLElement).className.split(/\s+/)
     expect(classes).toContain('relative')
+  })
+})
+
+describe('ChatLayout left pane (conversation sidebar)', () => {
+  it('renders the left pane before main when given', () => {
+    render(
+      <ChatLayout
+        header={null}
+        leftPane={<div data-testid="left">left</div>}
+        messages={null}
+        composer={null}
+        sidePane={null}
+        isSheetOpen={false}
+        onCloseSheet={vi.fn()}
+      />,
+    )
+    const left = screen.getByTestId('left')
+    const main = screen.getByRole('main')
+    expect(left.compareDocumentPosition(main) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('one backdrop when the conversations panel is open, and a click closes it', async () => {
+    const onCloseConversations = vi.fn()
+    const onCloseSheet = vi.fn()
+    const { container } = render(
+      <ChatLayout
+        header={null}
+        messages={null}
+        composer={null}
+        sidePane={null}
+        isSheetOpen={false}
+        onCloseSheet={onCloseSheet}
+        isConversationsOpen
+        onCloseConversations={onCloseConversations}
+      />,
+    )
+    const backdrops = container.querySelectorAll('[data-testid=backdrop]')
+    expect(backdrops).toHaveLength(1)
+
+    await userEvent.click(backdrops[0] as HTMLElement)
+    expect(onCloseConversations).toHaveBeenCalledTimes(1)
+    expect(onCloseSheet).not.toHaveBeenCalled()
+  })
+
+  it('no backdrop while both panels are closed', () => {
+    const { container } = render(
+      <ChatLayout
+        header={null}
+        messages={null}
+        composer={null}
+        sidePane={null}
+        isSheetOpen={false}
+        onCloseSheet={vi.fn()}
+      />,
+    )
+    expect(container.querySelectorAll('[data-testid=backdrop]')).toHaveLength(0)
   })
 })
 

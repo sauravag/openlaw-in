@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { SIDE_PANE_ID } from '@/components/SidePane'
 import { getStrings } from '@/lib/strings'
 
@@ -5,6 +6,9 @@ interface ChatHeaderProps {
   language: string
   isHelpOpen: boolean
   onOpenHelp: () => void
+  /** Mode B, signed in: the phone's "Chats" control (`ChatsButton`), passed
+   * in by the page so this shared header never imports sidebar code. */
+  conversationsButton?: ReactNode
 }
 
 /**
@@ -15,12 +19,15 @@ interface ChatHeaderProps {
  *
  * "Help" is a link to `#help-pane`, so with JavaScript off the browser's own
  * `:target` shows the sheet; with it on, the click opens the modal sheet.
+ * Signed in, a "Chats" button on the left opens the conversation panel.
  */
-export default function ChatHeader({ language, isHelpOpen, onOpenHelp }: ChatHeaderProps) {
+export default function ChatHeader(props: ChatHeaderProps) {
+  const { language, isHelpOpen, onOpenHelp } = props
   const strings = getStrings(language)
   return (
     <header className="shrink-0 border-b border-line bg-white">
       <div className="flex h-14 items-center gap-2 px-4 sm:h-16">
+        {props.conversationsButton}
         <div className="min-w-0 flex-1">
           <h1 className="text-xl font-bold tracking-tight text-ink sm:text-2xl">
             OpenLaw<span className="text-brand">.in</span>

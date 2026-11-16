@@ -25,13 +25,14 @@ vi.mock("@/lib/api", async () => {
     deleteDocument: vi.fn(),
     deleteConversation: vi.fn(),
     readConversation: vi.fn(),
-    listConversations: vi.fn(async () => ({
-      kind: "list" as const,
-      data: { conversations: [], next_offset: null },
-    })),
     readAuthAgreement: vi.fn(async () => null),
   };
 });
+
+// The sidebar's list request (Mode B, signed in): an empty list.
+vi.mock("@/lib/sidebarConversations", () => ({
+  fetchSidebarPage: vi.fn(async () => ({ kind: "page" as const, conversations: [], nextOffset: null })),
+}));
 
 const mockedAsk = vi.mocked(askQuestion);
 const strings = getStrings("en");
