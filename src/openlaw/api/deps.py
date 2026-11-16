@@ -51,7 +51,8 @@ from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
-from openlaw.answers.generate import MAX_CONTEXT_CHARS
+from openlaw.answers.generate import MAX_CONTEXT_CHARS, MAX_CONTEXT_CHUNKS
+from openlaw.documents import MAX_CARRIED_CHUNKS
 from openlaw.answers.models import LLMAdapter, ModelRegistry
 from openlaw.answers.query_rewrite import rewrite_query
 from openlaw.answers.openrouter_client import OpenRouterAdapter
@@ -80,6 +81,7 @@ from openlaw.retrieval.factory import build_query_embedder
 from openlaw.retrieval.query import QueryEmbedder
 from openlaw.retrieval.fetch import fetch_chunks_by_id
 from openlaw.retrieval.rerank import ScoreReranker, merge_chunks
+from openlaw.retrieval.pool import fit_around_reserved
 from openlaw.retrieval.search import SearchQuery, search_many
 
 #: Chunks of fresh retrieval that reach the generator per turn (was 10, which
@@ -96,6 +98,11 @@ STATUTE_FLOOR = 8
 #: pool, not the generator's tail-cut, decides what goes when a turn's chunks
 #: run long (judgments first, never a statute inside the floor).
 RETRIEVAL_MAX_CHARS = MAX_CONTEXT_CHARS
+#: At most this many graph-expanded chunks join a turn, so expansion (off by
+#: default) can never take the room `fit_around_reserved` keeps for carried
+#: chunks. 16 fresh can shrink to 20 - 8 carried - 2 expanded = 10, which
+#: still holds the 8-statute floor.
+EXPANSION_RESERVE = 2
 EXPANSION_LIMIT = 20
 
 #: A resolved graph-expansion result: bare (id, label, source_url) rows from
@@ -166,6 +173,27 @@ class QdrantGraphRetriever:
             for text in self._rewrite(english_query)
         )
 
+    @staticmethod
+    def _reserved(
+        primary: tuple[RetrievedChunk, ...],
+        carried: tuple[RetrievedChunk, ...],
+        expanded: tuple[RetrievedChunk, ...],
+    ) -> tuple[RetrievedChunk, ...]:
+        """Return the chunks the fresh pool must make room for: every
+        carried chunk, then up to `EXPANSION_RESERVE` expanded chunks not
+        already present (ranked by `merge_chunks`' relationship order).
+
+        Reserving them is what keeps a 16-chunk fresh pool from pushing a
+        chunk an earlier turn cited off the generator's 20-chunk / 60k-char
+        prefix bound (`openlaw.answers.generate._bounded_chunks`): carried
+        chunks score 0 and sort last, so they were the ones cut.
+        """
+        present = primary + carried
+        new_expanded = merge_chunks(present, expanded, max_expanded=EXPANSION_RESERVE)[
+            len(present):
+        ]
+        return carried + new_expanded
+
     def _search_all(
         self, vector: list[float], rewrites: tuple[SearchQuery, ...]
     ) -> tuple[RetrievedChunk, ...]:
@@ -214,14 +242,22 @@ class QdrantGraphRetriever:
         into the prompt and "cited implies shown this turn" stays true with no
         "cited earlier" branch anywhere in the validator.
 
-        `merge_chunks` dedupes with the fresh side winning, so a carried id
-        this turn's own search also returned is not counted twice.
+        `openlaw.retrieval.pool.fit_around_reserved` dedupes with the fresh
+        side winning, so a carried id this turn's own search also returned is
+        not counted twice, and it re-fits the fresh pool around the carried
+        (and expanded) chunks so none of them is cut by the generator's bound.
         """
         vector = self._embedder.embed_query(english_query)
         primary = self._search_all(vector, self._rewrite_queries(english_query))
         expanded = self._expand([chunk.chunk_id for chunk in primary])
-        carried = self._fetch_carried(carried_chunk_ids)
-        merged = merge_chunks(primary, merge_chunks(expanded, carried))
+        carried = self._fetch_carried(carried_chunk_ids)[:MAX_CARRIED_CHUNKS]
+        merged = fit_around_reserved(
+            primary,
+            self._reserved(primary, carried, expanded),
+            max_chunks=MAX_CONTEXT_CHUNKS,
+            max_chars=MAX_CONTEXT_CHARS,
+            statute_floor=STATUTE_FLOOR,
+        )
         return RetrievalContext(
             query=english_query, chunks=self._reranker.rerank(english_query, merged)
         )
@@ -261,15 +297,24 @@ def _build_search_fn(
     return search_fn
 
 
-def _build_rewrite_fn(adapter: LLMAdapter, registry: ModelRegistry) -> RewriteFn:
-    """Return the legal-issue rewrite callable for `QdrantGraphRetriever`.
+def _build_rewrite_fn(
+    adapter: LLMAdapter,
+    registry: ModelRegistry,
+    previous_question: str | None = None,
+) -> RewriteFn:
+    """Return the legal-issue rewrite callable for one turn's retriever.
 
     One extra CLASSIFIER-role call per answered question, made after crisis
     routing and translation (it rewrites the translated text), so it runs
-    sequentially with them. Never raises: a failed rewrite searches the
-    original question alone.
+    sequentially with them, bounded by
+    `openlaw.answers.query_rewrite.REWRITE_TIMEOUT_SECONDS`. Never raises: a
+    failed or slow rewrite searches the original question alone.
+    `previous_question` -- the person's question from the turn before --
+    lets a follow-up be rewritten in context; it is search input only.
     """
-    return lambda english_query: rewrite_query(english_query, adapter, registry)
+    return lambda english_query: rewrite_query(
+        english_query, adapter, registry, previous_question=previous_question
+    )
 
 
 def _expand_chunk_kind(label: str | None) -> ChunkKind:
@@ -486,7 +531,6 @@ def build_conversation_answer_fn(settings: Settings) -> ConversationAnswerFn:
     expand_fn = build_expand_fn(settings)
     client = httpx.Client(timeout=60)
     fetch_fn = _build_fetch_fn(client, settings)
-    rewrite_fn = _build_rewrite_fn(adapter, registry)
 
     def answer_fn(
         question: str,
@@ -514,7 +558,9 @@ def build_conversation_answer_fn(settings: Settings) -> ConversationAnswerFn:
             search_fn=_build_search_fn(client, settings, question),
             expand_fn=expand_fn,
             fetch_fn=fetch_fn,
-            rewrite_fn=rewrite_fn,
+            rewrite_fn=_build_rewrite_fn(
+                adapter, registry, history[-1].question if history else None
+            ),
         )
         return answer_in_conversation(
             question,

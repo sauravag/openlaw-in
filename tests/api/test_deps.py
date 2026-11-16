@@ -790,3 +790,64 @@ def test_build_answer_fn_is_the_conversation_builder() -> None:
     """`build_answer_fn` must not be a second implementation that could drift
     from the conversation-aware one."""
     assert build_answer_fn is build_conversation_answer_fn
+
+
+# --- fix round 1: room for earlier sources, follow-up rewrite context ------
+
+
+def _provision_chunk(chunk_id: str, score: float, text: str | None = None) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=chunk_id, text=text or f"Act: X | India | Central | In Force\nS\n\n{chunk_id}",
+        source_url=f"https://x.gov.in/{chunk_id}", score=score, kind=ChunkKind.PROVISION,
+    )
+
+
+def _judgment_chunk(chunk_id: str, score: float) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=chunk_id, text=f"judgment {chunk_id}", source_url=f"https://x.gov.in/{chunk_id}",
+        score=score, kind=ChunkKind.JUDGMENT, case_id=chunk_id,
+    )
+
+
+def test_a_full_fresh_pool_plus_expansion_never_crowds_out_carried_chunks() -> None:
+    """Review fix 2: a 16-chunk fresh pool used to leave 4 of the
+    generator's 20 slots for expanded + carried chunks, and carried chunks
+    (score 0, sorted last) fell off the prefix bound silently."""
+    from openlaw.answers.generate import MAX_CONTEXT_CHUNKS, _bounded_chunks
+    from openlaw.documents import MAX_CARRIED_CHUNKS
+
+    fresh = tuple(
+        [_provision_chunk(f"s{i}", 0.5 - i * 0.01) for i in range(8)]
+        + [_judgment_chunk(f"j{i}", 0.9 - i * 0.01) for i in range(8)]
+    )
+    carried_ids = tuple(f"carried-{i}" for i in range(MAX_CARRIED_CHUNKS))
+    retriever = QdrantGraphRetriever(
+        embedder=_Embedder(),
+        search_fn=lambda vector: fresh,
+        expand_fn=lambda ids: tuple(_judgment_chunk(f"x{i}", 0.0) for i in range(10)),
+        fetch_fn=lambda ids: tuple(_provision_chunk(i, 0.0, f"carried text {i}") for i in ids),
+    )
+
+    context = retriever.retrieve("follow-up question", carried_ids)
+    shown = {chunk.chunk_id for chunk in _bounded_chunks(context.chunks)}
+
+    assert len(context.chunks) <= MAX_CONTEXT_CHUNKS
+    assert set(carried_ids) <= shown
+    assert {f"s{i}" for i in range(8)} <= shown  # statute floor intact
+    assert any(chunk_id.startswith("x") for chunk_id in shown)  # some expansion kept
+
+
+def test_build_rewrite_fn_passes_the_previous_question_as_context() -> None:
+    import json
+
+    from openlaw.answers.models import StubAdapter
+    import openlaw.api.deps as deps_module
+
+    adapter = StubAdapter([json.dumps({"queries": ["appeal against divorce decree"]})])
+
+    rewrite_fn = deps_module._build_rewrite_fn(
+        adapter, ModelRegistry(), previous_question="my divorce case is stuck"
+    )
+    rewrite_fn("what about an appeal?")
+
+    assert "my divorce case is stuck" in json.dumps(adapter.calls[0]["messages"])

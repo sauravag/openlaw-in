@@ -78,6 +78,7 @@ in -- and only then are collections merged and the pool selected, so the
 statute floor and dedupe apply to the fused result.
 """
 
+import logging
 from collections.abc import Sequence
 from typing import Any, Protocol
 
@@ -89,6 +90,8 @@ from openlaw.index.sparse import token_index, tokenise
 from openlaw.index.upsert import SC_COLLECTION
 from openlaw.retrieval.context import ChunkKind, RetrievedChunk
 from openlaw.retrieval.pool import select_pool
+
+logger = logging.getLogger(__name__)
 
 ACTS_INDIA_V1 = "acts_india_v1"
 SEARCH_COLLECTIONS: tuple[str, ...] = (ACTS_INDIA_V1, SC_COLLECTION, HC_COLLECTION)
@@ -383,18 +386,31 @@ def _fused_collection_hits(
 ) -> list[RetrievedChunk]:
     """Run every query against one collection and fuse their best-first
     lists by reciprocal rank (`_merge_by_rank` is the same RRF, applied here
-    across queries rather than across collections)."""
-    per_query = [
-        _search_collection(
-            client,
-            qdrant_url,
-            collection,
-            build_hybrid_request(
-                vector, build_sparse_query_vector(text), limit, court_codes
-            ),
+    across queries rather than across collections).
+
+    The FIRST query is the person's own question: an error on it propagates,
+    exactly as it did before rewrites existed. A later query is a rewrite,
+    an optional extra; an error on one drops that rewrite with a WARNING
+    rather than failing the turn.
+    """
+    per_query: list[list[RetrievedChunk]] = []
+    for position, (text, vector) in enumerate(queries):
+        request = build_hybrid_request(
+            vector, build_sparse_query_vector(text), limit, court_codes
         )
-        for text, vector in queries
-    ]
+        if position == 0:
+            per_query.append(_search_collection(client, qdrant_url, collection, request))
+            continue
+        try:
+            per_query.append(_search_collection(client, qdrant_url, collection, request))
+        except Exception as error:
+            logger.warning(
+                "search for a question rewrite failed on %s; dropping that "
+                "rewrite. error=%s: %s",
+                collection,
+                type(error).__name__,
+                error,
+            )
     return list(_merge_by_rank(per_query, None))
 
 

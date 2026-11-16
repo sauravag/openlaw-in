@@ -28,6 +28,8 @@ JSONL log is the place for verbatim inputs, not ordinary logs).
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 from openlaw.answers.models import LLMAdapter, ModelRegistry, ModelRole
@@ -40,6 +42,20 @@ MAX_REWRITE_QUERIES = 3
 MAX_REWRITE_QUERY_CHARS = 200
 #: Three short queries in one small JSON object fit comfortably.
 MAX_REWRITE_TOKENS = 256
+#: The rewrite is optional, so it must never hold an answer up for long. The
+#: shared adapter's own timeouts are far longer (OpenRouter 120 s; the
+#: Anthropic SDK default 600 s with retries); past this bound the turn goes
+#: ahead on the original question alone.
+REWRITE_TIMEOUT_SECONDS = 5.0
+#: Calls run on this pool so the wait can be bounded. A call that times out
+#: is abandoned, not joined: it finishes (or fails) in the background and its
+#: result is discarded. The pool is small and bounded, so a provider outage
+#: that hangs every call queues new ones, which then also time out -- the
+#: fallback still happens within the bound.
+_REWRITE_WORKERS = 4
+_REWRITE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_REWRITE_WORKERS, thread_name_prefix="query-rewrite"
+)
 
 REWRITE_SYSTEM_PROMPT = """\
 You turn a person's question to an Indian legal-aid service into short \
@@ -51,6 +67,10 @@ disposal of divorce petition", "limit on adjournments in civil suits", \
 "High Court direction for time-bound disposal of a family court case"). \
 Cover the remedy or procedure the person is trying to reach, not only the \
 background facts.
+
+When an earlier question from the same conversation is given, use it only \
+to understand what the current question refers to; write queries for the \
+current question.
 
 Do not answer the question. Do not give advice. Do not add names, dates or \
 other personal details. Each query must be short, under 20 words.
@@ -115,22 +135,58 @@ def _distinct_from(question: str, queries: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(kept)
 
 
+def _rewrite_input(english_query: str, previous_question: str | None) -> str:
+    """The text the rewriter reads: the question alone, or, on a follow-up,
+    the previous question labelled as context and then the current one."""
+    if not previous_question:
+        return english_query
+    return (
+        f"Earlier question in this conversation (context only):\n"
+        f"{previous_question}\n\nCurrent question:\n{english_query}"
+    )
+
+
 def rewrite_query(
-    english_query: str, adapter: LLMAdapter, registry: ModelRegistry
+    english_query: str,
+    adapter: LLMAdapter,
+    registry: ModelRegistry,
+    previous_question: str | None = None,
+    timeout_seconds: float = REWRITE_TIMEOUT_SECONDS,
 ) -> tuple[str, ...]:
     """Return up to three legal-issue search queries for `english_query`, or
-    `()` on any failure. Never raises -- see the module docstring."""
+    `()` on any failure. Never raises -- see the module docstring.
+
+    `previous_question` (the person's question from the turn before, if
+    any) is context so a follow-up like "and what about an appeal?" can be
+    rewritten at all; it stays search input only, like the rewrite itself.
+    The call is abandoned after `timeout_seconds`.
+    """
+    future = _REWRITE_EXECUTOR.submit(
+        adapter.complete,
+        model=registry.for_role(ModelRole.CLASSIFIER),
+        system=REWRITE_SYSTEM_PROMPT,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _rewrite_input(english_query, previous_question)}
+                ],
+            }
+        ],
+        output_schema=QUERY_REWRITE_SCHEMA,
+        max_tokens=MAX_REWRITE_TOKENS,
+    )
     try:
-        completion = adapter.complete(
-            model=registry.for_role(ModelRole.CLASSIFIER),
-            system=REWRITE_SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": [{"type": "text", "text": english_query}]}
-            ],
-            output_schema=QUERY_REWRITE_SCHEMA,
-            max_tokens=MAX_REWRITE_TOKENS,
-        )
+        completion = future.result(timeout=timeout_seconds)
         queries = _parse_rewrites(completion.text)
+    except FutureTimeoutError:
+        future.cancel()  # a no-op once running; the result is discarded
+        logger.warning(
+            "query rewrite timed out after %.1fs; searching the original "
+            "question alone.",
+            timeout_seconds,
+        )
+        return ()
     except Exception as error:
         logger.warning(
             "query rewrite failed; searching the original question alone. "

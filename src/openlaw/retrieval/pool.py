@@ -30,6 +30,12 @@ two ids.
 The pool keeps the fused rank order: nothing here re-scores a chunk. Only
 statutes are deduplicated. Judgment chunks of different cases can share
 boilerplate, and two judgments saying the same thing are two authorities.
+
+`fit_around_reserved` is the follow-up-turn counterpart: chunks an earlier
+turn's claims cite (and any graph expansion) are RESERVED first, and the
+fresh pool is re-fitted into whatever count and character room is left --
+judgments give way first, the statute floor never does -- so a full fresh
+pool can no longer push a carried chunk off the generator's prefix bound.
 """
 
 import hashlib
@@ -43,6 +49,8 @@ from openlaw.retrieval.context import ChunkKind, RetrievedChunk
 #: between central and state copies of the same section, so it is left out of
 #: the dedupe key.
 _ACT_HEADER_PREFIX = "Act:"
+#: How an in-force copy's header line ends; a repealed copy says "Repealed".
+_IN_FORCE_MARKER = "| in force"
 _NON_ALPHANUMERIC = re.compile(r"[^a-z0-9]+")
 
 
@@ -67,25 +75,42 @@ def provision_dedupe_key(chunk: RetrievedChunk) -> str:
     # Parsi s.32 triple, the Portuguese CPC pair and the SEBI regulation
     # copies, and nothing else in the top 40 for the stuck-divorce question.
     normalised = _NON_ALPHANUMERIC.sub("", _section_body(chunk.text).lower())
+    if not normalised:
+        # A header-only chunk has no body to compare; every such chunk would
+        # otherwise share sha256(""). It is only ever a duplicate of itself.
+        return f"chunk_id:{chunk.chunk_id}"
     return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
+
+
+def _is_in_force(chunk: RetrievedChunk) -> bool:
+    """True when the chunk's "Act: ..." header line marks it In Force."""
+    header, _, _ = chunk.text.partition("\n")
+    return header.startswith(_ACT_HEADER_PREFIX) and _IN_FORCE_MARKER in header.lower()
 
 
 def drop_duplicate_provisions(
     chunks: tuple[RetrievedChunk, ...],
 ) -> tuple[RetrievedChunk, ...]:
-    """Return `chunks` with later copies of an already-seen statute section
-    removed. Order is kept, so the highest-ranked copy is the one that stays.
-    Judgments pass through untouched."""
-    seen: set[str] = set()
-    kept: list[RetrievedChunk] = []
+    """Return `chunks` with all but one copy of each statute section removed.
+
+    The copy kept is the highest-ranked IN FORCE one, or the highest-ranked
+    copy when none is in force; it stays at its own rank. Order is otherwise
+    kept. Judgments pass through untouched.
+    """
+    winners: dict[str, RetrievedChunk] = {}
     for chunk in chunks:
-        if chunk.kind == ChunkKind.PROVISION:
-            key = provision_dedupe_key(chunk)
-            if key in seen:
-                continue
-            seen.add(key)
-        kept.append(chunk)
-    return tuple(kept)
+        if chunk.kind != ChunkKind.PROVISION:
+            continue
+        key = provision_dedupe_key(chunk)
+        current = winners.get(key)
+        if current is None or (_is_in_force(chunk) and not _is_in_force(current)):
+            winners[key] = chunk
+    kept_ids = {chunk.chunk_id for chunk in winners.values()}
+    return tuple(
+        chunk
+        for chunk in chunks
+        if chunk.kind != ChunkKind.PROVISION or chunk.chunk_id in kept_ids
+    )
 
 
 def _total_chars(chunks: tuple[RetrievedChunk, ...]) -> int:
@@ -136,3 +161,35 @@ def select_pool(
 
     chosen = {chunk.chunk_id for chunk in statutes + judgments}
     return tuple(chunk for chunk in deduped if chunk.chunk_id in chosen)
+
+
+def fit_around_reserved(
+    fresh: tuple[RetrievedChunk, ...],
+    reserved: tuple[RetrievedChunk, ...],
+    max_chunks: int,
+    max_chars: int,
+    statute_floor: int,
+) -> tuple[RetrievedChunk, ...]:
+    """Return `fresh` re-fitted around `reserved`, plus `reserved` itself.
+
+    `reserved` (carried and expanded chunks) is always kept whole. Its count
+    and characters come off `max_chunks`/`max_chars` first, and `fresh` is
+    re-selected with `select_pool` into the room left, so judgments go
+    before statutes and the statute floor is kept. A reserved chunk fresh
+    search also returned keeps its FRESH copy, in place (fresh retrieval
+    wins a collision, as `openlaw.retrieval.rerank.merge_chunks` does).
+    """
+    fresh_ids = {chunk.chunk_id for chunk in fresh}
+    reserved_ids = {chunk.chunk_id for chunk in reserved}
+    protected = tuple(chunk for chunk in fresh if chunk.chunk_id in reserved_ids)
+    reserved_only = tuple(chunk for chunk in reserved if chunk.chunk_id not in fresh_ids)
+    taken = protected + reserved_only
+
+    refitted = select_pool(
+        tuple(chunk for chunk in fresh if chunk.chunk_id not in reserved_ids),
+        limit=max(0, max_chunks - len(taken)),
+        statute_floor=statute_floor,
+        max_chars=max(0, max_chars - _total_chars(taken)),
+    )
+    kept_ids = reserved_ids | {chunk.chunk_id for chunk in refitted}
+    return tuple(chunk for chunk in fresh if chunk.chunk_id in kept_ids) + reserved_only

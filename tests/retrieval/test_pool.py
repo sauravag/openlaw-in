@@ -181,3 +181,95 @@ def test_no_budget_means_no_character_trimming() -> None:
     pool = select_pool(ranked, limit=16, statute_floor=8)
 
     assert len(pool) == 4
+
+
+# --- fix round 1 -------------------------------------------------------------
+
+
+def test_header_only_chunks_are_not_collapsed_into_one() -> None:
+    first = RetrievedChunk(
+        chunk_id="a", text="Act: A | India | Central | In Force", source_url="https://x/a",
+        score=0.9, kind=ChunkKind.PROVISION,
+    )
+    second = first.model_copy(update={"chunk_id": "b", "text": "Act: B | India | Central | In Force"})
+
+    pool = select_pool((first, second), limit=16, statute_floor=8)
+
+    assert [c.chunk_id for c in pool] == ["a", "b"]
+
+
+def test_an_in_force_copy_beats_a_higher_ranked_repealed_copy() -> None:
+    ranked = _ranked(
+        _provision("repealed_copy", 0.9, "same words", "Act: P | India | State | Repealed"),
+        _provision("in_force_copy", 0.8, "same words", "Act: P | India | Central | In Force"),
+        _provision("other", 0.7, "other words"),
+    )
+
+    pool = select_pool(ranked, limit=16, statute_floor=8)
+
+    assert [c.chunk_id for c in pool] == ["in_force_copy", "other"]
+
+
+def test_the_best_ranked_copy_wins_when_no_copy_is_in_force() -> None:
+    ranked = _ranked(
+        _provision("first", 0.9, "same words", "Act: P | India | State | Repealed"),
+        _provision("second", 0.8, "same words", "Act: P | India | Central | Repealed"),
+    )
+
+    assert [c.chunk_id for c in select_pool(ranked, limit=16, statute_floor=8)] == ["first"]
+
+
+def _carried(chunk_id: str, chars: int = 100) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=chunk_id, text="c" * chars, source_url=f"https://x/{chunk_id}",
+        score=0.0, kind=ChunkKind.PROVISION,
+    )
+
+
+def test_fit_around_reserved_keeps_every_reserved_chunk_within_both_bounds() -> None:
+    from openlaw.retrieval.pool import fit_around_reserved
+
+    fresh = _ranked(
+        *(_provision(f"s{i}", 0.5 - i * 0.01, f"statute {i}") for i in range(8)),
+        *(_judgment(f"j{i}", 0.9 - i * 0.01) for i in range(8)),
+    )
+    reserved = tuple(_carried(f"c{i}") for i in range(8))
+
+    chunks = fit_around_reserved(
+        fresh, reserved, max_chunks=20, max_chars=60_000, statute_floor=8
+    )
+
+    ids = [c.chunk_id for c in chunks]
+    assert len(chunks) <= 20
+    assert all(f"c{i}" in ids for i in range(8))
+    # Judgments gave way, the statute floor did not.
+    assert sum(1 for c in chunks if c.chunk_id.startswith("s")) == 8
+    assert sum(1 for c in chunks if c.chunk_id.startswith("j")) == 4
+
+
+def test_fit_around_reserved_makes_room_in_characters_too() -> None:
+    from openlaw.retrieval.pool import fit_around_reserved
+
+    fresh = _ranked(
+        *(_provision(f"s{i}", 0.5 - i * 0.01, f"{'x' * 3_000}{i}") for i in range(8)),
+        *(_judgment(f"j{i}", 0.9 - i * 0.01, "y" * 3_000) for i in range(8)),
+    )
+    reserved = (_carried("c0", 20_000),)
+
+    chunks = fit_around_reserved(
+        fresh, reserved, max_chunks=20, max_chars=60_000, statute_floor=8
+    )
+
+    assert "c0" in [c.chunk_id for c in chunks]
+    assert sum(len(c.text) for c in chunks) <= 60_000
+
+
+def test_a_reserved_chunk_fresh_search_also_found_keeps_its_fresh_copy() -> None:
+    from openlaw.retrieval.pool import fit_around_reserved
+
+    fresh = (_provision("shared", 0.9),)
+    chunks = fit_around_reserved(
+        fresh, (_carried("shared"),), max_chunks=20, max_chars=60_000, statute_floor=8
+    )
+
+    assert [(c.chunk_id, c.score) for c in chunks] == [("shared", 0.9)]

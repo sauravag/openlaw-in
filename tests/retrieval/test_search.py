@@ -806,3 +806,41 @@ def test_search_with_a_floor_is_search_many_with_one_query() -> None:
     )
 
     assert single == many
+
+
+def test_a_failing_rewrite_query_is_dropped_not_fatal(caplog) -> None:
+    import logging
+
+    class _FailsOnRewrite(_QueryAwareClient):
+        def post(self, url, json, timeout):
+            sparse = next(e for e in json["prefetch"] if e["using"] == "sparse")
+            if tuple(sparse["query"]["nearest"]["indices"]) == tuple(
+                build_sparse_query_vector("speedy disposal")["indices"]
+            ):
+                raise httpx.ConnectError("qdrant hiccup")
+            return super().post(url, json, timeout)
+
+    client = _FailsOnRewrite({(ACTS_INDIA_V1, "raw question"): [_act("a1")]})
+
+    with caplog.at_level(logging.WARNING, logger="openlaw.retrieval.search"):
+        result = search_many(
+            client, "http://127.0.0.1:6333",
+            (("raw question", [0.1] * 1024), ("speedy disposal", [0.2] * 1024)),
+            limit=16, statute_floor=8,
+        )
+
+    assert [chunk.chunk_id for chunk in result] == ["a1"]
+    assert "rewrite" in caplog.text
+
+
+def test_a_failing_original_query_still_fails_the_search() -> None:
+    class _AlwaysFails:
+        def post(self, url, json, timeout):
+            raise httpx.ConnectError("qdrant down")
+
+    with pytest.raises(httpx.ConnectError):
+        search_many(
+            _AlwaysFails(), "http://127.0.0.1:6333",
+            (("raw question", [0.1] * 1024), ("speedy disposal", [0.2] * 1024)),
+            limit=16, statute_floor=8,
+        )

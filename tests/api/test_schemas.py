@@ -343,7 +343,7 @@ def test_an_uncovered_goal_leads_the_answer_with_the_fixed_notice() -> None:
     response = to_response(_localised_goal(True), "v1", 5, conversation_id=_CONVERSATION)
 
     notice, _, rest = response.answer.partition("\n\n")
-    assert notice.startswith("None of the sources I found directly covers what you are trying to do.")
+    assert notice.startswith("We could not find a source that directly covers what you are trying to do.")
     assert rest == "A case can be transferred."
     assert "unverified model prose" not in response.answer
 
@@ -353,8 +353,8 @@ def test_the_uncovered_goal_notice_is_static_hindi_for_a_hindi_turn() -> None:
         _localised_goal(True, language="hi"), "v1", 5, conversation_id=_CONVERSATION
     )
 
-    assert "None of the sources" not in response.answer
-    assert response.answer.startswith("मुझे जो स्रोत मिले")
+    assert "We could not" not in response.answer
+    assert response.answer.startswith("हमें ऐसा कोई स्रोत नहीं मिला")
 
 
 def test_a_covered_goal_renders_no_notice() -> None:

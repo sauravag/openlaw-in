@@ -78,14 +78,15 @@ _NO_VERIFIABLE_ANSWER: dict[str, str] = {
 #: `_NO_VERIFIABLE_ANSWER`.
 _GOAL_NOT_COVERED: dict[str, str] = {
     "en": (
-        "None of the sources I found directly covers what you are trying to do. "
-        "Below is the closest related law I found. A lawyer or your District "
-        "Legal Services Authority can advise on your specific situation."
+        "We could not find a source that directly covers what you are trying "
+        "to do. Below is the closest related law we found. A lawyer or your "
+        "District Legal Services Authority can advise on your specific situation."
     ),
     "hi": (
-        "मुझे जो स्रोत मिले, उनमें से कोई भी सीधे उस बात के बारे में नहीं है जो आप "
-        "करना चाहते हैं। नीचे इससे जुड़ा सबसे नज़दीकी क़ानून दिया गया है। आपकी ख़ास "
-        "स्थिति के लिए कोई वकील या आपका ज़िला विधिक सेवा प्राधिकरण सलाह दे सकता है।"
+        "हमें ऐसा कोई स्रोत नहीं मिला जो सीधे उस बात के बारे में हो जो आप करना "
+        "चाहते हैं। नीचे इससे जुड़ा सबसे नज़दीकी क़ानून दिया गया है जो हमें मिला। "
+        "आपकी ख़ास स्थिति के लिए कोई वकील या आपका ज़िला विधिक सेवा प्राधिकरण सलाह "
+        "दे सकता है।"
     ),
 }
 
