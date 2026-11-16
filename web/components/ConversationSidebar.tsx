@@ -32,7 +32,7 @@ interface EntryProps {
 function EntryText({ item, language, showTitles, now }: EntryProps) {
   const strings = getStrings(language)
   const documents = strings.conversationDocuments(item.document_count)
-  const time = formatConversationTime(item.created_at, language, now)
+  const time = formatConversationTime(item.updated_at, language, now)
   return (
     <>
       {showTitles && (
