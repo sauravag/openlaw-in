@@ -53,6 +53,7 @@ from sqlalchemy.orm import Session
 from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.generate import MAX_CONTEXT_CHARS
 from openlaw.answers.models import LLMAdapter, ModelRegistry
+from openlaw.answers.query_rewrite import rewrite_query
 from openlaw.answers.openrouter_client import OpenRouterAdapter
 from openlaw.answers.routing import (
     LLMProvider,
@@ -79,7 +80,7 @@ from openlaw.retrieval.factory import build_query_embedder
 from openlaw.retrieval.query import QueryEmbedder
 from openlaw.retrieval.fetch import fetch_chunks_by_id
 from openlaw.retrieval.rerank import ScoreReranker, merge_chunks
-from openlaw.retrieval.search import search
+from openlaw.retrieval.search import SearchQuery, search_many
 
 #: Chunks of fresh retrieval that reach the generator per turn (was 10, which
 #: interleaved ~5 statutes and ~5 judgments and cut HMA s.21B at statute rank
@@ -100,8 +101,26 @@ EXPANSION_LIMIT = 20
 #: A resolved graph-expansion result: bare (id, label, source_url) rows from
 #: `openlaw.graph.queries.expand_chunks`, turned into citable `RetrievedChunk`s.
 ExpandFn = Callable[[list[str]], tuple[RetrievedChunk, ...]]
-#: A vector search over the configured corpus collections for one query.
-SearchFn = Callable[[list[float]], tuple[RetrievedChunk, ...]]
+
+
+class SearchFn(Protocol):
+    """A search over the configured corpus collections for one turn.
+
+    Called with the dense vector of the (translated) question, plus the
+    legal-issue rewrites to search alongside it as `(text, vector)` pairs.
+    `QdrantGraphRetriever` passes `rewrites` only when there are some, so a
+    one-argument callable still serves a retriever built without a
+    `rewrite_fn`.
+    """
+
+    def __call__(
+        self, vector: list[float], rewrites: tuple[SearchQuery, ...] = ()
+    ) -> tuple[RetrievedChunk, ...]: ...
+
+
+#: Rewrites a translated question into legal-issue search queries; `()` on
+#: any failure (`openlaw.answers.query_rewrite.rewrite_query`).
+RewriteFn = Callable[[str], tuple[str, ...]]
 #: A read-only re-fetch of specific corpus chunks by id, for the chunks an
 #: earlier turn's claims cite (`openlaw.retrieval.fetch.fetch_chunks_by_id`).
 FetchFn = Callable[[tuple[str, ...]], tuple[RetrievedChunk, ...]]
@@ -123,12 +142,38 @@ class QdrantGraphRetriever:
         search_fn: SearchFn,
         expand_fn: ExpandFn,
         fetch_fn: FetchFn | None = None,
+        rewrite_fn: RewriteFn | None = None,
     ) -> None:
         self._embedder = embedder
         self._search = search_fn
         self._expand = expand_fn
         self._fetch = fetch_fn
+        self._rewrite = rewrite_fn
         self._reranker = ScoreReranker()
+
+    def _rewrite_queries(self, english_query: str) -> tuple[SearchQuery, ...]:
+        """Return `(text, vector)` for each legal-issue rewrite of
+        `english_query`, or `()` with no `rewrite_fn` or when it gave none.
+
+        The rewrites are SEARCH TEXT ONLY (`openlaw.answers.query_rewrite`):
+        they are embedded and searched here and go nowhere else -- the
+        returned context still carries `english_query` as its query.
+        """
+        if self._rewrite is None:
+            return ()
+        return tuple(
+            (text, self._embedder.embed_query(text))
+            for text in self._rewrite(english_query)
+        )
+
+    def _search_all(
+        self, vector: list[float], rewrites: tuple[SearchQuery, ...]
+    ) -> tuple[RetrievedChunk, ...]:
+        """Search the question alone, or with its rewrites when there are
+        any (see `SearchFn`)."""
+        if not rewrites:
+            return self._search(vector)
+        return self._search(vector, rewrites)
 
     def _fetch_carried(self, chunk_ids: tuple[str, ...]) -> tuple[RetrievedChunk, ...]:
         """Re-fetch `chunk_ids`, or return nothing when no fetcher is wired.
@@ -173,7 +218,7 @@ class QdrantGraphRetriever:
         this turn's own search also returned is not counted twice.
         """
         vector = self._embedder.embed_query(english_query)
-        primary = self._search(vector)
+        primary = self._search_all(vector, self._rewrite_queries(english_query))
         expanded = self._expand([chunk.chunk_id for chunk in primary])
         carried = self._fetch_carried(carried_chunk_ids)
         merged = merge_chunks(primary, merge_chunks(expanded, carried))
@@ -195,16 +240,36 @@ def _build_search_fn(
     the multilingual `Retriever` protocol's `retrieve(english_query)` shape.
     Currying `question` into a small closure here is cheap (no I/O, no model
     load) and is the only way to satisfy both constraints at once.
+
+    The original query keeps `question` as its sparse text, exactly as
+    before; each rewrite is searched with its own text and vector, and
+    `search_many` fuses them per collection before the pool is selected.
     """
-    return lambda vector: search(
-        client,
-        settings.qdrant_url,
-        question,
-        vector,
-        limit=RETRIEVAL_LIMIT,
-        statute_floor=STATUTE_FLOOR,
-        max_chars=RETRIEVAL_MAX_CHARS,
-    )
+
+    def search_fn(
+        vector: list[float], rewrites: tuple[SearchQuery, ...] = ()
+    ) -> tuple[RetrievedChunk, ...]:
+        return search_many(
+            client,
+            settings.qdrant_url,
+            ((question, vector), *rewrites),
+            limit=RETRIEVAL_LIMIT,
+            statute_floor=STATUTE_FLOOR,
+            max_chars=RETRIEVAL_MAX_CHARS,
+        )
+
+    return search_fn
+
+
+def _build_rewrite_fn(adapter: LLMAdapter, registry: ModelRegistry) -> RewriteFn:
+    """Return the legal-issue rewrite callable for `QdrantGraphRetriever`.
+
+    One extra CLASSIFIER-role call per answered question, made after crisis
+    routing and translation (it rewrites the translated text), so it runs
+    sequentially with them. Never raises: a failed rewrite searches the
+    original question alone.
+    """
+    return lambda english_query: rewrite_query(english_query, adapter, registry)
 
 
 def _expand_chunk_kind(label: str | None) -> ChunkKind:
@@ -421,6 +486,7 @@ def build_conversation_answer_fn(settings: Settings) -> ConversationAnswerFn:
     expand_fn = build_expand_fn(settings)
     client = httpx.Client(timeout=60)
     fetch_fn = _build_fetch_fn(client, settings)
+    rewrite_fn = _build_rewrite_fn(adapter, registry)
 
     def answer_fn(
         question: str,
@@ -448,6 +514,7 @@ def build_conversation_answer_fn(settings: Settings) -> ConversationAnswerFn:
             search_fn=_build_search_fn(client, settings, question),
             expand_fn=expand_fn,
             fetch_fn=fetch_fn,
+            rewrite_fn=rewrite_fn,
         )
         return answer_in_conversation(
             question,

@@ -34,6 +34,7 @@ from openlaw.retrieval.search import (
     chunk_from_point,
     search,
     search_dense_only,
+    search_many,
     search_sparse_only,
 )
 
@@ -699,3 +700,109 @@ def test_search_with_a_statute_floor_drops_duplicate_sections() -> None:
     )
 
     assert [chunk.chunk_id for chunk in result] == ["state_copy", "other"]
+
+
+# --- multi-query search with per-collection fusion (item 2) ---------------
+
+
+class _QueryAwareClient:
+    """Answers per (collection, query text), identifying the query by the
+    sparse vector `search_many` built from its text."""
+
+    def __init__(self, hits: dict[tuple[str, str], list[dict[str, Any]]]) -> None:
+        self._hits = {
+            (collection, tuple(build_sparse_query_vector(text)["indices"])): points
+            for (collection, text), points in hits.items()
+        }
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+
+    def post(self, url: str, json: dict[str, Any], timeout: float) -> _FakeResponse:
+        self.requests.append((url, json))
+        sparse = next(e for e in json["prefetch"] if e["using"] == "sparse")
+        indices = tuple(sparse["query"]["nearest"]["indices"])
+        collection = next(c for c in SEARCH_COLLECTIONS if c in url)
+        return _FakeResponse(self._hits.get((collection, indices), []))
+
+
+def _act(chunk_id: str) -> dict[str, Any]:
+    return {
+        "score": 1.0,
+        "payload": {
+            "chunk_id": chunk_id,
+            "text": f"Act: X | India | Central | In Force\nSection\n\n{chunk_id}",
+            "source_url": f"https://indiacode.nic.in/{chunk_id}",
+        },
+    }
+
+
+def test_search_many_runs_every_query_against_every_collection() -> None:
+    client = _QueryAwareClient({})
+
+    search_many(
+        client, "http://127.0.0.1:6333",
+        (("raw question", [0.1] * 1024), ("speedy disposal", [0.2] * 1024)),
+        limit=16, statute_floor=8,
+    )
+
+    assert len(client.requests) == 2 * 2  # two queries x acts + SC
+    sparse_queries = {
+        tuple(next(e for e in body["prefetch"] if e["using"] == "sparse")["query"]["nearest"]["indices"])
+        for _, body in client.requests
+    }
+    assert sparse_queries == {
+        tuple(build_sparse_query_vector("raw question")["indices"]),
+        tuple(build_sparse_query_vector("speedy disposal")["indices"]),
+    }
+
+
+def test_search_many_fuses_each_collections_query_lists_by_reciprocal_rank() -> None:
+    """`s21B` is 2nd for both queries; `noise` is 1st for only the raw one.
+    Summed reciprocal ranks (2/62 > 1/61) put s21B first -- a rewrite that
+    agrees with the original lifts the provision both of them found."""
+    client = _QueryAwareClient(
+        {
+            (ACTS_INDIA_V1, "raw question"): [_act("noise"), _act("s21B")],
+            (ACTS_INDIA_V1, "speedy disposal"): [_act("other"), _act("s21B")],
+        }
+    )
+
+    result = search_many(
+        client, "http://127.0.0.1:6333",
+        (("raw question", [0.1] * 1024), ("speedy disposal", [0.2] * 1024)),
+        limit=16, statute_floor=8,
+    )
+
+    assert result[0].chunk_id == "s21B"
+    assert {chunk.chunk_id for chunk in result} == {"s21B", "noise", "other"}
+
+
+def test_search_many_reaches_a_provision_only_a_rewrite_found() -> None:
+    client = _QueryAwareClient(
+        {
+            (ACTS_INDIA_V1, "raw question"): [_act(f"raw{i}") for i in range(16)],
+            (ACTS_INDIA_V1, "speedy disposal"): [_act("s21B")],
+        }
+    )
+
+    result = search_many(
+        client, "http://127.0.0.1:6333",
+        (("raw question", [0.1] * 1024), ("speedy disposal", [0.2] * 1024)),
+        limit=16, statute_floor=8,
+    )
+
+    assert "s21B" in {chunk.chunk_id for chunk in result}
+
+
+def test_search_with_a_floor_is_search_many_with_one_query() -> None:
+    points = {ACTS_INDIA_V1: _acts_points(20), SC_COLLECTION: _sc_points(20)}
+
+    single = search(
+        _FakeClient(points), "http://127.0.0.1:6333", "q", [0.1] * 1024,
+        limit=16, statute_floor=8,
+    )
+    many = search_many(
+        _FakeClient(points), "http://127.0.0.1:6333", (("q", [0.1] * 1024),),
+        limit=16, statute_floor=8,
+    )
+
+    assert single == many

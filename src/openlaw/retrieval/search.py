@@ -68,8 +68,17 @@ that module for why: a straight cap interleaved acts and judgments roughly
 evenly, and spent the scarce statute half on duplicate copies). Without a
 `statute_floor` (the evaluation harness and older callers) the straight
 rank cap is unchanged.
+
+**Several queries are fused per collection first** (`search_many`). The
+production path searches the person's question AND up to three legal-issue
+rewrites of it (`openlaw.answers.query_rewrite`). Each query's best-first
+hits are fused by reciprocal rank WITHIN each collection -- a statute that
+several phrasings agree on rises, and one only a rewrite found still gets
+in -- and only then are collections merged and the pool selected, so the
+statute floor and dedupe apply to the fused result.
 """
 
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -94,6 +103,9 @@ SPARSE_QUERY_WEIGHT = 1.0
 # original Cormack et al. RRF paper all use 60) -- large enough that a hit's
 # exact rank matters more than which collection it came from.
 RRF_K = 60
+
+#: One search: the text that builds the sparse side, and the dense vector.
+SearchQuery = tuple[str, list[float]]
 
 
 class _PostResponse(Protocol):
@@ -346,13 +358,69 @@ def search(
     `max_chars` when given. Each collection is asked for the full `limit`, so
     either kind can fill the whole pool when the other runs short.
     """
+    if statute_floor is not None:
+        return search_many(
+            client,
+            qdrant_url,
+            ((text, vector),),
+            limit=limit,
+            court_codes=court_codes,
+            statute_floor=statute_floor,
+            max_chars=max_chars,
+        )
     sparse_vector = build_sparse_query_vector(text)
     request = build_hybrid_request(vector, sparse_vector, limit, court_codes)
-    if statute_floor is None:
-        return _run_across_collections(client, qdrant_url, request, limit, court_codes)
-    ranked = _merge_by_rank(
-        _search_each_collection(client, qdrant_url, request, court_codes), None
-    )
+    return _run_across_collections(client, qdrant_url, request, limit, court_codes)
+
+
+def _fused_collection_hits(
+    client: _PostClient,
+    qdrant_url: str,
+    collection: str,
+    queries: Sequence[SearchQuery],
+    limit: int,
+    court_codes: tuple[str, ...] | None,
+) -> list[RetrievedChunk]:
+    """Run every query against one collection and fuse their best-first
+    lists by reciprocal rank (`_merge_by_rank` is the same RRF, applied here
+    across queries rather than across collections)."""
+    per_query = [
+        _search_collection(
+            client,
+            qdrant_url,
+            collection,
+            build_hybrid_request(
+                vector, build_sparse_query_vector(text), limit, court_codes
+            ),
+        )
+        for text, vector in queries
+    ]
+    return list(_merge_by_rank(per_query, None))
+
+
+def search_many(
+    client: _PostClient,
+    qdrant_url: str,
+    queries: Sequence[SearchQuery],
+    limit: int,
+    statute_floor: int,
+    max_chars: int | None = None,
+    court_codes: tuple[str, ...] | None = None,
+) -> tuple[RetrievedChunk, ...]:
+    """Search every query against every applicable collection and return
+    the quota-split pool (see the module docstring).
+
+    Per collection, each query's hits are fused by reciprocal rank; the
+    per-collection results are then merged by rank exactly as `search`
+    merges them; `openlaw.retrieval.pool.select_pool` then drops duplicate
+    sections and applies `statute_floor`, `limit` and `max_chars`. One query
+    gives the same result as `search(..., statute_floor=...)`.
+    """
+    per_collection = [
+        _fused_collection_hits(client, qdrant_url, collection, queries, limit, court_codes)
+        for collection in _collections_to_search(court_codes)
+    ]
+    ranked = _merge_by_rank(per_collection, None)
     return select_pool(ranked, limit, statute_floor, max_chars)
 
 

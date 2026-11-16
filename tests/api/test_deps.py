@@ -326,20 +326,21 @@ def test_build_search_fn_forwards_the_question_and_vector_to_search(
 ) -> None:
     """The per-request `search_fn` closure -- see its docstring for why it
     cannot be built once alongside the embedder -- must actually forward the
-    curried question, the vector `QdrantGraphRetriever` hands it, and
-    `RETRIEVAL_LIMIT` to `openlaw.retrieval.search.search`."""
+    curried question, the vector `QdrantGraphRetriever` hands it, and the
+    pool constants to `openlaw.retrieval.search.search_many`. With no
+    rewrites the original question is the only query."""
     import openlaw.api.deps as deps_module
 
     seen: dict = {}
 
-    def _fake_search(client, qdrant_url, text, vector, limit, statute_floor, max_chars):
+    def _fake_search_many(client, qdrant_url, queries, limit, statute_floor, max_chars):
         seen.update(
-            client=client, qdrant_url=qdrant_url, text=text, vector=vector, limit=limit,
+            client=client, qdrant_url=qdrant_url, queries=queries, limit=limit,
             statute_floor=statute_floor, max_chars=max_chars,
         )
         return ("sentinel",)
 
-    monkeypatch.setattr(deps_module, "search", _fake_search)
+    monkeypatch.setattr(deps_module, "search_many", _fake_search_many)
 
     search_fn = deps_module._build_search_fn(
         "fake-client", _settings(qdrant_url="http://q:6333"), "my landlord kept my deposit"
@@ -350,12 +351,160 @@ def test_build_search_fn_forwards_the_question_and_vector_to_search(
     assert seen == {
         "client": "fake-client",
         "qdrant_url": "http://q:6333",
-        "text": "my landlord kept my deposit",
-        "vector": [0.1, 0.2],
+        "queries": (("my landlord kept my deposit", [0.1, 0.2]),),
         "limit": deps_module.RETRIEVAL_LIMIT,
         "statute_floor": deps_module.STATUTE_FLOOR,
         "max_chars": deps_module.RETRIEVAL_MAX_CHARS,
     }
+
+
+def test_build_search_fn_searches_the_original_question_and_every_rewrite(
+    monkeypatch,
+) -> None:
+    """The ORIGINAL query keeps the raw question as its sparse text, exactly
+    as before (the separate non-English sparse issue is out of scope and must
+    not get worse); each rewrite is searched with its own text and vector."""
+    import openlaw.api.deps as deps_module
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        deps_module, "search_many",
+        lambda client, qdrant_url, queries, **kwargs: seen.update(queries=queries) or (),
+    )
+
+    search_fn = deps_module._build_search_fn("c", _settings(), "मेरा तलाक का केस")
+    search_fn([0.1], (("speedy disposal of divorce petition", [0.2]),))
+
+    assert seen["queries"] == (
+        ("मेरा तलाक का केस", [0.1]),
+        ("speedy disposal of divorce petition", [0.2]),
+    )
+
+
+class _RecordingEmbedder:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def embed_query(self, text: str) -> list[float]:
+        self.texts.append(text)
+        return [float(len(self.texts))]
+
+
+def test_the_retriever_rewrites_the_english_query_and_searches_every_rewrite() -> None:
+    embedder = _RecordingEmbedder()
+    calls: list[tuple] = []
+    asked: list[str] = []
+
+    def _search(vector, rewrites=()):
+        calls.append((vector, rewrites))
+        return (_chunk("s21B", 0.9),)
+
+    def _rewrite(english_query: str) -> tuple[str, ...]:
+        asked.append(english_query)
+        return ("speedy disposal of divorce petition", "limit on adjournments")
+
+    retriever = QdrantGraphRetriever(
+        embedder=embedder, search_fn=_search, expand_fn=lambda ids: (), rewrite_fn=_rewrite
+    )
+    context = retriever.retrieve("my divorce case is stuck")
+
+    assert asked == ["my divorce case is stuck"]
+    assert embedder.texts == [
+        "my divorce case is stuck",
+        "speedy disposal of divorce petition",
+        "limit on adjournments",
+    ]
+    assert calls == [
+        (
+            [1.0],
+            (
+                ("speedy disposal of divorce petition", [2.0]),
+                ("limit on adjournments", [3.0]),
+            ),
+        )
+    ]
+    # The rewrite is search text only: the context still carries the
+    # person's own (translated) question.
+    assert context.query == "my divorce case is stuck"
+
+
+def test_the_retriever_searches_the_original_alone_when_the_rewrite_fails() -> None:
+    calls: list[tuple] = []
+    retriever = QdrantGraphRetriever(
+        embedder=_Embedder(),
+        search_fn=lambda vector: calls.append((vector,)) or (_chunk("a", 0.9),),
+        expand_fn=lambda ids: (),
+        rewrite_fn=lambda english_query: (),
+    )
+
+    context = retriever.retrieve("my landlord kept my deposit")
+
+    assert len(calls) == 1
+    assert context.chunk_ids == frozenset({"a"})
+
+
+def test_build_rewrite_fn_uses_the_classifier_role_and_never_raises() -> None:
+    import json
+
+    from openlaw.answers.models import ModelRole, StubAdapter
+    import openlaw.api.deps as deps_module
+
+    registry = ModelRegistry()
+    adapter = StubAdapter([json.dumps({"queries": ["speedy disposal"]})])
+
+    rewrite_fn = deps_module._build_rewrite_fn(adapter, registry)
+
+    assert rewrite_fn("my case is stuck") == ("speedy disposal",)
+    assert adapter.calls[0]["model"] == registry.for_role(ModelRole.CLASSIFIER)
+    assert rewrite_fn("my case is stuck") == ()  # stub exhausted -> fallback
+
+
+def test_rewrite_text_never_reaches_the_answer_payload_or_the_generator() -> None:
+    """End to end through the real pipeline: a sentinel rewrite is searched,
+    but appears nowhere in the generator's prompt, the localised answer, or
+    the API response."""
+    import json
+
+    from openlaw.answers.models import StubAdapter
+    from openlaw.api.schemas import to_response
+    from openlaw.language.glossary import Glossary
+    from openlaw.language.pipeline import answer_in_conversation
+
+    sentinel = "REWRITE-SENTINEL-speedy-disposal"
+    question = "my divorce case has been stuck for years, how do I speed it up?"
+    searched: list = []
+
+    def _search(vector, rewrites=()):
+        searched.append(rewrites)
+        return (_chunk("IND_central_1560_s21B", 0.9),)
+
+    retriever = QdrantGraphRetriever(
+        embedder=_Embedder(),
+        search_fn=_search,
+        expand_fn=lambda ids: (),
+        fetch_fn=lambda ids: (),
+        rewrite_fn=lambda english_query: (sentinel,),
+    )
+    generator_reply = json.dumps(
+        {
+            "summary": "s",
+            "claims": [{"text": "The court should finish within six months.", "chunk_ids": ["IND_central_1560_s21B"]}],
+            "document_claims": [],
+            "sufficient": True,
+        }
+    )
+    adapter = StubAdapter([json.dumps({"crisis": "none"}), question, generator_reply])
+
+    localised = answer_in_conversation(
+        question, retriever, adapter, ModelRegistry(), Glossary(terms=()), language="en"
+    )
+    response = to_response(localised, "v1", 5, conversation_id="00000000-0000-0000-0000-000000000000")
+
+    assert searched and searched[0][0][0] == sentinel
+    assert localised.answer.is_answerable
+    assert sentinel not in localised.model_dump_json()
+    assert sentinel not in response.model_dump_json()
+    assert all(sentinel not in json.dumps(call["messages"]) for call in adapter.calls)
 
 
 def test_the_pool_reaching_the_generator_is_about_sixteen_with_eight_statute_slots() -> None:
