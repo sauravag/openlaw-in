@@ -39,6 +39,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from openlaw.answers.escalation import CrisisKind, crisis_response, nalsa_helpline
 from openlaw.documents.extract import ExtractedPage, scan_for_crisis
 from openlaw.answers.generate import persist_answer_events
@@ -105,14 +107,19 @@ class _Retriever:
 class _RaisingRetriever:
     """A retriever that fails the test if it is ever called.
 
-    Used to prove that a crisis short-circuit never reaches retrieval --
-    see the module docstring's binding correction.
+    Used where an earlier step (an exhausted adapter, i.e. a failed query
+    translation) means retrieval must never be reached.
     """
 
     def retrieve(self, english_query: str) -> RetrievalContext:
-        raise AssertionError(
-            "retriever.retrieve must not be called once a crisis is detected"
-        )
+        raise AssertionError("retriever.retrieve was called unexpectedly")
+
+
+class _FailingRetriever:
+    """Simulates a retrieval outage: every call raises."""
+
+    def retrieve(self, english_query: str) -> RetrievalContext:
+        raise RuntimeError("simulated retrieval outage")
 
 
 class _ClassifierFailsAdapter:
@@ -363,7 +370,7 @@ def test_english_answer_equals_answer_for_an_english_question() -> None:
     assert result.english_answer == result.answer
 
 
-def test_english_answer_is_unanswerable_on_a_crisis_short_circuit() -> None:
+def test_english_answer_is_unanswerable_on_a_crisis_fallback() -> None:
     adapter = StubAdapter([_classifier_response(CrisisKind.SELF_HARM)])
     result = answer_in_language(
         "I want to end it all", _Retriever(), adapter, ModelRegistry(), _glossary()
@@ -441,58 +448,137 @@ def test_glossary_is_wired_into_the_answer_translation_call() -> None:
     assert "anticipatory bail" in translation_call["system"]
 
 
-# --- Crisis routing: first, and on both the original and translated text --
+# --- Crisis routing: first, on both the original and translated text; ----
+# --- the helplines lead and the question is STILL answered (owner ruling) --
 
 
-def test_regex_crisis_on_original_text_short_circuits_before_any_adapter_call() -> (
+def test_regex_crisis_on_original_text_is_answered_with_the_helplines_first() -> (
     None
 ):
-    adapter = StubAdapter([])
+    """Owner's ruling: "Even if the app detects a crisis, it should provide
+    the crisis response and also answer the question." A regex hit needs no
+    classifier call: translation and generation are the only two calls."""
+    adapter = StubAdapter(["my husband beats me", _generation()])
+    retriever = _Retriever()
     result = answer_in_language(
-        "my husband beats me",
-        _RaisingRetriever(),
-        adapter,
-        ModelRegistry(),
-        _glossary(),
+        "my husband beats me", retriever, adapter, ModelRegistry(), _glossary()
     )
 
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
-    assert len(adapter.calls) == 0
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
     assert "181" in result.footer
+    assert result.footer.index("181") < result.footer.index("15100")
+    assert result.answer.is_answerable is True
+    assert result.answer.claims[0].text == "A refund is required."
+    assert retriever.queries == ["my husband beats me"]
+    assert len(adapter.calls) == 2
 
 
-def test_classifier_crisis_on_original_text_short_circuits_before_retrieval() -> None:
-    adapter = StubAdapter([_classifier_response(CrisisKind.SELF_HARM)])
+def test_classifier_crisis_on_original_text_is_answered_with_the_helplines_first() -> (
+    None
+):
+    adapter = StubAdapter(
+        [
+            _classifier_response(CrisisKind.SELF_HARM),
+            "I want to end it all",
+            _generation(),
+        ]
+    )
     result = answer_in_language(
-        "I want to end it all",
-        _RaisingRetriever(),
-        adapter,
-        ModelRegistry(),
-        _glossary(),
+        "I want to end it all", _Retriever(), adapter, ModelRegistry(), _glossary()
     )
 
     assert result.crisis is CrisisKind.SELF_HARM
-    assert "14416" in result.footer
-    assert len(adapter.calls) == 1
+    assert result.footer.startswith(crisis_response(CrisisKind.SELF_HARM))
+    assert "14416" in [helpline.number for helpline in result.helplines]
+    assert result.answer.is_answerable is True
+    assert len(adapter.calls) == 3
 
 
-def test_crisis_found_only_after_translation_short_circuits_before_retrieval() -> (
+def test_crisis_found_only_after_translation_is_answered_too() -> None:
+    """The cheapest way to cover a script the regex cannot match: translate,
+    then give the regex layer a second, free chance on the English result --
+    the second check never touches the model. The question is then answered
+    in the person's language, with the helplines leading."""
+    adapter = StubAdapter(
+        [_SAFE_CLASSIFIER_RESPONSE, "he beats me", _generation(), TRANSLATED]
+    )
+    result = answer_in_language(
+        "कुछ और सवाल", _Retriever(), adapter, ModelRegistry(), _glossary()
+    )
+
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.footer.startswith(
+        crisis_response(CrisisKind.DOMESTIC_VIOLENCE, "hi")
+    )
+    assert result.answer.claims[0].text == "वापसी आवश्यक है।"
+    assert len(adapter.calls) == 4
+
+
+def test_a_crisis_turn_whose_generation_fails_still_gets_the_crisis_response() -> (
     None
 ):
-    """The cheapest way to cover a script the regex cannot match: translate,
-    then give the regex layer a second, free chance on the English result.
-    Only 2 adapter calls total -- the second check never touches the model."""
-    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, "he beats me"])
+    """Never lose the helplines: the translation succeeds, then the
+    generation call fails (the stub is exhausted). The person still gets the
+    full crisis response, with no legal answer."""
+    adapter = StubAdapter(["my husband beats me"])
     result = answer_in_language(
-        "कुछ और सवाल",
-        _RaisingRetriever(),
+        "my husband beats me", _Retriever(), adapter, ModelRegistry(), _glossary()
+    )
+
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.answer.is_answerable is False
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
+    assert "181" in [helpline.number for helpline in result.helplines]
+    assert result.helplines[-1].number == "15100"
+
+
+def test_a_crisis_turn_whose_retrieval_fails_still_gets_the_crisis_response() -> (
+    None
+):
+    adapter = StubAdapter(["my husband beats me"])
+    result = answer_in_language(
+        "my husband beats me",
+        _FailingRetriever(),
         adapter,
         ModelRegistry(),
         _glossary(),
     )
 
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
-    assert len(adapter.calls) == 2
+    assert result.answer.is_answerable is False
+    assert "181" in result.footer
+
+
+def test_a_crisis_turn_with_a_broken_api_key_still_gets_the_crisis_response() -> (
+    None
+):
+    """With every model call failing, the free regex still routes the person:
+    the query translation fails, and the helplines are returned alone."""
+    result = answer_in_language(
+        "my husband beats me",
+        _RaisingRetriever(),
+        StubAdapter([]),
+        ModelRegistry(),
+        _glossary(),
+    )
+
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert "181" in result.footer
+
+
+def test_an_ordinary_turn_whose_generation_fails_still_raises() -> None:
+    """The crisis fallback is for crisis turns only; an ordinary outage still
+    reaches the API's crisis-aware error handler, as before."""
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, "my landlord kept my deposit"])
+    with pytest.raises(RuntimeError):
+        answer_in_language(
+            "my landlord kept my deposit",
+            _Retriever(),
+            adapter,
+            ModelRegistry(),
+            _glossary(),
+        )
 
 
 # --- explicit language: the caller's choice, not only the detector's -------
@@ -596,7 +682,7 @@ def test_detection_remains_the_default_when_no_language_is_given() -> None:
     assert result.language == "hi"
 
 
-def test_explicit_language_is_reported_on_a_crisis_short_circuit() -> None:
+def test_explicit_language_is_reported_on_a_crisis_fallback() -> None:
     adapter = StubAdapter([])
     result = answer_in_language(
         "my husband beats me",
@@ -769,15 +855,14 @@ def test_the_escalation_footer_still_follows_the_document_helpline() -> None:
     assert result.helplines[-1].number == "15100"
 
 
-def test_a_question_crisis_short_circuits_even_with_a_document_attached() -> None:
-    """Ruling 1's other half: when the question itself signals crisis, the
-    short-circuit is exactly what it always was -- free, no retrieval, no
-    generation, which is why it survives a broken API key. A document
-    attached to that same turn changes nothing about it."""
-    adapter = StubAdapter([])
+def test_a_question_crisis_with_a_document_attached_is_answered_too() -> None:
+    """Ruling 1's other half, revised by the owner: when the question itself
+    signals crisis, the question's helplines lead the turn AND the question
+    is answered. A same-category document verdict adds nothing twice."""
+    adapter = StubAdapter(["my husband beats me", _generation()])
     result = answer_in_language(
         "my husband beats me",
-        _RaisingRetriever(),
+        _Retriever(),
         adapter,
         ModelRegistry(),
         _glossary(),
@@ -785,23 +870,24 @@ def test_a_question_crisis_short_circuits_even_with_a_document_attached() -> Non
     )
 
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
-    assert result.answer.is_answerable is False
-    assert len(adapter.calls) == 0
+    assert result.document_crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.answer.is_answerable is True
+    assert result.footer.count(crisis_response(CrisisKind.DOMESTIC_VIOLENCE)) == 1
 
 
 def test_both_categories_surface_when_question_and_document_differ() -> None:
     """Ruling 1, revised. A woman asking about domestic violence whose
     attached document indicates self-harm risk must get the DV helplines AND
-    Tele-MANAS. The turn is already short-circuited, so the second category
-    costs nothing -- and self-harm is at the top of the project's own
-    severity table precisely because it is the most time-critical.
+    Tele-MANAS -- self-harm is at the top of the project's own severity
+    table precisely because it is the most time-critical -- and her question
+    is still answered.
 
     Her question stays primary: its prose leads and its numbers come first,
     so the response still speaks to what she actually said."""
-    adapter = StubAdapter([])
+    adapter = StubAdapter(["my husband beats me", _generation()])
     result = answer_in_language(
         "my husband beats me",
-        _RaisingRetriever(),
+        _Retriever(),
         adapter,
         ModelRegistry(),
         _glossary(),
@@ -810,19 +896,34 @@ def test_both_categories_surface_when_question_and_document_differ() -> None:
 
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE  # primary
     assert result.document_crisis is CrisisKind.SELF_HARM  # surfaced too
-    # Both categories' prose, hers first.
+    # Both categories' prose, hers first, then the standard footer.
     assert result.footer.index("181") < result.footer.index("14416")
+    assert result.footer.index("14416") < result.footer.index("15100")
     # Both categories' numbers, tap-to-call.
     numbers = [helpline.number for helpline in result.helplines]
     assert "181" in numbers and "14416" in numbers
-    # ...and it still costs nothing.
-    assert len(adapter.calls) == 0
+    assert len(numbers) == len(set(numbers))
+    assert result.answer.is_answerable is True
 
 
 def test_the_question_category_leads_the_prose_even_when_less_urgent() -> None:
     """`most_urgent_crisis` is NOT what orders these two: evidence strength
     is. The document may be two years old or about someone else, so it never
     takes over the message, however urgent its category."""
+    result = answer_in_language(
+        "my husband beats me",
+        _Retriever(),
+        StubAdapter(["my husband beats me", _generation()]),
+        ModelRegistry(),
+        _glossary(),
+        document_crisis_kinds=(CrisisKind.SELF_HARM.value,),
+    )
+
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
+    assert result.helplines[0].number == "112"  # first of the DV set
+
+
+def test_the_question_category_also_leads_on_the_helpline_only_fallback() -> None:
     result = answer_in_language(
         "my husband beats me",
         _RaisingRetriever(),
@@ -833,7 +934,8 @@ def test_the_question_category_leads_the_prose_even_when_less_urgent() -> None:
     )
 
     assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
-    assert result.helplines[0].number == "112"  # first of the DV set
+    assert result.helplines[0].number == "112"
+    assert "14416" in [helpline.number for helpline in result.helplines]
 
 
 def test_the_same_category_in_question_and_document_is_not_repeated() -> None:
@@ -1000,7 +1102,12 @@ def test_hindi_crisis_question_on_turn_four_with_a_document_attached() -> None:
     prose comes back in Hindi, not English."""
     adapter = StubAdapter(
         [_SAFE_CLASSIFIER_RESPONSE, "english query", _generation(), TRANSLATED] * 3
-        + [_classifier_response(CrisisKind.DOMESTIC_VIOLENCE)]
+        + [
+            _classifier_response(CrisisKind.DOMESTIC_VIOLENCE),
+            "I am very scared",
+            _generation(),
+            TRANSLATED,
+        ]
     )
     retriever = _Retriever()
     for _ in range(3):
@@ -1015,7 +1122,7 @@ def test_hindi_crisis_question_on_turn_four_with_a_document_attached() -> None:
 
     result = answer_in_language(
         "मुझे बहुत डर लगता है",
-        _RaisingRetriever(),
+        retriever,
         adapter,
         ModelRegistry(),
         _glossary(),
@@ -1024,8 +1131,13 @@ def test_hindi_crisis_question_on_turn_four_with_a_document_attached() -> None:
 
     assert result.language == "hi"
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.footer.startswith(
+        crisis_response(CrisisKind.DOMESTIC_VIOLENCE, "hi")
+    )
     assert "महिला हेल्पलाइन" in result.footer
     assert "181" in result.footer
+    # ...and her question is answered, in Hindi, after the helplines.
+    assert result.answer.claims[0].text == "वापसी आवश्यक है।"
 
 
 def test_a_hindi_question_about_rent_with_a_protection_order_attached() -> None:

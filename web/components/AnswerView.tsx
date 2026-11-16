@@ -47,7 +47,7 @@ interface AnswerViewProps {
  * the sources sit directly beneath it; everything this system says *about*
  * that answer -- the framing note, the corpus snapshot, the escalation
  * footer -- is smaller, muted, and below a rule. When there are no
- * citations (an unanswerable turn, or a crisis short-circuit) that heading
+ * citations (an unanswerable turn, or a crisis turn with no legal answer) that heading
  * is withheld: dressing "we found nothing" up as a statement of law would
  * be the exact overclaim the whole validation pipeline exists to prevent.
  *

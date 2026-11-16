@@ -50,7 +50,10 @@ even asked, so a classifier *outage* — an expired key, a rate limit, a
 transient network failure — would turn **every** ordinary question asked
 during that outage into a fabricated self-harm crisis, for as long as the
 outage lasts. Someone asking how to register a property would get suicide
-helplines and no legal answer at all. That is a worse failure mode than the
+helplines and (while a crisis still replaced the answer) no legal answer at
+all; even now that a crisis leads the answer rather than replacing it,
+suicide helplines heading every ordinary answer would be wrong. That is a
+worse failure mode than the
 one it was trying to prevent, and unlike a single missed crisis it is
 silent, sustained, and affects every user, not one.
 

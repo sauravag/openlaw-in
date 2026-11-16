@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from openlaw.answers.escalation import CrisisKind
+from openlaw.answers.escalation import CrisisKind, crisis_response
 from openlaw.answers.history import HistoryTurn
 from openlaw.answers.models import ModelRegistry, StubAdapter
 from openlaw.answers.schema import Claim
@@ -124,12 +124,12 @@ class _ConversationRetriever:
 
 
 class _RaisingRetriever:
-    """Fails the test if retrieval is ever reached (crisis short-circuit)."""
+    """Fails the test if retrieval is ever reached (an earlier step failed)."""
 
     def retrieve(
         self, english_query: str, carried_chunk_ids: tuple[str, ...]
     ) -> RetrievalContext:
-        raise AssertionError("retrieval must not run once a crisis is detected")
+        raise AssertionError("retrieval was reached unexpectedly")
 
 
 def _legal(
@@ -490,10 +490,34 @@ def _three_earlier_turns() -> tuple[HistoryTurn, ...]:
     )
 
 
-def test_a_crisis_on_turn_four_short_circuits_with_no_model_call() -> None:
-    """Crisis routing runs first on every turn, not only the first, and the
-    question-derived short-circuit still costs zero model calls: the regex
-    fires before the classifier is ever asked."""
+def test_a_crisis_on_turn_four_leads_the_turn_and_is_answered() -> None:
+    """Crisis routing runs first on every turn, not only the first. The regex
+    fires before the classifier is ever asked; the helplines lead and the
+    question is still answered (owner's ruling)."""
+    adapter = StubAdapter(["my husband beats me", _legal(), _document()])
+
+    result = answer_in_conversation(
+        "my husband beats me",
+        _ConversationRetriever(),
+        adapter,
+        ModelRegistry(),
+        _glossary(),
+        history=_three_earlier_turns(),
+        document_excerpts=_LEASE,
+    )
+
+    assert "safety classifier" not in adapter.calls[0]["system"]
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.turn_index == 3
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
+    assert result.answer.claims[0].text == "A refund is required."
+
+
+def test_a_crisis_on_turn_four_with_every_model_call_failing_keeps_its_helplines() -> (
+    None
+):
+    """With a broken API key the free regex still routes the person: the
+    query translation fails and the helplines are returned alone."""
     adapter = StubAdapter([])
 
     result = answer_in_conversation(
@@ -506,7 +530,6 @@ def test_a_crisis_on_turn_four_short_circuits_with_no_model_call() -> None:
         document_excerpts=_LEASE,
     )
 
-    assert adapter.calls == []
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert result.turn_index == 3
     assert result.answer.claims == ()
@@ -815,8 +838,9 @@ def test_a_history_disclosure_and_a_document_verdict_resolve_by_severity() -> No
 
 
 def test_a_question_crisis_still_leads_over_an_earlier_disclosure() -> None:
-    """The short-circuit is unchanged, and the second category is added to
-    it rather than taking over."""
+    """The question's category leads (here on the helpline-only fallback),
+    and the earlier disclosure's category is added rather than taking
+    over."""
     result = answer_in_conversation(
         "i want to kill myself",
         _RaisingRetriever(),
