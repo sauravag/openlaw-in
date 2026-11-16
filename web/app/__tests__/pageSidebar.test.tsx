@@ -195,6 +195,26 @@ describe("the conversation sidebar (Mode B)", () => {
     await waitFor(() => expect(mockedPage.mock.calls.length).toBeGreaterThan(before));
   });
 
+  it("entries are disabled while a conversation is being opened", async () => {
+    stubSession(true);
+    const other = { ...entry, id: "conv-3" };
+    mockedPage.mockResolvedValue({ kind: "page", conversations: [entry, other], nextOffset: null });
+    let releaseRead!: (outcome: Awaited<ReturnType<typeof readConversation>>) => void;
+    mockedRead.mockReturnValue(new Promise((resolve) => (releaseRead = resolve)));
+    render(<HomePage />);
+    const nav = await screen.findByRole("navigation", { name: sidebarStrings.conversationsNavLabel });
+    const [first, second] = await within(within(nav).getByRole("list")).findAllByRole("button");
+
+    await userEvent.click(first);
+
+    await waitFor(() => expect(second).toBeDisabled());
+    releaseRead(restoredView);
+    expect(await screen.findByText("Earlier answer.")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(within(nav).getByRole("list")).getByRole("button")).not.toBeDisabled(),
+    );
+  });
+
   it("signed out: no sidebar and no Chats button", async () => {
     stubSession(false);
     render(<HomePage />);

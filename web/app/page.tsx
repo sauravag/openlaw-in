@@ -260,7 +260,7 @@ function HomeSidebar({ page }: { page: HomeState }) {
       email={page.session.email}
       refreshKey={page.sidebarRefreshKey}
       currentId={page.pointer.conversationId}
-      isBusy={chat.status === "loading"}
+      isBusy={chat.status === "loading" || chat.isOpening}
       isPanelOpen={conversationsPanel.isOpen}
       onClosePanel={conversationsPanel.close}
       onOpen={openConversation}

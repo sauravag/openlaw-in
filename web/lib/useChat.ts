@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useRef, useState, type MutableRefObject } from 'react'
 import { askQuestion, deleteConversation, readConversation } from './api'
 import { attachedFromConversationCard, type AttachedDocument } from './documents'
 import type { Language } from './languages'
@@ -39,6 +39,8 @@ export interface ChatState {
   errorMessage: string | null
   pending: PendingTurn | null
   isSessionEnded: boolean
+  /** A conversation is being fetched to open: switching now would race it. */
+  isOpening: boolean
   ask: (question: string) => Promise<AskResult>
   showConversation: (id: string, turns: ThreadTurn[], documents: AttachedDocument[]) => void
   openConversation: (id: string) => Promise<void>
@@ -61,6 +63,14 @@ interface TurnState {
   setIsSessionEnded: (isEnded: boolean) => void
   fail: (message: string) => void
   recordTurn: (asked: PendingTurn, outcome: TurnOutcome, language: string) => void
+  /** A question is in flight. A ref, not `status`: two actions inside one
+   * render must not both pass a check against the same stale state value. */
+  isAsking: MutableRefObject<boolean>
+  /** Bumped by every move to another thread (open, New chat, delete, ask), so
+   * an open that lands after the person moved on can tell and drop itself. */
+  navigation: MutableRefObject<number>
+  isOpening: boolean
+  setIsOpening: (isOpening: boolean) => void
 }
 
 function useTurnState(): TurnState {
@@ -69,7 +79,10 @@ function useTurnState(): TurnState {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingTurn | null>(null)
   const [isSessionEnded, setIsSessionEnded] = useState(false)
+  const [isOpening, setIsOpening] = useState(false)
   const turnCounter = useRef(0)
+  const isAsking = useRef(false)
+  const navigation = useRef(0)
 
   function fail(message: string): void {
     setStatus('error')
@@ -84,20 +97,21 @@ function useTurnState(): TurnState {
 
   return {
     turns, setTurns, status, setStatus, errorMessage, setErrorMessage, pending, setPending,
-    isSessionEnded, setIsSessionEnded, fail, recordTurn,
+    isSessionEnded, setIsSessionEnded, fail, recordTurn, isAsking, navigation, isOpening,
+    setIsOpening,
   }
 }
 
 /** Sending one question. See `useChat` for the rules it keeps. */
 function useAsk(state: TurnState, { language, pointer, attachments }: UseChatParams) {
-  const isAsking = useRef(false)
+  const { isAsking } = state
 
   return async function ask(rawQuestion: string): Promise<AskResult> {
     const question = rawQuestion.trim()
-    // A ref, not `status`: two Enter presses inside one render must not both
-    // pass a check against the same stale state value.
     if (!question || isAsking.current) return 'ignored'
     isAsking.current = true
+    // An open still on its way must not land on top of this question.
+    abandonOpen(state)
     // Captured now, not read at render time: deleting a document later must
     // not rewrite what this turn says was read for it.
     const filenames = attachments.documents.map((document) => document.filename)
@@ -131,6 +145,12 @@ function useAsk(state: TurnState, { language, pointer, attachments }: UseChatPar
   }
 }
 
+/** Move on from any open still in flight: its result will be dropped. */
+function abandonOpen(state: TurnState): void {
+  state.navigation.current += 1
+  state.setIsOpening(false)
+}
+
 /** Showing, opening and deleting whole conversations. */
 function useConversationActions(state: TurnState, { language, pointer, attachments }: UseChatParams) {
   /** Show a conversation the server gave back, with the documents it says
@@ -138,15 +158,29 @@ function useConversationActions(state: TurnState, { language, pointer, attachmen
   function showConversation(id: string, restored: ThreadTurn[], documents: AttachedDocument[]) {
     pointer.setConversationId(id)
     state.setTurns(restored)
+    state.setStatus('idle')
+    state.setErrorMessage(null)
     state.setIsSessionEnded(false)
     attachments.restore(documents)
   }
 
   /** Open one of the signed-in person's own conversations from the list.
-   * A no-op while a reply is loading: its answer would land in the wrong thread. */
+   * A no-op while a reply is loading: its answer would land in the wrong thread.
+   * A result that arrives after the person moved on (another open, New chat,
+   * delete, or a question sent) is dropped, so it never replaces that thread. */
   async function openConversation(id: string): Promise<void> {
-    if (state.status === 'loading') return
-    const outcome = await readConversation({ conversationId: id, language })
+    if (state.isAsking.current) return
+    state.navigation.current += 1
+    const mine = state.navigation.current
+    state.setIsOpening(true)
+    let outcome: Awaited<ReturnType<typeof readConversation>>
+    try {
+      outcome = await readConversation({ conversationId: id, language })
+    } finally {
+      // Whoever moved on has already cleared the flag for their own action.
+      if (state.navigation.current === mine) state.setIsOpening(false)
+    }
+    if (state.navigation.current !== mine || state.isAsking.current) return
     if (outcome.kind === 'refused') return state.fail(outcome.data.detail)
     const { conversation_id: conversationId, turns, documents } = outcome.data
     showConversation(
@@ -163,7 +197,8 @@ function useConversationActions(state: TurnState, { language, pointer, attachmen
    * list. A no-op while a reply is loading, for the same reason as above.
    */
   function startNewConversation(): void {
-    if (state.status === 'loading') return
+    if (state.isAsking.current) return
+    abandonOpen(state)
     state.setTurns([])
     state.setPending(null)
     state.setStatus('idle')
@@ -182,6 +217,7 @@ function useConversationActions(state: TurnState, { language, pointer, attachmen
    */
   async function deleteCurrentConversation(): Promise<void> {
     if (pointer.conversationId === null) return
+    abandonOpen(state)
     const outcome = await deleteConversation({ conversationId: pointer.conversationId, language })
     if (outcome.kind === 'refused') return state.fail(outcome.data.detail)
     state.setTurns([])
@@ -217,6 +253,7 @@ export function useChat(params: UseChatParams): ChatState {
     errorMessage: state.errorMessage,
     pending: state.pending,
     isSessionEnded: state.isSessionEnded,
+    isOpening: state.isOpening,
     ask,
     ...actions,
     markSessionEnded: () => state.setIsSessionEnded(true),
