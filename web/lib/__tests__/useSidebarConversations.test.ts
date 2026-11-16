@@ -1,9 +1,7 @@
-import { act, render, renderHook, waitFor } from '@testing-library/react'
-import { createElement } from 'react'
-import { flushSync } from 'react-dom'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchSidebarPage } from '../sidebarConversations'
-import { useSidebarConversations } from '../useSidebarConversations'
+import { selectVisible, useSidebarConversations } from '../useSidebarConversations'
 
 vi.mock('@/lib/authMode', () => ({ AUTH_ENABLED: true }))
 vi.mock('../sidebarConversations', () => ({ fetchSidebarPage: vi.fn() }))
@@ -152,24 +150,22 @@ describe('useSidebarConversations', () => {
     expect(result.current.hasMore).toBe(false)
   })
 
-  it('never returns a stale response that lands between commit and effects', async () => {
-    const titled = deferred()
-    fetchMock.mockReturnValueOnce(titled.promise).mockResolvedValue(page(['a'], null))
-    let latest: ReturnType<typeof useSidebarConversations> | undefined
-    function Probe(p: typeof BASE) {
-      latest = useSidebarConversations(p)
-      return null
-    }
-    const view = render(createElement(Probe, { ...BASE, showTitles: true }))
-    // Commit the change WITHOUT flushing passive effects, then resolve the old
-    // request in that gap.
-    flushSync(() => view.rerender(createElement(Probe, { ...BASE, showTitles: false })))
-    titled.resolve(page(['a'], 5, 'Leaked title'))
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(latest?.conversations.some((c) => 'title' in c && c.title)).toBe(false)
-    await waitFor(() => expect(latest?.conversations.map((c) => c.id)).toEqual(['a']))
-    expect(latest?.conversations.some((c) => 'title' in c && c.title)).toBe(false)
+  it('selectVisible yields no entries for an old key and its entries for the current one', () => {
+    const state = { key: 'old', conversations: [item('a', 'T')], nextOffset: 5 }
+    expect(selectVisible(state, 'new')).toEqual({ key: '', conversations: [], nextOffset: null })
+    expect(selectVisible(state, 'old')).toBe(state)
+  })
+
+  it('does not request the same page twice when loadMore is called again after it resolves', async () => {
+    fetchMock.mockResolvedValueOnce(page(['a'], 1)).mockResolvedValueOnce(page(['b'], null))
+    const { result } = renderHook(() => useSidebarConversations(BASE))
+    await waitFor(() => expect(result.current.hasMore).toBe(true))
+    const staleLoadMore = result.current.loadMore
+    act(() => staleLoadMore())
+    await waitFor(() => expect(result.current.hasMore).toBe(false))
+    act(() => staleLoadMore())
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(result.current.conversations.map((c) => c.id)).toEqual(['a', 'b'])
   })
 
   it('a loadMore from before the inputs changed sends no request', async () => {

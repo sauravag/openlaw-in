@@ -13,6 +13,11 @@ interface SidebarState {
 
 const EMPTY: SidebarState = { key: '', conversations: [], nextOffset: null }
 
+/** The entries to show: only those fetched for the current inputs. */
+export function selectVisible(state: SidebarState, key: string): SidebarState {
+  return state.key === key ? state : EMPTY
+}
+
 /**
  * The sidebar's conversations, paged. Page 1 reloads (dropping any further
  * pages) whenever `enabled`, `language`, `showTitles` or `refreshKey` changes.
@@ -45,11 +50,14 @@ export function useSidebarConversations(params: {
     setSeenKey(inputsKey)
     setState(EMPTY)
   }
-  const visible = state.key === inputsKey ? state : EMPTY
+  const visible = selectVisible(state, inputsKey)
 
   // Bumped on every reload; a response from an older generation is dropped.
   const generation = useRef(0)
   const isLoadingMore = useRef(false)
+  // The offset last asked for. `loadMore` closes over the rendered offset, so a
+  // call between a response and the re-render must not ask for the same page.
+  const lastRequestedOffset = useRef<number | null>(null)
   // The latest committed inputs. A layout effect, not a passive one: it runs
   // inside the commit, before any fetch can resolve or a stale callback fire.
   const latestKey = useRef(inputsKey)
@@ -61,6 +69,7 @@ export function useSidebarConversations(params: {
     generation.current += 1
     const mine = generation.current
     isLoadingMore.current = false
+    lastRequestedOffset.current = null
     if (!AUTH_ENABLED || !enabled) return
     void fetchSidebarPage({ language, offset: 0, includeTitles: showTitles }).then((outcome) => {
       if (generation.current !== mine || outcome.kind !== 'page') return
@@ -78,12 +87,17 @@ export function useSidebarConversations(params: {
     // the old preference (e.g. titled after titles were switched off).
     if (latestKey.current !== inputsKey) return
     if (!AUTH_ENABLED || !enabled || offset === null || isLoadingMore.current) return
+    if (lastRequestedOffset.current === offset) return
     const mine = generation.current
     isLoadingMore.current = true
+    lastRequestedOffset.current = offset
     void fetchSidebarPage({ language, offset, includeTitles: showTitles }).then((outcome) => {
       if (generation.current !== mine) return
       isLoadingMore.current = false
-      if (outcome.kind !== 'page') return
+      if (outcome.kind !== 'page') {
+        lastRequestedOffset.current = null // a failed page may be retried
+        return
+      }
       setState((previous) =>
         previous.key !== inputsKey
           ? previous
