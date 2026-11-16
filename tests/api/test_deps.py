@@ -332,8 +332,11 @@ def test_build_search_fn_forwards_the_question_and_vector_to_search(
 
     seen: dict = {}
 
-    def _fake_search(client, qdrant_url, text, vector, limit):
-        seen.update(client=client, qdrant_url=qdrant_url, text=text, vector=vector, limit=limit)
+    def _fake_search(client, qdrant_url, text, vector, limit, statute_floor, max_chars):
+        seen.update(
+            client=client, qdrant_url=qdrant_url, text=text, vector=vector, limit=limit,
+            statute_floor=statute_floor, max_chars=max_chars,
+        )
         return ("sentinel",)
 
     monkeypatch.setattr(deps_module, "search", _fake_search)
@@ -350,7 +353,22 @@ def test_build_search_fn_forwards_the_question_and_vector_to_search(
         "text": "my landlord kept my deposit",
         "vector": [0.1, 0.2],
         "limit": deps_module.RETRIEVAL_LIMIT,
+        "statute_floor": deps_module.STATUTE_FLOOR,
+        "max_chars": deps_module.RETRIEVAL_MAX_CHARS,
     }
+
+
+def test_the_pool_reaching_the_generator_is_about_sixteen_with_eight_statute_slots() -> None:
+    """Retrieval quality item 1: the old 10-chunk, ~5/5 interleaved pool cut
+    HMA s.21B (statute rank 8) for a stuck-divorce question. The pool must
+    also fit the generator's own bounds so nothing is silently trimmed."""
+    import openlaw.api.deps as deps_module
+    from openlaw.answers.generate import MAX_CONTEXT_CHARS, MAX_CONTEXT_CHUNKS
+
+    assert deps_module.RETRIEVAL_LIMIT == 16
+    assert deps_module.STATUTE_FLOOR == 8
+    assert deps_module.RETRIEVAL_LIMIT <= MAX_CONTEXT_CHUNKS
+    assert deps_module.RETRIEVAL_MAX_CHARS <= MAX_CONTEXT_CHARS
 
 
 def test_production_app_builds_a_working_app_without_touching_qdrant_or_neo4j(

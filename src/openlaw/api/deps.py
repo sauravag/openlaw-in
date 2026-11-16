@@ -51,6 +51,7 @@ from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
+from openlaw.answers.generate import MAX_CONTEXT_CHARS
 from openlaw.answers.models import LLMAdapter, ModelRegistry
 from openlaw.answers.openrouter_client import OpenRouterAdapter
 from openlaw.answers.routing import (
@@ -80,7 +81,20 @@ from openlaw.retrieval.fetch import fetch_chunks_by_id
 from openlaw.retrieval.rerank import ScoreReranker, merge_chunks
 from openlaw.retrieval.search import search
 
-RETRIEVAL_LIMIT = 10
+#: Chunks of fresh retrieval that reach the generator per turn (was 10, which
+#: interleaved ~5 statutes and ~5 judgments and cut HMA s.21B at statute rank
+#: 8 for a stuck-divorce question). 16 sits under the generator's own
+#: `MAX_CONTEXT_CHUNKS` (20), leaving room for carried chunks; at the ~2.6k
+#: characters a chunk averaged in that investigation it is ~42k of the 60k
+#: `MAX_CONTEXT_CHARS`.
+RETRIEVAL_LIMIT = 16
+#: Of `RETRIEVAL_LIMIT`, the slots guaranteed to statutes before judgments
+#: take the rest (`openlaw.retrieval.pool.select_pool`).
+STATUTE_FLOOR = 8
+#: Character budget for fresh retrieval -- the generator's own bound, so the
+#: pool, not the generator's tail-cut, decides what goes when a turn's chunks
+#: run long (judgments first, never a statute inside the floor).
+RETRIEVAL_MAX_CHARS = MAX_CONTEXT_CHARS
 EXPANSION_LIMIT = 20
 
 #: A resolved graph-expansion result: bare (id, label, source_url) rows from
@@ -183,7 +197,13 @@ def _build_search_fn(
     load) and is the only way to satisfy both constraints at once.
     """
     return lambda vector: search(
-        client, settings.qdrant_url, question, vector, limit=RETRIEVAL_LIMIT
+        client,
+        settings.qdrant_url,
+        question,
+        vector,
+        limit=RETRIEVAL_LIMIT,
+        statute_floor=STATUTE_FLOOR,
+        max_chars=RETRIEVAL_MAX_CHARS,
     )
 
 

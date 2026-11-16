@@ -59,6 +59,15 @@ collection's own best-first order is instead fused via each hit's reciprocal
 rank, so no collection can out-rank another purely by running a higher score
 scale. The `score` on a returned `RetrievedChunk` is therefore the fused
 rank-based score, not the raw per-collection Qdrant score.
+
+**The production pool is quota-split, not a straight cap.** When `search` is
+given a `statute_floor`, the fused list is not cut to `limit` by rank alone:
+`openlaw.retrieval.pool.select_pool` drops duplicate statute sections, then
+guarantees statutes `statute_floor` slots and gives judgments the rest (see
+that module for why: a straight cap interleaved acts and judgments roughly
+evenly, and spent the scarce statute half on duplicate copies). Without a
+`statute_floor` (the evaluation harness and older callers) the straight
+rank cap is unchanged.
 """
 
 from typing import Any, Protocol
@@ -70,6 +79,7 @@ from openlaw.index.hc_upsert import HC_COLLECTION
 from openlaw.index.sparse import token_index, tokenise
 from openlaw.index.upsert import SC_COLLECTION
 from openlaw.retrieval.context import ChunkKind, RetrievedChunk
+from openlaw.retrieval.pool import select_pool
 
 ACTS_INDIA_V1 = "acts_india_v1"
 SEARCH_COLLECTIONS: tuple[str, ...] = (ACTS_INDIA_V1, SC_COLLECTION, HC_COLLECTION)
@@ -251,7 +261,7 @@ def _collections_to_search(court_codes: tuple[str, ...] | None) -> tuple[str, ..
 
 
 def _merge_by_rank(
-    results_by_collection: list[list[RetrievedChunk]], limit: int
+    results_by_collection: list[list[RetrievedChunk]], limit: int | None
 ) -> tuple[RetrievedChunk, ...]:
     """Fuse each collection's own best-first hits by reciprocal rank.
 
@@ -259,7 +269,8 @@ def _merge_by_rank(
     docstring. Each chunk's contribution is `1 / (RRF_K + rank)`, summed
     across every collection it appears in (rank 1-based, within that
     collection's own returned order); chunks are then ordered by that summed
-    score, descending, and capped to `limit`. The chunk kept for a duplicate
+    score, descending, and capped to `limit` (`None` keeps every hit, for
+    `select_pool` to cut by kind instead). The chunk kept for a duplicate
     id is whichever collection returned it first (arbitrary but deterministic
     -- duplicates across these collections are not expected in practice). The
     returned `score` is the fused rank score, not any collection's raw score.
@@ -291,11 +302,23 @@ def _run_across_collections(
     rank-merged, limit-capped hits. Shared by `search`, `search_dense_only`,
     and `search_sparse_only` -- only the request body differs between them.
     """
-    results_by_collection = [
+    return _merge_by_rank(
+        _search_each_collection(client, qdrant_url, request, court_codes), limit
+    )
+
+
+def _search_each_collection(
+    client: _PostClient,
+    qdrant_url: str,
+    request: dict[str, Any],
+    court_codes: tuple[str, ...] | None,
+) -> list[list[RetrievedChunk]]:
+    """Run `request` against every applicable collection, one best-first
+    list per collection."""
+    return [
         _search_collection(client, qdrant_url, collection, request)
         for collection in _collections_to_search(court_codes)
     ]
-    return _merge_by_rank(results_by_collection, limit)
 
 
 def search(
@@ -305,6 +328,8 @@ def search(
     vector: list[float],
     limit: int = 10,
     court_codes: tuple[str, ...] | None = None,
+    statute_floor: int | None = None,
+    max_chars: int | None = None,
 ) -> tuple[RetrievedChunk, ...]:
     """Search every applicable corpus collection and return the rank-merged
     hits (see the module docstring: `hc_judgments_v1` only joins when
@@ -315,10 +340,20 @@ def search(
     independent of `vector` (the dense embedding of the same query). Both are
     required: a dense-only caller cannot get hybrid search's lexical-match
     benefit for free.
+
+    With `statute_floor`, the result is `openlaw.retrieval.pool.select_pool`'s
+    quota-split, de-duplicated pool of at most `limit` chunks, trimmed to
+    `max_chars` when given. Each collection is asked for the full `limit`, so
+    either kind can fill the whole pool when the other runs short.
     """
     sparse_vector = build_sparse_query_vector(text)
     request = build_hybrid_request(vector, sparse_vector, limit, court_codes)
-    return _run_across_collections(client, qdrant_url, request, limit, court_codes)
+    if statute_floor is None:
+        return _run_across_collections(client, qdrant_url, request, limit, court_codes)
+    ranked = _merge_by_rank(
+        _search_each_collection(client, qdrant_url, request, court_codes), None
+    )
+    return select_pool(ranked, limit, statute_floor, max_chars)
 
 
 def search_dense_only(

@@ -621,3 +621,81 @@ def test_chunk_from_point_survives_an_explicit_null_judges_payload() -> None:
 
     assert chunk is not None
     assert chunk.judges == ()
+
+
+# --- statute floor + dedupe pool (retrieval quality, item 1) --------------
+
+
+def _acts_points(count: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "score": 1.0,
+            "payload": {
+                "chunk_id": f"a{i}",
+                "text": f"Act: X | India | Central | In Force\nSection {i}\n\nbody {i}",
+                "source_url": f"https://indiacode.nic.in/a{i}",
+            },
+        }
+        for i in range(count)
+    ]
+
+
+def _sc_points(count: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "score": 1.0,
+            "payload": {
+                "chunk_id": f"j{i}",
+                "case_id": f"case{i}",
+                "text": f"judgment {i}",
+                "source_url": f"https://s3.amazonaws.com/j{i}",
+            },
+        }
+        for i in range(count)
+    ]
+
+
+def test_search_with_a_statute_floor_returns_the_quota_split_pool() -> None:
+    client = _FakeClient({ACTS_INDIA_V1: _acts_points(20), SC_COLLECTION: _sc_points(20)})
+
+    result = search(
+        client, "http://127.0.0.1:6333", "divorce delay", [0.1] * 1024,
+        limit=16, statute_floor=8,
+    )
+
+    kinds = [chunk.kind for chunk in result]
+    assert len(result) == 16
+    assert kinds.count(ChunkKind.PROVISION) == 8
+    assert kinds.count(ChunkKind.JUDGMENT) == 8
+
+
+def test_search_with_a_statute_floor_asks_each_collection_for_the_full_limit() -> None:
+    """Each collection must return enough candidates to fill its share even
+    after duplicates are dropped -- asking each for the whole limit does."""
+    client = _FakeClient({ACTS_INDIA_V1: [], SC_COLLECTION: []})
+
+    search(
+        client, "http://127.0.0.1:6333", "divorce delay", [0.1] * 1024,
+        limit=16, statute_floor=8,
+    )
+
+    assert all(body["limit"] == 16 for _, body in client.requests)
+
+
+def test_search_with_a_statute_floor_drops_duplicate_sections() -> None:
+    duplicate_body = "Act: P | India | State | In Force\nSection 32\n\nsame words"
+    points = [
+        {"score": 1.0, "payload": {"chunk_id": cid, "text": text, "source_url": "https://indiacode.nic.in/x"}}
+        for cid, text in (
+            ("state_copy", duplicate_body),
+            ("central_copy", duplicate_body.replace("State", "Central")),
+            ("other", "Act: Q | India | Central | In Force\nSection 1\n\ndifferent"),
+        )
+    ]
+    client = _FakeClient({ACTS_INDIA_V1: points, SC_COLLECTION: []})
+
+    result = search(
+        client, "http://127.0.0.1:6333", "x", [0.1] * 1024, limit=16, statute_floor=8
+    )
+
+    assert [chunk.chunk_id for chunk in result] == ["state_copy", "other"]
