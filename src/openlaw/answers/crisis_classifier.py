@@ -115,13 +115,20 @@ or marriage.
 euphemisms such as "I want to end it all" or "I don't want to be here \
 anymore".
 
+These categories mean that a person — the user or someone they describe — \
+is being harmed or is in danger now, or is at ongoing risk. A question about \
+legal proceedings is "none": a case already filed or registered (divorce, \
+dowry / Section 498A / BNS 85-86, a domestic-violence complaint under the \
+PWDV Act, maintenance, custody), court delays, bail, evidence, procedure, or \
+past events discussed as the subject of a case — unless the message also \
+describes current or ongoing violence, threats, or fear for safety.
+
 Respond with strict JSON only, matching this shape exactly:
 {"crisis": "domestic_violence" | "custodial_abuse" | "trafficking" | \
 "self_harm" | "none"}
 
-Use "none" only when the message shows no sign of any of the above. When \
-genuinely uncertain, prefer naming the closest category over "none": missing \
-a real crisis is far worse than one unnecessary helpline."""
+Use "none" when the message shows no sign of present or ongoing danger or \
+harm of the kinds above."""
 
 #: The classifier only ever emits one short JSON object, but 32 tokens (the
 #: previous value) sat below the documented ~256 guidance for a
