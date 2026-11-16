@@ -73,6 +73,12 @@ class DraftAnswer(BaseModel):
     claims: tuple[Claim, ...] = ()
     document_claims: tuple[DocumentClaim, ...] = ()
     sufficient: bool
+    #: False when no excerpt addresses what the person is trying to achieve
+    #: (SYSTEM_PROMPT rule 13). A flag, not prose: "none of the sources
+    #: covers this" has no chunk id to cite, so as a claim it could never
+    #: survive validation. Defaults to True so a reply from before the field
+    #: existed parses exactly as it did.
+    goal_covered: bool = True
 
     @classmethod
     def from_json(cls, payload: str) -> "DraftAnswer":
@@ -178,11 +184,19 @@ ANSWER_JSON_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "False when the provided sources cannot support an answer.",
         },
+        "goal_covered": {
+            "type": "boolean",
+            "description": (
+                "False when none of the excerpts addresses what the person is "
+                "trying to achieve."
+            ),
+        },
     },
     # `document_claims` is listed here — an empty array on a turn with no
     # uploaded document — because OpenRouter's `strict` structured-output
-    # mode requires every declared property to appear in `required`.
-    "required": ["summary", "claims", "document_claims", "sufficient"],
+    # mode requires every declared property to appear in `required`. The
+    # same rule puts `goal_covered` here.
+    "required": ["summary", "claims", "document_claims", "sufficient", "goal_covered"],
     "additionalProperties": False,
 }
 

@@ -69,6 +69,26 @@ _NO_VERIFIABLE_ANSWER: dict[str, str] = {
     "hi": "हमें इस सवाल का कोई सत्यापित उत्तर इस कॉर्पस में नहीं मिला।",
 }
 
+#: Leads `answer` when the generator reported that none of the excerpts
+#: addresses what the person is trying to achieve
+#: (`ValidatedAnswer.goal_not_covered`, retrieval quality item 4). Fixed text,
+#: never model prose -- "none of the sources covers this" has no chunk id to
+#: cite, so as a claim it could never pass validation, and nothing
+#: unverified may reach the reader. Static EN/HI, the same rule as
+#: `_NO_VERIFIABLE_ANSWER`.
+_GOAL_NOT_COVERED: dict[str, str] = {
+    "en": (
+        "None of the sources I found directly covers what you are trying to do. "
+        "Below is the closest related law I found. A lawyer or your District "
+        "Legal Services Authority can advise on your specific situation."
+    ),
+    "hi": (
+        "मुझे जो स्रोत मिले, उनमें से कोई भी सीधे उस बात के बारे में नहीं है जो आप "
+        "करना चाहते हैं। नीचे इससे जुड़ा सबसे नज़दीकी क़ानून दिया गया है। आपकी ख़ास "
+        "स्थिति के लिए कोई वकील या आपका ज़िला विधिक सेवा प्राधिकरण सलाह दे सकता है।"
+    ),
+}
+
 #: Shown as `answer` on a crisis turn, ahead of the specific `crisis_response`
 #: helpline text -- see `to_response`'s H3 fix below. A client that renders
 #: only `answer` (the naive, most likely default) must still see something
@@ -579,9 +599,17 @@ def _render_answer(answer: ValidatedAnswer, language: str) -> str:
 
     NOT called for a crisis turn -- see `to_response`, which branches before
     this function ever runs (H3).
+
+    When the generator reported that no excerpt addresses the person's goal,
+    the fixed `_GOAL_NOT_COVERED` notice leads the claims. It is added only
+    when there ARE claims to show: an unanswerable turn already says it found
+    no verifiable answer.
     """
     claims = answer.claims if answer.is_answerable else ()
-    return render_claim_answer(claims, language)
+    rendered = render_claim_answer(claims, language)
+    if claims and answer.goal_not_covered:
+        return f"{_static_text(_GOAL_NOT_COVERED, language)}\n\n{rendered}"
+    return rendered
 
 
 def render_document_claims(

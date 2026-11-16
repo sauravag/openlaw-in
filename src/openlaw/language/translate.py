@@ -457,4 +457,5 @@ def translate_answer(
         document_citations=answer.document_citations,
         dropped=answer.dropped,
         is_answerable=answer.is_answerable,
+        goal_not_covered=answer.goal_not_covered,
     )

@@ -310,6 +310,13 @@ class ValidatedAnswer(BaseModel):
     document_citations: tuple[DocumentCitation, ...] = ()
     dropped: tuple[DroppedClaim, ...] = ()
     is_answerable: bool = False
+    #: The model reported that no excerpt addresses what the person is
+    #: trying to achieve (`DraftAnswer.goal_covered` is False). A boolean,
+    #: never prose: the renderer turns it into a FIXED, pre-written notice
+    #: (`openlaw.api.schemas`), so this path puts no unverified model text in
+    #: front of anyone. It does not touch `is_answerable` or any claim --
+    #: surviving claims are still only the cited ones.
+    goal_not_covered: bool = False
 
 
 #: Either kind of claim the model can emit. Both carry `text` and a tuple of
@@ -520,6 +527,7 @@ def validate_answer(
             for claim in rejected + rejected_documents
         ),
         is_answerable=is_answerable,
+        goal_not_covered=not draft.goal_covered,
     )
 
 
