@@ -594,7 +594,7 @@ export type ConversationListOutcome =
   | { kind: "list"; data: ConversationListData }
   | { kind: "refused"; status: number; data: RefusalData };
 
-function isConversationListItem(value: unknown): value is ConversationListItemData {
+export function isConversationListItem(value: unknown): value is ConversationListItemData {
   if (typeof value !== "object" || value === null) return false;
   const item = value as Record<string, unknown>;
   return (

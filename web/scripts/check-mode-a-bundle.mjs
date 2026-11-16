@@ -26,6 +26,8 @@ export const FORBIDDEN = [
   "/api/auth/migrate",
   "/account/delete",
   "/signup",
+  // The sidebar's titled fetch lives in a Mode B-only module.
+  "include_titles",
 ];
 
 const STATIC_EXTENSIONS = /\.(js|css|html|json|txt|map)$/;
