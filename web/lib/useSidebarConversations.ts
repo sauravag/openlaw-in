@@ -19,16 +19,20 @@ export function selectVisible(state: SidebarState, key: string): SidebarState {
 }
 
 /**
- * The sidebar's conversations, paged. Page 1 reloads (dropping any further
- * pages) whenever `enabled`, `language`, `showTitles` or `refreshKey` changes.
- * Entries are tagged with the inputs that fetched them and only returned while
- * those are still the current inputs, so titles fetched for an old preference
- * are never shown, even by a response that lands between a render and its
- * effects. Mode B only: nothing is asked otherwise, and turning `enabled` off
- * (sign-out) clears the list at once.
+ * The sidebar's conversations, paged.
  *
- * A failed fetch is shown as no entries: the sidebar is a convenience, never
- * the only way to reach help.
+ * Two kinds of input change, handled differently:
+ * - `enabled` or `showTitles` (the privacy inputs): the list is emptied at
+ *   once, during render, and reloaded. Entries are tagged with these inputs
+ *   and only returned while they are still current, so titles fetched for an
+ *   old preference are never shown, even by a response that lands between a
+ *   render and its effects; turning `enabled` off (sign-out) clears the list.
+ * - `refreshKey`: page 1 is reloaded but the entries on screen stay until it
+ *   replaces them (dropping any further pages); a failed reload keeps them.
+ *
+ * `language` only picks the language of a refusal, so it reloads nothing.
+ * Mode B only: nothing is asked otherwise. A failed first fetch is shown as no
+ * entries: the sidebar is a convenience, never the only way to reach help.
  */
 export function useSidebarConversations(params: {
   enabled: boolean
@@ -41,74 +45,80 @@ export function useSidebarConversations(params: {
   loadMore: () => void
 } {
   const { enabled, language, showTitles, refreshKey } = params
-  const inputsKey = JSON.stringify([enabled, language, showTitles, refreshKey])
+  const privacyKey = JSON.stringify([enabled, showTitles])
   const [state, setState] = useState<SidebarState>(EMPTY)
   // Reset during render (React's sanctioned way to react to changed inputs) so
   // a returning key can never resurface entries from an earlier session.
-  const [seenKey, setSeenKey] = useState(inputsKey)
-  if (seenKey !== inputsKey) {
-    setSeenKey(inputsKey)
+  const [seenKey, setSeenKey] = useState(privacyKey)
+  if (seenKey !== privacyKey) {
+    setSeenKey(privacyKey)
     setState(EMPTY)
   }
-  const visible = selectVisible(state, inputsKey)
+  const visible = selectVisible(state, privacyKey)
 
   // Bumped on every reload; a response from an older generation is dropped.
   const generation = useRef(0)
-  const isLoadingMore = useRef(false)
+  // Page 1 or a further page is on its way: `loadMore` waits for it, so a
+  // further page never lands on top of a page 1 that replaced its list.
+  const isFetching = useRef(false)
   // The offset last asked for. `loadMore` closes over the rendered offset, so a
   // call between a response and the re-render must not ask for the same page.
   const lastRequestedOffset = useRef<number | null>(null)
-  // The latest committed inputs. A layout effect, not a passive one: it runs
-  // inside the commit, before any fetch can resolve or a stale callback fire.
-  const latestKey = useRef(inputsKey)
+  // The latest committed privacy inputs, and the language to ask in. Layout
+  // effects, not passive ones: they run inside the commit, before any fetch
+  // can resolve or a stale callback fire.
+  const latestKey = useRef(privacyKey)
+  const latestLanguage = useRef(language)
   useLayoutEffect(() => {
-    latestKey.current = inputsKey
-  }, [inputsKey])
+    latestKey.current = privacyKey
+    latestLanguage.current = language
+  }, [privacyKey, language])
 
   useEffect(() => {
     generation.current += 1
     const mine = generation.current
-    isLoadingMore.current = false
+    isFetching.current = false
     lastRequestedOffset.current = null
     if (!AUTH_ENABLED || !enabled) return
-    void fetchSidebarPage({ language, offset: 0, includeTitles: showTitles }).then((outcome) => {
-      if (generation.current !== mine || outcome.kind !== 'page') return
-      setState({
-        key: inputsKey,
-        conversations: outcome.conversations,
-        nextOffset: outcome.nextOffset,
-      })
+    isFetching.current = true
+    const request = { language: latestLanguage.current, offset: 0, includeTitles: showTitles }
+    void fetchSidebarPage(request).then((outcome) => {
+      if (generation.current !== mine) return
+      isFetching.current = false
+      if (outcome.kind !== 'page') return // keep what is on screen
+      setState({ key: privacyKey, conversations: outcome.conversations, nextOffset: outcome.nextOffset })
     })
-  }, [enabled, language, showTitles, inputsKey])
+  }, [enabled, showTitles, privacyKey, refreshKey])
 
   const offset = visible.nextOffset
   const loadMore = useCallback(() => {
     // A callback from before the inputs changed must not fire a request for
     // the old preference (e.g. titled after titles were switched off).
-    if (latestKey.current !== inputsKey) return
-    if (!AUTH_ENABLED || !enabled || offset === null || isLoadingMore.current) return
+    if (latestKey.current !== privacyKey) return
+    if (!AUTH_ENABLED || !enabled || offset === null || isFetching.current) return
     if (lastRequestedOffset.current === offset) return
     const mine = generation.current
-    isLoadingMore.current = true
+    isFetching.current = true
     lastRequestedOffset.current = offset
-    void fetchSidebarPage({ language, offset, includeTitles: showTitles }).then((outcome) => {
+    const request = { language: latestLanguage.current, offset, includeTitles: showTitles }
+    void fetchSidebarPage(request).then((outcome) => {
       if (generation.current !== mine) return
-      isLoadingMore.current = false
+      isFetching.current = false
       if (outcome.kind !== 'page') {
         lastRequestedOffset.current = null // a failed page may be retried
         return
       }
       setState((previous) =>
-        previous.key !== inputsKey
+        previous.key !== privacyKey
           ? previous
           : {
-              key: inputsKey,
+              key: privacyKey,
               conversations: [...previous.conversations, ...outcome.conversations],
               nextOffset: outcome.nextOffset,
             },
       )
     })
-  }, [enabled, language, showTitles, inputsKey, offset])
+  }, [enabled, showTitles, privacyKey, offset])
 
   return {
     conversations: visible.conversations,

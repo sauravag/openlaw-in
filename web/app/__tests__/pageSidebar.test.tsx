@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "../page";
-import { askQuestion, readConversation } from "@/lib/api";
+import { askQuestion, readConversation, uploadDocument } from "@/lib/api";
 import { fetchSidebarPage } from "@/lib/sidebarConversations";
 import { SIDE_PANE_ID } from "@/components/SidePane";
 import { CONVERSATION_STORAGE_KEY } from "@/lib/thread";
@@ -37,6 +37,7 @@ vi.mock("@/lib/sidebarConversations", () => ({ fetchSidebarPage: vi.fn() }));
 const mockedAsk = vi.mocked(askQuestion);
 const mockedRead = vi.mocked(readConversation);
 const mockedPage = vi.mocked(fetchSidebarPage);
+const mockedUpload = vi.mocked(uploadDocument);
 const strings = getStrings("en");
 const sidebarStrings = getSidebarStrings("en");
 
@@ -101,6 +102,7 @@ async function settle(): Promise<void> {
 beforeEach(() => {
   mockedAsk.mockReset();
   mockedRead.mockReset();
+  mockedUpload.mockReset();
   mockedPage.mockReset().mockResolvedValue({ kind: "page", conversations: [entry], nextOffset: null });
   window.sessionStorage.clear();
   window.localStorage.clear();
@@ -234,6 +236,110 @@ describe("the conversation sidebar (Mode B)", () => {
     expect(within(pane).queryByRole("navigation", { name: sidebarStrings.conversationsNavLabel })).not.toBeInTheDocument();
     expect(within(pane).queryByRole("button", { name: sidebarStrings.newChatButton })).not.toBeInTheDocument();
     expect(await within(pane).findByRole("button", { name: strings.signOutButton })).toBeInTheDocument();
+  });
+});
+
+/** Let any list request the last action led to go out. */
+async function flush(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+describe("when the sidebar list reloads (Mode B)", () => {
+  it("opening an entry from a later page keeps it listed and marked, with no list request", async () => {
+    stubSession(true);
+    const newer = { ...entry, id: "conv-1" };
+    mockedPage
+      .mockReset()
+      .mockResolvedValueOnce({ kind: "page", conversations: [newer], nextOffset: 1 })
+      .mockResolvedValueOnce({ kind: "page", conversations: [entry], nextOffset: null })
+      .mockResolvedValue({ kind: "page", conversations: [newer], nextOffset: 1 });
+    mockedRead.mockResolvedValue(restoredView);
+    render(<HomePage />);
+    const nav = await screen.findByRole("navigation", { name: sidebarStrings.conversationsNavLabel });
+    await userEvent.click(await within(nav).findByRole("button", { name: sidebarStrings.showMoreConversations }));
+    await waitFor(() => expect(within(sidebar()).getAllByRole("listitem")).toHaveLength(2));
+    const before = mockedPage.mock.calls.length;
+
+    const [, older] = within(within(sidebar()).getByRole("list")).getAllByRole("button");
+    await userEvent.click(older);
+    await screen.findByText("Earlier answer.");
+    await flush();
+
+    expect(mockedPage.mock.calls.length).toBe(before);
+    const marked = within(sidebar()).getByRole("list").querySelector("[aria-current=page]");
+    expect(marked).not.toBeNull();
+    expect(within(sidebar()).getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("the first answer of a new conversation reloads the list exactly once", async () => {
+    stubSession(true);
+    mockedAsk.mockResolvedValue({ kind: "answer", data: { ...baseAnswer, conversation_id: "conv-new" } });
+    render(<HomePage />);
+    await findEntry();
+    await flush();
+    const before = mockedPage.mock.calls.length;
+
+    await userEvent.type(composer(), "When is notice due?{Enter}");
+    await screen.findByText("Notice must be one month.");
+    await flush();
+
+    expect(mockedPage.mock.calls.length).toBe(before + 1);
+  });
+
+  it("the list stays on screen while it reloads after an answer", async () => {
+    stubSession(true);
+    mockedAsk.mockResolvedValue({ kind: "answer", data: { ...baseAnswer, conversation_id: "conv-new" } });
+    render(<HomePage />);
+    await findEntry();
+    mockedPage.mockReturnValue(new Promise(() => {}));
+
+    await userEvent.type(composer(), "When is notice due?{Enter}");
+    await screen.findByText("Notice must be one month.");
+    await flush();
+
+    expect(within(sidebar()).getAllByRole("listitem")).toHaveLength(1);
+  });
+
+  it("a first upload that starts a conversation reloads the list", async () => {
+    stubSession(true);
+    mockedUpload.mockResolvedValue({
+      kind: "document",
+      data: {
+        id: "doc-1",
+        filename: "lease.pdf",
+        page_count: 4,
+        conversation_id: "conv-new",
+        expires_at: "2026-11-17T00:00:00Z",
+        retention_notice: "Deleted in 24 hours.",
+        quota_remaining: 8,
+      },
+    });
+    render(<HomePage />);
+    await findEntry();
+    await flush();
+    const before = mockedPage.mock.calls.length;
+
+    await userEvent.upload(
+      screen.getByLabelText(strings.attachFileLabel),
+      new File(["lease text"], "lease.pdf", { type: "application/pdf" }),
+    );
+    await waitFor(() => expect(mockedUpload).toHaveBeenCalled());
+    await flush();
+
+    expect(mockedPage.mock.calls.length).toBe(before + 1);
+  });
+
+  it("changing the language sends no list request", async () => {
+    stubSession(true);
+    render(<HomePage />);
+    await findEntry();
+    await flush();
+    const before = mockedPage.mock.calls.length;
+
+    await userEvent.selectOptions(screen.getByRole("combobox"), "hi");
+    await flush();
+
+    expect(mockedPage.mock.calls.length).toBe(before);
   });
 });
 

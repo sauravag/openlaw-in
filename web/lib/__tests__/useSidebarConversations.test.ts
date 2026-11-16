@@ -182,4 +182,75 @@ describe('useSidebarConversations', () => {
     act(() => staleLoadMore())
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('keeps the entries on screen across a refreshKey change until page 1 replaces them', async () => {
+    fetchMock.mockResolvedValueOnce(page(['a'], null))
+    const { result, rerender } = renderHook((p) => useSidebarConversations(p), {
+      initialProps: BASE,
+    })
+    await waitFor(() => expect(result.current.conversations.map((c) => c.id)).toEqual(['a']))
+
+    const pending = deferred()
+    fetchMock.mockReturnValueOnce(pending.promise)
+    rerender({ ...BASE, refreshKey: 'k2' })
+    expect(result.current.conversations.map((c) => c.id)).toEqual(['a'])
+
+    await act(async () => pending.resolve(page(['b', 'a'], null)))
+    expect(result.current.conversations.map((c) => c.id)).toEqual(['b', 'a'])
+  })
+
+  it('keeps the current entries when a refresh fails', async () => {
+    fetchMock.mockResolvedValueOnce(page(['a'], 1))
+    const { result, rerender } = renderHook((p) => useSidebarConversations(p), {
+      initialProps: BASE,
+    })
+    await waitFor(() => expect(result.current.conversations.map((c) => c.id)).toEqual(['a']))
+
+    fetchMock.mockResolvedValueOnce({ kind: 'failed' })
+    rerender({ ...BASE, refreshKey: 'k2' })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await act(async () => {})
+    expect(result.current.conversations.map((c) => c.id)).toEqual(['a'])
+    expect(result.current.hasMore).toBe(true)
+  })
+
+  it('a language change sends no request and keeps the entries', async () => {
+    fetchMock.mockResolvedValueOnce(page(['a'], null))
+    const { result, rerender } = renderHook((p) => useSidebarConversations(p), {
+      initialProps: BASE,
+    })
+    await waitFor(() => expect(result.current.conversations.map((c) => c.id)).toEqual(['a']))
+
+    rerender({ ...BASE, language: 'hi' })
+    await act(async () => {})
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(result.current.conversations.map((c) => c.id)).toEqual(['a'])
+  })
+
+  it('asks in the current language after a language change', async () => {
+    fetchMock.mockResolvedValue(page(['a'], null))
+    const { result, rerender } = renderHook((p) => useSidebarConversations(p), {
+      initialProps: BASE,
+    })
+    await waitFor(() => expect(result.current.conversations).toHaveLength(1))
+    rerender({ ...BASE, language: 'hi' })
+    rerender({ ...BASE, language: 'hi', refreshKey: 'k2' })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(fetchMock).toHaveBeenLastCalledWith({ language: 'hi', offset: 0, includeTitles: false })
+  })
+
+  it('loadMore sends nothing while a refresh of page 1 is in flight', async () => {
+    fetchMock.mockResolvedValueOnce(page(['a'], 1))
+    const { result, rerender } = renderHook((p) => useSidebarConversations(p), {
+      initialProps: BASE,
+    })
+    await waitFor(() => expect(result.current.hasMore).toBe(true))
+    const pending = deferred()
+    fetchMock.mockReturnValueOnce(pending.promise)
+    rerender({ ...BASE, refreshKey: 'k2' })
+
+    act(() => result.current.loadMore())
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await act(async () => pending.resolve(page(['b', 'a'], null)))
+  })
 })

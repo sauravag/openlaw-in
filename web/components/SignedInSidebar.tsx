@@ -9,7 +9,7 @@ import { useTitlePreference } from '@/lib/useTitlePreference'
 interface SignedInSidebarProps {
   language: string
   email: string | null
-  /** Any change reloads the list from page 1. */
+  /** Any change reloads the list from page 1, keeping what is shown until it arrives. */
   refreshKey: string
   currentId: string | null
   isBusy: boolean

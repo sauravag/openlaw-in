@@ -136,20 +136,24 @@ interface HomeState {
   composer: ComposerState;
   help: HelpSheet;
   conversationsPanel: HelpSheet;
-  /** Any change reloads the sidebar's list from page 1. */
+  hasSidebar: boolean;
+  /** Any change reloads the sidebar's list from page 1, keeping what is
+   * shown until the new page arrives. */
   sidebarRefreshKey: string;
   refreshSidebar: () => void;
 }
 
 /**
- * The sidebar's refresh key: the current conversation id (so a newly started
- * conversation shows up) plus a counter bumped after each answered question,
- * a retried migration and New chat.
+ * The sidebar's refresh key: a counter bumped when a conversation starts
+ * (its first answer or first upload), after each answered question, a
+ * retried migration and New chat. Opening an existing conversation does not
+ * bump it: that conversation is already listed, and reloading would drop the
+ * pages loaded with "Show more".
  */
-function useSidebarRefresh(conversationId: string | null) {
+function useSidebarRefresh() {
   const [refreshes, setRefreshes] = useState(0);
   return {
-    sidebarRefreshKey: `${conversationId ?? ""}:${refreshes}`,
+    sidebarRefreshKey: String(refreshes),
     refreshSidebar: () => setRefreshes((count) => count + 1),
   };
 }
@@ -159,25 +163,35 @@ function useHomeState(): HomeState {
   // Must run before `useRestoreFromQueryString`, which may rewrite the URL.
   const redirectNotice = useRedirectNotice();
   const session = useSession();
+  // Mode B, signed in only. With `HomeSidebar`'s own early return, this keeps
+  // the sidebar and the Chats button out of the Mode A build.
+  const hasSidebar = AUTH_ENABLED && session.isResolved && session.signedIn;
   const isMisconfigured = useAuthMismatch();
   const [language, setLanguage] = useState<Language["code"]>(DEFAULT_LANGUAGE);
   const pointer = useConversationPointer(session.signedIn);
+  const { sidebarRefreshKey, refreshSidebar } = useSidebarRefresh();
+  // A first upload starts a conversation: list it. Later uploads do not.
+  function adoptUploadConversation(conversationId: string): void {
+    const isStarting = pointer.conversationId === null;
+    pointer.remember(conversationId);
+    if (isStarting) refreshSidebar();
+  }
   const attachments = useDocuments({
     language,
     conversationId: pointer.conversationId,
-    onConversationStarted: pointer.remember,
+    onConversationStarted: adoptUploadConversation,
   });
   const retention = useRetention(attachments.documents, session);
   const chat = useChat({ language, pointer, attachments });
-  const { sidebarRefreshKey, refreshSidebar } = useSidebarRefresh(pointer.conversationId);
-  // An answered question moves its conversation to the top of the list.
+  // An answered question moves its conversation to the top of the list; the
+  // first one also lists a conversation it started. One reload either way.
   async function askAndRefresh(question: string) {
     const result = await chat.ask(question);
     if (result === "sent") refreshSidebar();
     return result;
   }
   const composer = useComposer(askAndRefresh, latestTurn(chat.turns)?.id ?? null);
-  const { help, conversations: conversationsPanel } = usePhonePanels();
+  const { help, conversations: conversationsPanel } = usePhonePanels(hasSidebar);
   useRestoreFromQueryString(composer.setQuestion, setLanguage);
   useRestoreConversation(language, {
     onRestored: chat.showConversation,
@@ -187,7 +201,8 @@ function useHomeState(): HomeState {
   useDocumentLanguage(language);
   return {
     language, setLanguage, session, isMisconfigured, redirectNotice, pointer, attachments,
-    retention, chat, composer, help, conversationsPanel, sidebarRefreshKey, refreshSidebar,
+    retention, chat, composer, help, conversationsPanel, hasSidebar, sidebarRefreshKey,
+    refreshSidebar,
   };
 }
 
@@ -297,10 +312,7 @@ function HomeChatsButton({ page }: { page: HomeState }) {
  */
 export default function HomePage() {
   const page = useHomeState();
-  const { language, help, conversationsPanel } = page;
-  // Mode B, signed in only. With `HomeSidebar`'s own early return, this keeps
-  // the sidebar and the Chats button out of the Mode A build.
-  const hasSidebar = AUTH_ENABLED && page.session.isResolved && page.session.signedIn;
+  const { language, help, conversationsPanel, hasSidebar } = page;
   return (
     <ChatLayout
       isSheetOpen={help.isOpen}
