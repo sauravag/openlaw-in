@@ -13,7 +13,7 @@ import MisconfigurationBanner from "@/components/MisconfigurationBanner";
 import RedirectNotice from "@/components/RedirectNotice";
 import SessionEndedNotice from "@/components/SessionEndedNotice";
 import SidePane from "@/components/SidePane";
-import YourConversations from "@/components/YourConversations";
+import SignedInSidebar from "@/components/SignedInSidebar";
 import { AUTH_ENABLED } from "@/lib/authMode";
 import { DEFAULT_LANGUAGE, type Language } from "@/lib/languages";
 import { useRestoreFromQueryString } from "@/lib/pageEffects";
@@ -22,16 +22,14 @@ import { latestTurn } from "@/lib/thread";
 import { useAuthMismatch } from "@/lib/useAuthAgreement";
 import { useChat, type ChatState } from "@/lib/useChat";
 import { useComposer, type ComposerState } from "@/lib/useComposer";
-import { useConversationList } from "@/lib/useConversationList";
 import { useConversationPointer, type ConversationPointer } from "@/lib/useConversationPointer";
 import { useDocuments, type DocumentsState } from "@/lib/useDocuments";
-import { useHelpSheet, type HelpSheet } from "@/lib/useHelpSheet";
+import { usePhonePanels, type HelpSheet } from "@/lib/usePhonePanels";
 import { useRedirectNotice, type RedirectNotice as RedirectNoticeKind } from "@/lib/useRedirectNotice";
 import { useRestoreConversation } from "@/lib/useRestoreConversation";
 import { useRetention } from "@/lib/useRetention";
 import { useSession, type SessionHandle } from "@/lib/useSession";
 import type { Retention } from "@/lib/documents";
-import type { ConversationListItemData } from "@/lib/types";
 
 /** Task 6 review, H3: screen readers must pronounce Hindi with a Hindi voice,
  * not the `lang="en"` the server-rendered shell starts with. */
@@ -69,28 +67,14 @@ function PageNotices(props: PageNoticesProps) {
 interface AccountSectionProps {
   language: Language["code"];
   session: SessionHandle;
-  conversations: readonly ConversationListItemData[];
-  currentId: string | null;
-  onOpen: (id: string) => void;
 }
 
 /** Mode B only, in the side pane. `AUTH_ENABLED` is referenced directly so the
- * Mode A build folds all of it away (`npm run check:mode-a-bundle`). */
-function AccountSection(props: AccountSectionProps) {
-  if (!AUTH_ENABLED) return null;
-  return (
-    <>
-      <YourConversations
-        conversations={props.conversations}
-        currentId={props.currentId}
-        language={props.language}
-        onOpen={props.onOpen}
-      />
-      {props.session.isResolved && (
-        <AccountBar signedIn={props.session.signedIn} email={props.session.email} language={props.language} />
-      )}
-    </>
-  );
+ * Mode A build folds all of it away (`npm run check:mode-a-bundle`). The
+ * person's conversations live in the left sidebar, not here. */
+function AccountSection({ language, session }: AccountSectionProps) {
+  if (!AUTH_ENABLED || !session.isResolved) return null;
+  return <AccountBar signedIn={session.signedIn} email={session.email} language={language} />;
 }
 
 /** The composer with its attachment chips and paperclip tray wired in. */
@@ -150,8 +134,23 @@ interface HomeState {
   chat: ChatState;
   composer: ComposerState;
   help: HelpSheet;
-  ownConversations: readonly ConversationListItemData[];
-  refreshConversationList: () => void;
+  conversationsPanel: HelpSheet;
+  /** Any change reloads the sidebar's list from page 1. */
+  sidebarRefreshKey: string;
+  refreshSidebar: () => void;
+}
+
+/**
+ * The sidebar's refresh key: the current conversation id (so a newly started
+ * conversation shows up) plus a counter bumped after each answered question,
+ * a retried migration and New chat.
+ */
+function useSidebarRefresh(conversationId: string | null) {
+  const [refreshes, setRefreshes] = useState(0);
+  return {
+    sidebarRefreshKey: `${conversationId ?? ""}:${refreshes}`,
+    refreshSidebar: () => setRefreshes((count) => count + 1),
+  };
 }
 
 /** Every piece of the page's state, wired together in dependency order. */
@@ -169,22 +168,25 @@ function useHomeState(): HomeState {
   });
   const retention = useRetention(attachments.documents, session);
   const chat = useChat({ language, pointer, attachments });
-  const composer = useComposer(chat.ask, latestTurn(chat.turns)?.id ?? null);
-  const help = useHelpSheet();
+  const { sidebarRefreshKey, refreshSidebar } = useSidebarRefresh(pointer.conversationId);
+  // An answered question moves its conversation to the top of the list.
+  async function askAndRefresh(question: string) {
+    const result = await chat.ask(question);
+    if (result === "sent") refreshSidebar();
+    return result;
+  }
+  const composer = useComposer(askAndRefresh, latestTurn(chat.turns)?.id ?? null);
+  const { help, conversations: conversationsPanel } = usePhonePanels();
   useRestoreFromQueryString(composer.setQuestion, setLanguage);
   useRestoreConversation(language, {
     onRestored: chat.showConversation,
     onSessionEnded: chat.markSessionEnded,
     checkSession: session.refresh,
   });
-  const [listRefreshes, setListRefreshes] = useState(0);
-  const listKey = `${pointer.conversationId ?? ""}:${listRefreshes}`;
-  const ownConversations = useConversationList(session.signedIn, language, listKey);
   useDocumentLanguage(language);
-  const refreshConversationList = () => setListRefreshes((count) => count + 1);
   return {
     language, setLanguage, session, isMisconfigured, redirectNotice, pointer, attachments,
-    retention, chat, composer, help, ownConversations, refreshConversationList,
+    retention, chat, composer, help, conversationsPanel, sidebarRefreshKey, refreshSidebar,
   };
 }
 
@@ -199,7 +201,7 @@ function HomeMessages({ page }: { page: HomeState }) {
           isMisconfigured={page.isMisconfigured}
           redirectNotice={page.redirectNotice}
           isSessionEnded={chat.isSessionEnded}
-          onMigrated={page.refreshConversationList}
+          onMigrated={page.refreshSidebar}
         />
       }
       turns={chat.turns}
@@ -222,10 +224,6 @@ function HomeSidePane({ page }: { page: HomeState }) {
     composer.fill(question);
     help.close();
   }
-  function openConversation(id: string): void {
-    help.close();
-    void page.chat.openConversation(id);
-  }
   return (
     <SidePane
       language={language}
@@ -233,14 +231,40 @@ function HomeSidePane({ page }: { page: HomeState }) {
       onCloseSheet={help.close}
       onPickExample={pickExample}
     >
-      <AccountSection
-        language={language}
-        session={page.session}
-        conversations={page.ownConversations}
-        currentId={page.pointer.conversationId}
-        onOpen={openConversation}
-      />
+      <AccountSection language={language} session={page.session} />
     </SidePane>
+  );
+}
+
+/** Mode B only. The early return on `AUTH_ENABLED` itself (as in
+ * `AccountSection`) is what lets the Mode A build drop the sidebar module. */
+function HomeSidebar({ page }: { page: HomeState }) {
+  if (!AUTH_ENABLED) return null;
+  const { chat, composer, conversationsPanel } = page;
+  // Both actions close the phone panel, so what they lead to is in view.
+  function openConversation(id: string): void {
+    conversationsPanel.close();
+    void chat.openConversation(id);
+  }
+  function startNewChat(): void {
+    chat.startNewConversation();
+    page.refreshSidebar();
+    // Focus first: the panel's focus handling then leaves the caret here.
+    composer.textareaRef.current?.focus();
+    conversationsPanel.close();
+  }
+  return (
+    <SignedInSidebar
+      language={page.language}
+      email={page.session.email}
+      refreshKey={page.sidebarRefreshKey}
+      currentId={page.pointer.conversationId}
+      isBusy={chat.status === "loading"}
+      isPanelOpen={conversationsPanel.isOpen}
+      onClosePanel={conversationsPanel.close}
+      onOpen={openConversation}
+      onNewChat={startNewChat}
+    />
   );
 }
 
@@ -251,7 +275,7 @@ function HomeSidePane({ page }: { page: HomeState }) {
  *
  * State lives in hooks -- `useChat` (turns, the in-flight question, errors),
  * `useComposer` (the box and its caret), `useDocuments` (attachments),
- * `useRetention`, `useHelpSheet` -- and layout in components. Every safety
+ * `useRetention`, `usePhonePanels` -- and layout in components. Every safety
  * property of the single-column page is kept: the static helpline block is in
  * the server HTML in every mode (`SidePane`), every number is visible on a
  * phone before any tap (`HelplineStrip`), each crisis block is the first
@@ -264,12 +288,27 @@ function HomeSidePane({ page }: { page: HomeState }) {
  */
 export default function HomePage() {
   const page = useHomeState();
-  const { language, help } = page;
+  const { language, help, conversationsPanel } = page;
+  // Mode B, signed in only. With `HomeSidebar`'s own early return, this keeps
+  // the sidebar and the Chats button out of the Mode A build.
+  const hasSidebar = AUTH_ENABLED && page.session.isResolved && page.session.signedIn;
   return (
     <ChatLayout
       isSheetOpen={help.isOpen}
       onCloseSheet={help.close}
-      header={<ChatHeader language={language} isHelpOpen={help.isOpen} onOpenHelp={help.open} />}
+      isConversationsOpen={hasSidebar && conversationsPanel.isOpen}
+      onCloseConversations={conversationsPanel.close}
+      header={
+        <ChatHeader
+          language={language}
+          isHelpOpen={help.isOpen}
+          onOpenHelp={help.open}
+          showConversationsButton={hasSidebar}
+          isConversationsOpen={conversationsPanel.isOpen}
+          onOpenConversations={conversationsPanel.open}
+        />
+      }
+      leftPane={hasSidebar ? <HomeSidebar page={page} /> : null}
       helplineStrip={<HelplineStrip language={language} />}
       messages={<HomeMessages page={page} />}
       composer={<ComposerArea page={page} />}

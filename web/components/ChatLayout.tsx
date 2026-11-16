@@ -2,6 +2,8 @@ import type { ReactNode } from 'react'
 
 interface ChatLayoutProps {
   header: ReactNode
+  /** Mode B, signed in: the conversation sidebar, left of the chat. */
+  leftPane?: ReactNode
   /** The phone-only strip of helpline numbers, pinned under the header. */
   helplineStrip?: ReactNode
   messages: ReactNode
@@ -10,6 +12,10 @@ interface ChatLayoutProps {
   /** Mobile only: dims the chat behind the open help sheet; a tap closes it. */
   isSheetOpen: boolean
   onCloseSheet: () => void
+  /** Mobile only: the same, for the conversations panel. The two never show
+   * together (`usePhonePanels`), so there is one backdrop at a time. */
+  isConversationsOpen?: boolean
+  onCloseConversations?: () => void
 }
 
 /**
@@ -22,14 +28,18 @@ interface ChatLayoutProps {
  * scrolling at the page level: the header
  * stays at the top, the composer is pinned at the bottom, and only the
  * message list between them scrolls. On `lg` screens the side pane sits to
- * the right as its own independently scrolling column.
+ * the right as its own independently scrolling column, and (signed in) the
+ * conversation sidebar sits to the left as another.
  */
 export default function ChatLayout(props: ChatLayoutProps) {
+  const isConversationsOpen = props.isConversationsOpen === true
+  const closeBackdrop = isConversationsOpen ? props.onCloseConversations : props.onCloseSheet
   return (
     <div className="relative flex h-screen supports-[height:100dvh]:h-dvh flex-col overflow-hidden bg-white">
       {props.header}
       {props.helplineStrip}
       <div className="flex min-h-0 flex-1">
+        {props.leftPane}
         <main className="flex min-w-0 flex-1 flex-col">
           {props.messages}
           <div className="shrink-0 border-t border-line bg-white px-3 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-4">
@@ -38,10 +48,11 @@ export default function ChatLayout(props: ChatLayoutProps) {
         </main>
         {props.sidePane}
       </div>
-      {props.isSheetOpen && (
+      {(props.isSheetOpen || isConversationsOpen) && (
         <div
           aria-hidden="true"
-          onClick={props.onCloseSheet}
+          data-testid="backdrop"
+          onClick={closeBackdrop}
           className="fixed inset-0 z-40 bg-ink/40 lg:hidden"
         />
       )}

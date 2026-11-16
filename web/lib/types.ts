@@ -253,10 +253,3 @@ export interface ConversationListItemData {
 export interface SidebarConversationData extends ConversationListItemData {
   title?: string | null
 }
-
-/** One page of `GET /conversations`. Mirrors
- * `openlaw.api.conversation_list.ConversationList`. */
-export interface ConversationListData {
-  conversations: ConversationListItemData[]
-  next_offset: number | null
-}

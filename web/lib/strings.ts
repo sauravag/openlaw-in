@@ -169,11 +169,6 @@ export interface UIStrings {
   deleteAccountInstruction: (word: string) => string;
   deleteAccountSubmit: string;
   deleteAccountCancel: string;
-  /** "Your conversations" (final review H1b): a signed-in owner's own list. */
-  yourConversationsHeading: string;
-  conversationListItem: (startedOn: string, documentCount: number) => string;
-  openConversationButton: string;
-  currentConversationLabel: string;
   /** Conversation sidebar (signed-in users): labels and entry copy. */
   conversationsNavLabel: string;
   newChatButton: string;
@@ -340,11 +335,6 @@ const EN: UIStrings = {
   deleteAccountInstruction: (word) => `To confirm, type the word ${word} below.`,
   deleteAccountSubmit: "Delete my account permanently",
   deleteAccountCancel: "No, keep my account",
-  yourConversationsHeading: "Your conversations",
-  conversationListItem: (startedOn, documentCount) =>
-    `Started ${startedOn} \u00b7 ${documentCount === 1 ? "1 document" : `${documentCount} documents`}`,
-  openConversationButton: "Open",
-  currentConversationLabel: "Open now",
   conversationsNavLabel: "Your conversations",
   newChatButton: "New chat",
   showTitlesLabel: "Show titles",
@@ -495,11 +485,6 @@ const HI: UIStrings = {
   deleteAccountInstruction: (word) => `पुष्टि के लिए नीचे शब्द ${word} लिखें।`,
   deleteAccountSubmit: "मेरा खाता हमेशा के लिए हटाएं",
   deleteAccountCancel: "नहीं, मेरा खाता रहने दें",
-  yourConversationsHeading: "आपकी बातचीत",
-  conversationListItem: (startedOn, documentCount) =>
-    `${startedOn} को शुरू \u00b7 ${documentCount} दस्तावेज़`,
-  openConversationButton: "खोलें",
-  currentConversationLabel: "अभी खुली है",
   conversationsNavLabel: "आपकी बातचीत",
   newChatButton: "नई बातचीत",
   showTitlesLabel: "शीर्षक दिखाएं",
