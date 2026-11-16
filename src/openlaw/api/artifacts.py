@@ -547,9 +547,10 @@ def _turn_card(
     own stored question: free, deterministic, no migration, and no model call
     on a read path. The narrowing it accepts is that a crisis only the paid
     CLASSIFIER caught is not restored -- the README states that limit rather
-    than this function hiding it. A turn that somehow holds BOTH claims and a
-    crisis phrase renders its claims with the card beside them, which is the
-    "rides alongside" composition the rest of the system already uses.
+    than this function hiding it. A crisis turn now normally holds BOTH
+    claims and a crisis phrase (a detected crisis no longer replaces the
+    answer), and renders its claims with the card above them, exactly as the
+    live turn did; a crisis turn with no claims renders the helpline answer.
     """
     crisis = detect_crisis(turn.question)
     crisis_answer, crisis_response = (

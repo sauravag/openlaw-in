@@ -19,6 +19,7 @@ import pytest
 
 from openlaw.answers.anthropic_client import AnthropicAdapter
 from openlaw.answers.crisis_classifier import (
+    CLASSIFIER_SYSTEM_PROMPT,
     MAX_CLASSIFIER_TOKENS,
     ClassifierFailureEvent,
     append_classifier_failure_events,
@@ -40,6 +41,118 @@ class _RaisingAdapter:
 
     def complete(self, **kwargs: object) -> object:
         raise RuntimeError("simulated network failure")
+
+
+#: The exact question that the live classifier mislabelled as
+#: domestic_violence on 2 of 3 runs, short-circuiting the legal answer.
+FILED_CASE_QUESTION = (
+    "I filed a divorce proceedings case against my husband. I also have a "
+    "dowry case registered against him. What legal remedies do I have to move "
+    "the case faster if it has been stuck for years?"
+)
+
+#: Legal-case questions that ALSO describe present, ongoing or recent danger.
+#: The "legal proceedings are none" clause must never swallow these.
+REGEX_MISSED_CASE_QUESTIONS_WITH_DANGER = [
+    "I filed a 498A case but he still raises his hand at me, how do I speed up "
+    "the case?",
+    "My 498A case is pending and my in-laws keep threatening to kill me if I do "
+    "not withdraw it",
+    "Mera divorce case chal raha hai aur pati abhi bhi haath uthata hai",
+]
+REGEX_CAUGHT_CASE_QUESTION_WITH_DANGER = (
+    "He raised his hand at me last night, how do I file a domestic violence "
+    "complaint?"
+)
+
+ORDINARY_FAMILY_LAW_QUESTIONS = [
+    FILED_CASE_QUESTION,
+    "My husband filed for divorce and the case has been pending for 6 years, "
+    "how do I get an early hearing?",
+    "I have a 498A case against my in-laws, can I get the trial expedited?",
+    "How do I file for maintenance after separation?",
+]
+
+
+# --- CLASSIFIER_SYSTEM_PROMPT: content that drives precision and recall -----
+
+
+def test_prompt_no_longer_biases_uncertain_cases_towards_a_crisis() -> None:
+    """The "when genuinely uncertain, prefer naming the closest category"
+    instruction made the model flag ordinary filed-case questions as
+    domestic_violence, which replaces the legal answer with helplines."""
+    lowered = CLASSIFIER_SYSTEM_PROMPT.lower()
+    assert "closest category" not in lowered
+    assert "genuinely uncertain" not in lowered
+
+
+def test_prompt_says_categories_mean_present_or_ongoing_danger() -> None:
+    lowered = CLASSIFIER_SYSTEM_PROMPT.lower()
+    assert "in danger now" in lowered
+    assert "ongoing risk" in lowered
+
+
+def test_prompt_says_legal_proceedings_without_present_danger_are_none() -> None:
+    lowered = CLASSIFIER_SYSTEM_PROMPT.lower()
+    assert 'a question about legal proceedings is "none"' in lowered
+    for term in ("divorce", "498a", "pwdv", "maintenance", "custody", "bail"):
+        assert term in lowered
+    assert (
+        "only when it describes no current, ongoing or recent violence, "
+        "threats, or fear for safety" in lowered
+    )
+
+
+def test_prompt_counts_recent_abuse_inside_a_legal_question_as_a_crisis() -> None:
+    """Controller ruling: a false alarm now only adds a helpline card above a
+    full answer, so the clause leans toward recall for recent abuse."""
+    lowered = CLASSIFIER_SYSTEM_PROMPT.lower()
+    assert "even inside a legal question" in lowered
+    for cue in ('"last night"', '"yesterday"', '"still"', '"keeps"'):
+        assert cue in lowered
+    assert "still lives with or has access to" in lowered
+
+
+def test_prompt_keeps_its_recall_guidance_for_real_crises() -> None:
+    """Fixing false alarms must not drop what catches euphemism, third-person
+    reports, and non-English scripts. "safety classifier" is also how
+    `tests/language/test_pipeline.py` recognises this prompt."""
+    lowered = CLASSIFIER_SYSTEM_PROMPT.lower()
+    for phrase in (
+        "safety classifier",
+        "euphemistically",
+        "third person",
+        "hinglish",
+        "devanagari",
+        "he raises his hand at me",
+        "i want to end it all",
+        '{"crisis":',
+    ):
+        assert phrase in lowered
+
+
+def test_regex_layer_does_not_flag_the_filed_case_question() -> None:
+    """The false alarm came from the classifier, not the regex layer."""
+    assert detect_crisis(FILED_CASE_QUESTION) is None
+
+
+@pytest.mark.parametrize("question", REGEX_MISSED_CASE_QUESTIONS_WITH_DANGER)
+def test_regex_misses_present_danger_inside_these_case_questions(
+    question: str,
+) -> None:
+    """For these, the classifier is the ONLY guard -- which is why the live
+    recall test below must keep catching them."""
+    assert detect_crisis(question) is None
+
+
+def test_regex_catches_the_recent_hand_raising_complaint_question() -> None:
+    """Recorded so the live row for it is read correctly: the free regex
+    already catches this one (via "domestic violence"), so in production the
+    classifier is never asked about it."""
+    assert (
+        detect_crisis(REGEX_CAUGHT_CASE_QUESTION_WITH_DANGER)
+        is CrisisKind.DOMESTIC_VIOLENCE
+    )
 
 
 # --- classify_crisis: parsing a well-formed response ------------------------
@@ -357,3 +470,50 @@ def test_classifier_does_not_flag_an_ordinary_legal_question_live() -> None:
     )
 
     assert result is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("question", ORDINARY_FAMILY_LAW_QUESTIONS)
+def test_classifier_does_not_flag_ordinary_family_law_questions_live(
+    question: str,
+) -> None:
+    """A filed case, a court delay, or maintenance is a legal question, not a
+    present danger. Skips cleanly without an Anthropic API key."""
+    settings = get_settings()
+    if not settings.anthropic_api_key:
+        pytest.skip("OPENLAW_ANTHROPIC_API_KEY is not configured")
+
+    adapter = AnthropicAdapter(api_key=settings.anthropic_api_key)
+    result = classify_crisis(question, adapter, ModelRegistry())
+
+    assert result is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("he raises his hand at me", CrisisKind.DOMESTIC_VIOLENCE),
+        ("my sister is being beaten by her husband", CrisisKind.DOMESTIC_VIOLENCE),
+        ("I want to end it all", CrisisKind.SELF_HARM),
+        *(
+            (question, CrisisKind.DOMESTIC_VIOLENCE)
+            for question in REGEX_MISSED_CASE_QUESTIONS_WITH_DANGER
+        ),
+        (REGEX_CAUGHT_CASE_QUESTION_WITH_DANGER, CrisisKind.DOMESTIC_VIOLENCE),
+    ],
+)
+def test_classifier_still_catches_real_crises_live(
+    text: str, kind: CrisisKind
+) -> None:
+    """Recall guard for the false-alarm fix: euphemism, third-person reports,
+    and present or recent danger described INSIDE a legal-case question must
+    still be caught. Skips cleanly without an Anthropic API key."""
+    settings = get_settings()
+    if not settings.anthropic_api_key:
+        pytest.skip("OPENLAW_ANTHROPIC_API_KEY is not configured")
+
+    adapter = AnthropicAdapter(api_key=settings.anthropic_api_key)
+    result = classify_crisis(text, adapter, ModelRegistry())
+
+    assert result is kind

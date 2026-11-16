@@ -4,10 +4,16 @@ Generation is untrusted. Every path out of `generate_answer` passes through
 `validate_answer`, including the failure paths -- a malformed response or a
 model refusal produces an unanswerable result, never an unvalidated one.
 
-**Crisis routing runs before anything else.** Both `answer_question` and
-`generate_answer` call `detect_crisis_with_classifier` first and return
-immediately when it reports a crisis, before any retrieval or generation
-call is made. That function itself runs two layers in a fixed order -- the
+**Crisis routing runs before anything else, and no longer replaces the
+answer.** Both `answer_question` and `generate_answer` call
+`detect_crisis_with_classifier` first. When it reports a crisis, the
+category-specific helplines LEAD the result (they open `footer`, and
+`AnswerResult.crisis` is set so the API renders them above everything else),
+and the ordinary retrieval, generation and validation path still runs, so
+the person also gets the legal answer to the question they asked -- the
+owner's ruling: "Even if the app detects a crisis, it should provide the
+crisis response and also answer the question." That function itself runs
+two layers in a fixed order -- the
 fast, free, deterministic regex from `openlaw.answers.escalation` first,
 then, only when the regex stays silent, the CLASSIFIER-role model, which
 catches euphemism, third-person framing, and non-Latin-script/other-language
@@ -31,17 +37,19 @@ logged at `ERROR` and returned as a `ClassifierFailureEvent` on
 `HallucinationEvent`'s "build now, persist later" shape) and a sustained
 outage stays discoverable after the fact.
 
-A citizen in danger must get helpline numbers now, not after a
-search-and-generate round trip whose output would be discarded anyway -- see
-`openlaw.answers.escalation`'s module docstring: this is a success state, not
-something bolted onto the end of the normal path. The crisis short-circuit's
-`footer` is built from `crisis_response(crisis)` (the category-specific
-helpline: police/NHRC, Tele-MANAS, the women's helpline, or the trafficking
-numbers) followed by the standard `escalation_footer` -- not the standard
-footer alone. A version of this module once returned only the generic NALSA
-footer on a crisis short-circuit, which meant "my husband beats me" produced
-no legal content *and* no helpline, only a lawyer referral -- the exact
-inversion of what crisis routing exists to do.
+**The helplines are never lost.** On a crisis turn, a failure anywhere in
+retrieval or generation (an outage, an expired key) is caught and logged at
+`ERROR`, and the turn falls back to the helpline-only `_crisis_result` -- a
+person in danger gets the numbers even when the legal half cannot be
+produced. An ordinary turn's failure still propagates, exactly as before, to
+the API's crisis-aware error handler. A crisis turn's `footer` is built from
+`crisis_response(crisis)` (the category-specific helpline: police/NHRC,
+Tele-MANAS, the women's helpline, or the trafficking numbers) followed by the
+standard `escalation_footer` -- not the standard footer alone. A version of
+this module once returned only the generic NALSA footer on a crisis turn,
+which meant "my husband beats me" produced no legal content *and* no
+helpline, only a lawyer referral -- the exact inversion of what crisis
+routing exists to do.
 
 **Retrieval wiring corrects the original task-8 brief, which predates these
 decisions** (see task-8-report.md for the full accounting):
@@ -132,12 +140,14 @@ stop being built and then dropped on the floor.
 `generate_answer` returns a `ValidatedAnswer` whose only safe-to-render
 content is `claims` and `sources`; `unverified_summary` is unchecked model
 text and is always `None` on every path in this module where the answer is
-not answerable (refusal, malformed JSON, empty completion, or crisis), and
+not answerable (refusal, malformed JSON, empty completion, or a crisis
+fallback), and
 `dropped` carries chunk ids only, never the rejected prose. See
 `openlaw.answers.validate` for why those fields exist at all and why a
 caller must never render them.
 """
 
+import logging
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -182,6 +192,8 @@ from openlaw.retrieval.fetch import (
 from openlaw.retrieval.query import QueryEmbedder
 from openlaw.retrieval.rerank import merge_chunks
 from openlaw.retrieval.search import search
+
+logger = logging.getLogger(__name__)
 
 MAX_ANSWER_TOKENS = 4096
 
@@ -233,20 +245,70 @@ class AnswerResult(BaseModel):
     classifier_failures: tuple[ClassifierFailureEvent, ...] = ()
 
 
-def _crisis_result(crisis: CrisisKind, state: str | None) -> AnswerResult:
-    """Return the immediate, generation-free result for a crisis question.
+def _footer_for(crisis: CrisisKind | None, state: str | None) -> str:
+    """Return the turn's footer: the crisis helplines first, when there is a
+    crisis, then the standard `escalation_footer`.
+
+    A crisis footer that surfaced only the generic NALSA footer would hand a
+    person in danger a lawyer referral instead of the emergency numbers; see
+    the module docstring.
+    """
+    standard = escalation_footer(state)
+    if crisis is None:
+        return standard
+    return f"{crisis_response(crisis)}\n\n{standard}"
+
+
+def _crisis_result(
+    crisis: CrisisKind,
+    state: str | None,
+    classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
+) -> AnswerResult:
+    """Return the helpline-only FALLBACK for a crisis question whose legal
+    answer could not be produced (retrieval or generation failed).
 
     The footer leads with `crisis_response(crisis)` -- the category-specific
-    helpline numbers (police/NHRC, Tele-MANAS, the women's helpline, or the
-    trafficking numbers) -- followed by the standard `escalation_footer`. A
-    crisis short-circuit that surfaced only the generic NALSA footer would
-    hand a person in danger a lawyer referral instead of the emergency
-    numbers this code path exists to deliver; see the module docstring.
+    helpline numbers -- followed by the standard `escalation_footer`.
     """
-    combined_footer = f"{crisis_response(crisis)}\n\n{escalation_footer(state)}"
     return AnswerResult(
-        answer=_UNANSWERABLE_ANSWER, crisis=crisis, footer=combined_footer
+        answer=_UNANSWERABLE_ANSWER,
+        crisis=crisis,
+        footer=_footer_for(crisis, state),
+        classifier_failures=classifier_failures,
     )
+
+
+def _answer_with_crisis_first(
+    detection: CrisisDetection,
+    state: str | None,
+    produce: Callable[[str, tuple[ClassifierFailureEvent, ...]], AnswerResult],
+) -> AnswerResult:
+    """Run `produce(footer, classifier_failures)` -- the normal retrieval and
+    generation path -- and attach any detected crisis to its result.
+
+    The crisis helplines open the footer and `crisis` is set, so they lead
+    what the person sees; the legal answer follows. On a crisis turn ANY
+    failure inside `produce` is caught, logged at `ERROR`, and replaced by
+    the helpline-only `_crisis_result`: the helplines must never be lost to
+    an outage in the legal half. An ordinary turn's failure propagates
+    unchanged.
+    """
+    failures = _failures_of(detection)
+    footer = _footer_for(detection.crisis, state)
+    if detection.crisis is None:
+        return produce(footer, failures)
+    try:
+        result = produce(footer, failures)
+    except Exception as error:
+        logger.error(
+            "answer generation failed on a crisis turn; returning the crisis "
+            "response alone. crisis=%s error=%r",
+            detection.crisis.value,
+            error,
+            exc_info=True,
+        )
+        return _crisis_result(detection.crisis, state, failures)
+    return result.model_copy(update={"crisis": detection.crisis})
 
 
 def _bounded_chunks(chunks: tuple[RetrievedChunk, ...]) -> tuple[RetrievedChunk, ...]:
@@ -463,7 +525,7 @@ def persist_answer_events(result: AnswerEvents, settings: Settings) -> None:
     file is created when there is nothing to write, so an ordinary,
     event-free question touches the filesystem not at all.
 
-    Called by `answer_question` on every non-crisis turn. Without it the
+    Called by `answer_question` on every turn. Without it the
     events were built and then dropped on the floor, which made "a classifier
     outage is countable and discoverable after the fact" untrue: a sustained
     outage left nothing behind but log lines nobody was watching.
@@ -487,9 +549,11 @@ def generate_answer(
 
     Crisis routing (regex, then classifier -- see
     `openlaw.answers.crisis_classifier.detect_crisis_with_classifier`) runs
-    first and short-circuits before `adapter` is ever called for generation.
-    A classifier failure does not short-circuit -- it proceeds to generation
-    with the failure recorded on the result (see that module's docstring).
+    first. A detected crisis does not stop generation: its helplines lead
+    the footer and the answer is still generated (`_answer_with_crisis_first`),
+    falling back to the helplines alone if generation fails. A classifier
+    failure proceeds to generation with the failure recorded on the result
+    (see that module's docstring).
 
     `document_context` and `history` both default to empty, so every
     existing caller keeps the single-shot, single-pass behaviour. When a
@@ -498,20 +562,22 @@ def generate_answer(
     `claims`, because that pass has no parameter able to accept it.
     """
     detection = detect_crisis_with_classifier(question, adapter, registry)
-    if detection.crisis is not None:
-        return _crisis_result(detection.crisis, state)
 
-    footer = escalation_footer(state)
-    return generate_turn(
-        question,
-        context,
-        adapter,
-        registry,
-        footer,
-        _failures_of(detection),
-        document_context,
-        history,
-    )
+    def produce(
+        footer: str, failures: tuple[ClassifierFailureEvent, ...]
+    ) -> AnswerResult:
+        return generate_turn(
+            question,
+            context,
+            adapter,
+            registry,
+            footer,
+            failures,
+            document_context,
+            history,
+        )
+
+    return _answer_with_crisis_first(detection, state, produce)
 
 
 def build_retrieval_context(
@@ -607,12 +673,12 @@ def answer_question(
     """The full path from a citizen's question to a verified answer.
 
     Crisis routing (regex, then classifier) comes first, ahead of retrieval
-    and generation both: on a crisis question, neither `search_client` nor
-    `adapter` is ever touched for generation -- a person in danger gets help
-    resources immediately rather than waiting on a round trip whose output
-    would be discarded anyway. The check runs exactly once here (not again
-    inside generation), since `adapter` and `registry` are already available
-    and a question cleared once does not need re-checking.
+    and generation both. On a crisis question the helplines lead the result
+    and retrieval and generation still run, so the question is answered too;
+    if either fails, the helplines are returned alone rather than lost (see
+    `_answer_with_crisis_first`). The check runs exactly once here (not
+    again inside generation), since `adapter` and `registry` are already
+    available and a question checked once does not need re-checking.
 
     `history` and `document_context` both default to empty. When `history`
     is given, the chunk ids its surviving claims depend on
@@ -627,27 +693,29 @@ def answer_question(
     same assembly around translation.
     """
     detection = detect_crisis_with_classifier(question, adapter, registry)
-    if detection.crisis is not None:
-        return _crisis_result(detection.crisis, state)
 
-    context = build_retrieval_context(
-        question,
-        settings,
-        search_client,
-        embedder,
-        expand_fn,
-        carried_chunk_ids=carried_chunk_ids(history),
-    )
-    footer = escalation_footer(state)
-    result = generate_turn(
-        question,
-        context,
-        adapter,
-        registry,
-        footer,
-        _failures_of(detection),
-        document_context,
-        history,
-    )
+    def produce(
+        footer: str, failures: tuple[ClassifierFailureEvent, ...]
+    ) -> AnswerResult:
+        context = build_retrieval_context(
+            question,
+            settings,
+            search_client,
+            embedder,
+            expand_fn,
+            carried_chunk_ids=carried_chunk_ids(history),
+        )
+        return generate_turn(
+            question,
+            context,
+            adapter,
+            registry,
+            footer,
+            failures,
+            document_context,
+            history,
+        )
+
+    result = _answer_with_crisis_first(detection, state, produce)
     persist_answer_events(result, settings)
     return result

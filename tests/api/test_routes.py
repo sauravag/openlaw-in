@@ -13,6 +13,7 @@ rendered in `AskResponse.answer`, since that is the only content
 `openlaw.api.schemas.to_response` is allowed to compose an answer from.
 """
 
+import json
 import re
 import time
 from datetime import date
@@ -28,6 +29,7 @@ from sqlalchemy.pool import StaticPool
 
 from openlaw.answers.crisis_classifier import ClassifierFailureEvent
 from openlaw.answers.escalation import CrisisKind, HallucinationEvent
+from openlaw.answers.escalation import crisis_response as crisis_text
 from openlaw.answers.schema import Claim
 from openlaw.answers.validate import Source, ValidatedAnswer
 from openlaw.api.app import create_app
@@ -699,6 +701,38 @@ def test_unanswerable_non_crisis_turn_gets_the_fixed_no_verifiable_answer_messag
 
     assert body["is_answerable"] is False
     assert "could not find a verifiable answer" in body["answer"].lower()
+
+
+def test_a_crisis_turn_with_an_answer_returns_the_helplines_and_the_answer() -> None:
+    """Owner's ruling: a crisis turn gives the crisis response AND answers
+    the question. `crisis_response` is its own field, rendered ABOVE the
+    legal answer by the interface; `answer` carries the legal claims."""
+    client = _client(
+        _localised(crisis=CrisisKind.DOMESTIC_VIOLENCE, answer=_validated_answer())
+    )
+    body = client.post("/ask", json={"question": "my husband beats me"}).json()
+
+    assert "181" in body["crisis_response"]
+    assert body["answer"] == "The deposit must be refunded."
+    assert body["sources"][0]["chunk_id"] == "a"
+    assert body["is_answerable"] is True
+    assert "unverified model prose" not in json.dumps(body)
+
+
+def test_a_hindi_crisis_turn_with_an_answer_carries_hindi_helplines() -> None:
+    client = _client(
+        _localised(
+            crisis=CrisisKind.DOMESTIC_VIOLENCE,
+            answer=_validated_answer(claim_text="जमा राशि वापस करनी होगी।"),
+            language="hi",
+        )
+    )
+    body = client.post(
+        "/ask", json={"question": "मेरा पति मुझे मारता है", "language": "hi"}
+    ).json()
+
+    assert body["crisis_response"] == crisis_text(CrisisKind.DOMESTIC_VIOLENCE, "hi")
+    assert body["answer"] == "जमा राशि वापस करनी होगी।"
 
 
 def test_crisis_turn_is_not_marked_unanswerable() -> None:

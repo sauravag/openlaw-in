@@ -29,7 +29,7 @@ from typing import Any
 
 import pytest
 
-from openlaw.answers.escalation import CrisisKind
+from openlaw.answers.escalation import CrisisKind, crisis_response
 from openlaw.answers.generate import (
     MAX_CONTEXT_CHARS,
     MAX_CONTEXT_CHUNKS,
@@ -222,18 +222,24 @@ class _FakeCorpusClient:
         return _RetrieveResponse([point for point in points if point["id"] in wanted])
 
 
-class _RaisingClient:
-    """Fails loudly if touched -- proves a code path never reaches search."""
+class _GenerationFailsAdapter:
+    """Simulates an outage on the GENERATOR call (expired key, timeout):
+    `.complete` always raises. On a regex-caught crisis no classifier call is
+    made, so this is the generation call failing."""
 
-    def post(self, url: str, json: dict[str, Any], timeout: float) -> Any:
-        raise AssertionError("search_client was touched unexpectedly")
-
-
-class _ExhaustedAdapter:
-    """Fails loudly if `.complete` is ever called."""
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
 
     def complete(self, **kwargs: Any) -> Any:
-        raise AssertionError("adapter.complete was called unexpectedly")
+        self.calls.append(kwargs)
+        raise RuntimeError("simulated generation outage")
+
+
+class _FailingSearchClient:
+    """Simulates a retrieval outage: every search POST raises."""
+
+    def post(self, url: str, json: dict[str, Any], timeout: float) -> Any:
+        raise RuntimeError("simulated search outage")
 
 
 class _ClassifierFailsThenGeneratorSucceedsAdapter:
@@ -375,33 +381,54 @@ def test_unverified_summary_is_none_on_malformed_json() -> None:
     assert result.answer.unverified_summary is None
 
 
-def test_unverified_summary_is_none_on_crisis_short_circuit() -> None:
-    adapter = StubAdapter([])
+def test_unverified_summary_is_none_on_a_crisis_fallback() -> None:
+    adapter = _GenerationFailsAdapter()
     result = generate_answer(
         "my husband beats me", _context("a"), adapter, ModelRegistry()
     )
     assert result.answer.unverified_summary is None
 
 
-# --- Requirement 6: crisis routing comes first, before generation ---------
+# --- Requirement 6 (revised by the owner): crisis routing runs first, ------
+# --- the helplines lead, and the question is STILL answered.               ---
 
 
-def test_crisis_question_never_reaches_the_adapter() -> None:
-    """No wasted generation call whose output would be discarded once a
-    crisis is detected."""
+def test_crisis_question_is_still_answered_with_the_helplines_first() -> None:
+    """Owner's ruling: "Even if the app detects a crisis, it should provide
+    the crisis response and also answer the question." """
     adapter = StubAdapter([_response(["a"])])
-    generate_answer("my husband beats me", _context("a"), adapter, ModelRegistry())
+    result = generate_answer(
+        "my husband beats me", _context("a"), adapter, ModelRegistry()
+    )
 
-    assert adapter.calls == []
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.answer.is_answerable is True
+    assert result.answer.claims
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
+    assert "15100" in result.footer
+    assert len(adapter.calls) == 1
 
 
 def test_crisis_result_still_carries_the_escalation_footer() -> None:
-    adapter = StubAdapter([])
+    adapter = StubAdapter([_response(["a"])])
     result = generate_answer(
         "my husband beats me", _context("a"), adapter, ModelRegistry()
     )
     assert "15100" in result.footer
+
+
+def test_crisis_response_survives_a_failed_generation() -> None:
+    """Never lose the helplines: a generation outage on a crisis question
+    still returns the crisis response, just without a legal answer."""
+    adapter = _GenerationFailsAdapter()
+    result = generate_answer(
+        "my husband beats me", _context("a"), adapter, ModelRegistry()
+    )
+
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert result.answer.is_answerable is False
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
+    assert "15100" in result.footer
 
 
 # --- fix round 2 (task 8b): the crisis short-circuit must deliver a real ---
@@ -410,25 +437,27 @@ def test_crisis_result_still_carries_the_escalation_footer() -> None:
 
 
 def test_crisis_footer_carries_a_real_helpline_number_for_a_regex_hit() -> None:
-    adapter = StubAdapter([])
+    adapter = StubAdapter([_response(["a"])])
     result = generate_answer(
         "my husband beats me", _context("a"), adapter, ModelRegistry()
     )
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert "112" in result.footer
-    assert adapter.calls == []
 
 
 def test_crisis_footer_carries_a_real_helpline_number_for_a_classifier_hit() -> None:
     """The euphemism "I want to end it all" does not match the regex; the
     classifier must both recognise it AND the resulting footer must still
     carry a real helpline, not only the generic NALSA footer."""
-    adapter = StubAdapter([_classifier_response(CrisisKind.SELF_HARM)])
+    adapter = StubAdapter(
+        [_classifier_response(CrisisKind.SELF_HARM), _response(["a"])]
+    )
     result = generate_answer(
         "I want to end it all", _context("a"), adapter, ModelRegistry()
     )
     assert result.crisis is CrisisKind.SELF_HARM
     assert "14416" in result.footer
+    assert result.answer.is_answerable is True
 
 
 # --- revised ruling (task 8b, round 2): a classifier failure must NOT ------
@@ -462,20 +491,69 @@ def test_classifier_failure_is_recorded_rather_than_silently_ignored() -> None:
     assert failure.timestamp
 
 
-def test_answer_question_skips_retrieval_and_generation_on_crisis() -> None:
-    """The full pipeline entry point must not touch the search client or the
-    adapter at all once a crisis fires."""
+def test_answer_question_retrieves_and_answers_a_crisis_question() -> None:
+    """The full pipeline still retrieves and generates once a crisis fires,
+    and the crisis response leads the footer."""
+    settings = _settings(qdrant_url=_QDRANT_URL)
+    adapter = StubAdapter([_response(["a1"])])
+
+    result = answer_question(
+        "my husband beats me",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+    )
+
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.answer.is_answerable is True
+    assert result.answer.sources[0].chunk_id == "a1"
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
+    assert len(adapter.calls) == 1
+
+
+def test_answer_question_keeps_the_crisis_response_when_retrieval_fails() -> None:
     settings = _settings()
     result = answer_question(
         "my husband beats me",
         settings,
-        _RaisingClient(),
-        _ExhaustedAdapter(),
+        _FailingSearchClient(),
+        _GenerationFailsAdapter(),
         ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
     )
 
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert result.answer.is_answerable is False
+    assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
+
+
+def test_answer_question_keeps_the_crisis_response_when_generation_fails() -> None:
+    settings = _settings(qdrant_url=_QDRANT_URL)
+    adapter = _GenerationFailsAdapter()
+
+    result = answer_question(
+        "my husband beats me",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
+    )
+
+    assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
+    assert result.answer.is_answerable is False
+    assert "112" in result.footer
+    assert len(adapter.calls) == 1
+
+
+def test_an_ordinary_question_still_raises_when_generation_fails() -> None:
+    """The crisis fallback is for crisis turns only: an ordinary question's
+    outage keeps reaching the API's crisis-aware 500 handler as before."""
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE])
+    with pytest.raises(RuntimeError):
+        generate_answer("q", _context("a"), adapter, ModelRegistry())
 
 
 # --- Requirement 5: the context sent to the generator is bounded ----------
@@ -926,17 +1004,25 @@ def test_answer_question_asks_the_classifier_only_once_for_an_ordinary_question(
 
 def test_answer_question_delivers_a_real_helpline_for_a_classifier_detected_crisis() -> None:
     """The classifier path must reach the same helpline delivery as the regex
-    path, and must never touch the search client or the generator."""
-    settings = _settings()
-    adapter = StubAdapter([_classifier_response(CrisisKind.SELF_HARM)])
+    path, and still answer the question."""
+    settings = _settings(qdrant_url=_QDRANT_URL)
+    adapter = StubAdapter(
+        [_classifier_response(CrisisKind.SELF_HARM), _response(["a1"])]
+    )
 
     result = answer_question(
-        "I want to end it all", settings, _RaisingClient(), adapter, ModelRegistry()
+        "I want to end it all",
+        settings,
+        _fake_search_client(),
+        adapter,
+        ModelRegistry(),
+        embedder=StubQueryEmbedder([0.1] * 1024),
     )
 
     assert result.crisis is CrisisKind.SELF_HARM
-    assert "14416" in result.footer
-    assert len(adapter.calls) == 1
+    assert result.footer.startswith(crisis_response(CrisisKind.SELF_HARM))
+    assert result.answer.is_answerable is True
+    assert len(adapter.calls) == 2
 
 
 def test_answer_question_records_a_classifier_failure_without_short_circuiting(

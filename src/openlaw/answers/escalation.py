@@ -4,6 +4,8 @@ Routing someone to a human is a success state, not a failure state. Every
 answer ends with a route to free legal aid, and questions signalling danger
 get helpline numbers ahead of any legal analysis — these surface constantly in
 legal-aid queries, and a statutory explanation is the wrong first response.
+The helplines lead; the legal answer to the question still follows them (see
+`openlaw.answers.generate` and `openlaw.language.pipeline`).
 
 Crisis detection here is a plain keyword/pattern match, not a model call: it
 has to work with no API key configured and it has to be auditable. Because it
@@ -236,8 +238,9 @@ _SEVERITY_ORDER: tuple[CrisisKind, ...] = (
 #:
 #: **Tuned for PRECISION, unlike the Latin-script set above.** The reason is
 #: a routing difference, not a change of heart about recall: a Latin-script
-#: match can short-circuit the whole turn, while a document-only match now
-#: appends a helpline card to an otherwise normal legal answer (see
+#: match on the question leads the whole turn with its helplines, while a
+#: document-only match appends a helpline card to an otherwise normal legal
+#: answer (see
 #: `openlaw.language.pipeline`). A card that appears on most Hindi documents
 #: is a card users learn to ignore, which is a worse outcome than a narrower
 #: one that still reaches the protection order it was written for. So these

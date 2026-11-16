@@ -428,11 +428,11 @@ would otherwise over-trust these paths.
   document strength.** It is detected by the free regex layer over the stored
   questions of the conversation (`openlaw.answers.history.history_crisis`), so
   its coverage is the regex layer's own and a paid classifier is never called
-  per turn for history. It deliberately does **not** short-circuit the turn:
-  question strength would mean a woman who discloses abuse on turn one could
-  never receive a legal answer again in that conversation. A disclosure on turn
-  one is historical by turn four, which is the same weaker evidence a
-  document's verdict is.
+  per turn for history. Its helpline card rides alongside the later answer
+  rather than leading the turn the way a crisis in the current question does:
+  a disclosure on turn one is historical by turn four, which is the same weaker
+  evidence a document's verdict is. (A crisis in the current question no longer
+  replaces the answer either; it leads it with the helplines.)
 - **`uploads_enabled=False` stops reading document TEXT, not document safety
   verdicts.** With the kill switch off no excerpt is decrypted and no document
   pass runs, but the stored `crisis_kind` of a document attached to the turn is
