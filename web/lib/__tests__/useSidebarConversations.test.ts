@@ -1,4 +1,6 @@
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { act, render, renderHook, waitFor } from '@testing-library/react'
+import { createElement } from 'react'
+import { flushSync } from 'react-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchSidebarPage } from '../sidebarConversations'
 import { useSidebarConversations } from '../useSidebarConversations'
@@ -148,5 +150,40 @@ describe('useSidebarConversations', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(result.current.conversations).toEqual([])
     expect(result.current.hasMore).toBe(false)
+  })
+
+  it('never returns a stale response that lands between commit and effects', async () => {
+    const titled = deferred()
+    fetchMock.mockReturnValueOnce(titled.promise).mockResolvedValue(page(['a'], null))
+    let latest: ReturnType<typeof useSidebarConversations> | undefined
+    function Probe(p: typeof BASE) {
+      latest = useSidebarConversations(p)
+      return null
+    }
+    const view = render(createElement(Probe, { ...BASE, showTitles: true }))
+    // Commit the change WITHOUT flushing passive effects, then resolve the old
+    // request in that gap.
+    flushSync(() => view.rerender(createElement(Probe, { ...BASE, showTitles: false })))
+    titled.resolve(page(['a'], 5, 'Leaked title'))
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(latest?.conversations.some((c) => 'title' in c && c.title)).toBe(false)
+    await waitFor(() => expect(latest?.conversations.map((c) => c.id)).toEqual(['a']))
+    expect(latest?.conversations.some((c) => 'title' in c && c.title)).toBe(false)
+  })
+
+  it('a loadMore from before the inputs changed sends no request', async () => {
+    fetchMock.mockResolvedValue(page(['a'], 1, 'T'))
+    const { result, rerender } = renderHook((p) => useSidebarConversations(p), {
+      initialProps: { ...BASE, showTitles: true },
+    })
+    await waitFor(() => expect(result.current.hasMore).toBe(true))
+    const staleLoadMore = result.current.loadMore
+    fetchMock.mockClear()
+    fetchMock.mockResolvedValue(page(['a'], null))
+    rerender({ ...BASE, showTitles: false })
+    fetchMock.mockClear()
+    act(() => staleLoadMore())
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
