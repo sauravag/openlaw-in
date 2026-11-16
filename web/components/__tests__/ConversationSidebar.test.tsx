@@ -8,7 +8,7 @@ const at = (day: number, hour: number, minute: number): string =>
   new Date(2026, 10, day, hour, minute).toISOString()
 
 const ITEMS: SidebarConversationData[] = [
-  { id: 'a', created_at: at(16, 9, 3), updated_at: at(16, 9, 3), document_count: 2, title: 'Rent deposit' },
+  { id: 'a', created_at: at(3, 7, 0), updated_at: at(16, 9, 3), document_count: 2, title: 'Rent deposit' },
   { id: 'b', created_at: at(15, 18, 40), updated_at: at(15, 18, 40), document_count: 0, title: null },
 ]
 
@@ -64,6 +64,12 @@ describe('ConversationSidebar', () => {
     const props = renderSidebar()
     fireEvent.click(screen.getByRole('button', { name: /Yesterday, 18:40/ }))
     expect(props.onOpen).toHaveBeenCalledWith('b')
+  })
+
+  it('labels an entry by when it was last updated, not when it started', () => {
+    renderSidebar()
+    expect(screen.queryByText(/3 Nov/)).toBeNull()
+    expect(screen.getByText(/Today, 9:03/)).toBeTruthy()
   })
 
   it('New chat calls onNewChat', () => {
