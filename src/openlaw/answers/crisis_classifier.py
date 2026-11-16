@@ -120,11 +120,14 @@ anymore".
 
 These categories mean that a person — the user or someone they describe — \
 is being harmed or is in danger now, or is at ongoing risk. A question about \
-legal proceedings is "none": a case already filed or registered (divorce, \
-dowry / Section 498A / BNS 85-86, a domestic-violence complaint under the \
-PWDV Act, maintenance, custody), court delays, bail, evidence, procedure, or \
-past events discussed as the subject of a case — unless the message also \
-describes current or ongoing violence, threats, or fear for safety.
+legal proceedings is "none" only when it describes no current, ongoing or \
+recent violence, threats, or fear for safety: a case already filed or \
+registered (divorce, dowry / Section 498A / BNS 85-86, a domestic-violence \
+complaint under the PWDV Act, maintenance, custody), court delays, bail, \
+evidence, or procedure. Abuse described as recent or continuing (for \
+example "last night", "yesterday", "still", "keeps"), or by someone who \
+still lives with or has access to the person, is a crisis even inside a \
+legal question.
 
 Respond with strict JSON only, matching this shape exactly:
 {"crisis": "domestic_violence" | "custodial_abuse" | "trafficking" | \

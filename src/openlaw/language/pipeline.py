@@ -336,12 +336,14 @@ class LocalisedAnswer(BaseModel):
     document_crisis: CrisisKind | None = None
     #: Set when a crisis phrase was found in the QUESTION OF AN EARLIER TURN
     #: of this conversation (carry-forward 18, reversed by the final
-    #: whole-plan review). Document strength, deliberately: CF-18 originally
-    #: ruled this question-strength, which would have short-circuited every
-    #: turn after a disclosure and so suppressed the legal answer the person
-    #: came back for -- the exact harm ruling 1 exists to prevent. "A
-    #: disclosure on turn one is historical by turn four", which is the same
-    #: category of weaker evidence as a document's verdict. A SECOND field
+    #: whole-plan review). Document strength, deliberately: "a disclosure on
+    #: turn one is historical by turn four", which is the same category of
+    #: weaker evidence as a document's verdict, so its category rides
+    #: ALONGSIDE this turn's answer rather than leading it -- the lead slot
+    #: belongs to what the person says now. (CF-18 originally ruled it
+    #: question strength, back when that meant short-circuiting every later
+    #: turn; a crisis no longer replaces the answer, so the remaining reason
+    #: is evidence strength, not keeping the answer.) A SECOND field
     #: rather than a reuse of `document_crisis`: both ride alongside, but the
     #: provenance of each verdict survives, and
     #: `openlaw.api.schemas.to_response` renders the more urgent of the two.
@@ -627,10 +629,14 @@ def _answer_crisis_turn(
     `english_query` is called inside the guarded block, so a failed query
     translation is covered too. ANY failure from here on is logged at
     `ERROR` and replaced by the helpline-only `_crisis_answer` -- the
-    helplines must never be lost to an outage in the legal half.
+    helplines must never be lost to an outage in the legal half. The
+    fallback still reports the translated query when one was obtained before
+    the failure, and `""` when the translation itself failed.
     """
+    translated = ""
     try:
-        answered = _answer_turn(turn, english_query())
+        translated = english_query()
+        answered = _answer_turn(turn, translated)
     except Exception as error:
         logger.error(
             "answer generation failed on a crisis turn; returning the crisis "
@@ -642,7 +648,7 @@ def _answer_crisis_turn(
         return _crisis_answer(
             crisis,
             turn.language,
-            "",
+            translated,
             turn.state,
             turn.classifier_failures,
             turn.document_crisis,

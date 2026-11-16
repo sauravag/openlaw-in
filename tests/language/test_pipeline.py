@@ -531,6 +531,8 @@ def test_a_crisis_turn_whose_generation_fails_still_gets_the_crisis_response() -
     assert result.footer.startswith(crisis_response(CrisisKind.DOMESTIC_VIOLENCE))
     assert "181" in [helpline.number for helpline in result.helplines]
     assert result.helplines[-1].number == "15100"
+    # The translation succeeded before generation failed, so it is reported.
+    assert result.english_query == "my husband beats me"
 
 
 def test_a_crisis_turn_whose_retrieval_fails_still_gets_the_crisis_response() -> (
@@ -565,6 +567,7 @@ def test_a_crisis_turn_with_a_broken_api_key_still_gets_the_crisis_response() ->
 
     assert result.crisis is CrisisKind.DOMESTIC_VIOLENCE
     assert "181" in result.footer
+    assert result.english_query == ""  # no translation was ever obtained
 
 
 def test_an_ordinary_turn_whose_generation_fails_still_raises() -> None:

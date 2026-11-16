@@ -166,15 +166,15 @@ def history_crisis(turns: tuple[HistoryTurn, ...]) -> CrisisKind | None:
     """Return the most urgent crisis disclosed in an EARLIER turn's question.
 
     Carry-forward 18, as the final whole-plan review reversed it. CF-18 ruled
-    that a crisis in history should be QUESTION-strength and short-circuit the
-    turn; applied literally, a woman who discloses abuse on turn one could
-    never receive a legal answer again in that conversation, which is exactly
-    the harm the "rides alongside" ruling exists to prevent. A disclosure on
-    turn one IS historical by turn four -- the same category of weaker
-    evidence as a document's stored verdict -- so the verdict found here is
-    carried at DOCUMENT strength: `openlaw.language.pipeline
-    ._with_alongside_crisis` attaches its helplines beside a full legal
-    answer, and the legal question is still answered.
+    that a crisis in history should be QUESTION-strength, which then meant
+    short-circuiting every later turn. A question-derived crisis no longer
+    replaces the answer (it leads it), so the reason for the reversal is now
+    evidence strength alone: a disclosure on turn one IS historical by turn
+    four -- the same category of weaker evidence as a document's stored
+    verdict -- so the verdict found here is carried at DOCUMENT strength:
+    `openlaw.language.pipeline._with_alongside_crisis` attaches its helplines
+    beside the legal answer rather than leading the turn, and the lead slot
+    stays with whatever the person says in the current question.
 
     **The FREE regex layer only, and deliberately.** `detect_crisis` is a
     deterministic pattern match -- no model call, no cost, no API key. History
