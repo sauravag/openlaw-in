@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 from openlaw.api.conversation_list import (
     CONVERSATION_LIST_LIMIT,
     CONVERSATION_LIST_MAX_LIMIT,
+    TITLE_MAX_CHARS,
+    shorten_title,
 )
 from tests.api.conftest import NOTICE_TEXT, api_settings, bearer, build_client, upload
 from tests.api.test_auth_routes import SUPABASE_URL, _mode_a
@@ -113,3 +115,59 @@ def test_a_signed_in_caller_with_nothing_gets_an_empty_list(tmp_path: Path) -> N
 
     assert response.status_code == 200
     assert response.json() == {"conversations": [], "next_offset": None}
+
+
+def test_titles_are_absent_unless_asked_for(tmp_path: Path) -> None:
+    client = _mode_b(tmp_path)
+    mine = bearer("user-1", "one@example.com")
+    _ask(client, mine)
+    body = client.get("/conversations", headers=mine).json()
+    assert all("title" not in item for item in body["conversations"])
+
+
+def test_include_titles_returns_the_first_question(tmp_path: Path) -> None:
+    client = _mode_b(tmp_path)
+    mine = bearer("user-1", "one@example.com")
+    conversation = _ask(client, mine)  # asks "my deposit"
+    client.post(
+        "/ask",
+        json={"question": "second question", "conversation_id": conversation},
+        headers=mine,
+    )
+    item = client.get("/conversations?include_titles=true", headers=mine).json()[
+        "conversations"
+    ][0]
+    assert item["title"] == "my deposit"
+
+
+def test_an_upload_only_conversation_has_a_null_title(tmp_path: Path) -> None:
+    client = _mode_b(tmp_path)
+    mine = bearer("user-1", "one@example.com")
+    upload(client, headers=mine)
+    item = client.get("/conversations?include_titles=true", headers=mine).json()[
+        "conversations"
+    ][0]
+    assert item["title"] is None
+
+
+def test_include_titles_is_still_404_in_mode_a(tmp_path: Path) -> None:
+    response = _mode_a(tmp_path).get("/conversations?include_titles=true", headers=bearer())
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("short", "short"),
+        ("  many   spaces\nhere  ", "many spaces here"),
+        ("word " * 20, ("word " * 12).strip() + "…"),  # 60 chars cut at a space
+        (
+            "मेरे मकान मालिक ने बिना नोटिस के मुझे घर से निकाल दिया है अब मैं क्या करूँ कृपया बताएं",
+            "मेरे मकान मालिक ने बिना नोटिस के मुझे घर से निकाल दिया है…",
+        ),
+        ("x" * 80, "x" * 59 + "…"),  # no space to cut at: hard cut, still 60 code points
+    ],
+)
+def test_shorten_title(question: str, expected: str) -> None:
+    assert shorten_title(question) == expected
+    assert len(shorten_title(question)) <= TITLE_MAX_CHARS
