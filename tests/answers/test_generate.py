@@ -324,8 +324,15 @@ def test_footer_names_the_state_authority_when_supplied() -> None:
     assert "Kerala" in result.footer
 
 
-def test_model_reported_insufficiency_is_not_answerable() -> None:
+def test_model_reported_insufficiency_ships_cited_claims_flagged_partial() -> None:
     adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["a"], sufficient=False)])
+    result = generate_answer("q", _context("a"), adapter, ModelRegistry())
+    assert result.answer.is_answerable is True
+    assert result.answer.goal_not_covered is True
+
+
+def test_model_reported_insufficiency_with_no_cited_claim_is_not_answerable() -> None:
+    adapter = StubAdapter([_SAFE_CLASSIFIER_RESPONSE, _response(["invented"], sufficient=False)])
     result = generate_answer("q", _context("a"), adapter, ModelRegistry())
     assert result.answer.is_answerable is False
 

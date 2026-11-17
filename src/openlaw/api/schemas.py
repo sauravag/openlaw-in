@@ -90,6 +90,28 @@ _GOAL_NOT_COVERED: dict[str, str] = {
     ),
 }
 
+#: Leads `answer` when the generator reported that the excerpts hold no law
+#: of the state the person asked about (`ValidatedAnswer.state_law_not_found`,
+#: SYSTEM_PROMPT rule 14), so the cited claims below are general law. Fixed
+#: text for the same reason as `_GOAL_NOT_COVERED`; `{state}` is only ever
+#: an allowlisted name (`openlaw.api.jurisdictions`).
+_STATE_LAW_NOT_FOUND: dict[str, str] = {
+    "en": (
+        "We could not find {state}'s own law on every part of this in our "
+        "sources. Where a point below does not name {state}'s law, it is general "
+        "information from central law, court rulings or other states' laws, and "
+        "the rules in {state} may differ. A lawyer or the {state} State Legal "
+        "Services Authority can tell you how it applies there."
+    ),
+    "hi": (
+        "हमें हमारे स्रोतों में इस विषय के हर हिस्से पर {state} का अपना क़ानून नहीं "
+        "मिला। नीचे जिस बात में {state} के क़ानून का नाम नहीं है, वह केंद्रीय क़ानून, "
+        "अदालती फ़ैसलों या दूसरे राज्यों के क़ानूनों पर आधारित सामान्य जानकारी है, "
+        "और {state} में नियम अलग हो सकते हैं। वहाँ यह कैसे लागू होता है, यह कोई "
+        "वकील या {state} राज्य विधिक सेवा प्राधिकरण बता सकता है।"
+    ),
+}
+
 #: Shown as `answer` on a crisis turn, ahead of the specific `crisis_response`
 #: helpline text -- see `to_response`'s H3 fix below. A client that renders
 #: only `answer` (the naive, most likely default) must still see something
@@ -601,16 +623,26 @@ def _render_answer(answer: ValidatedAnswer, language: str) -> str:
     NOT called for a crisis turn that carries no legal answer -- see
     `to_response`, which branches before this function ever runs (H3).
 
-    When the generator reported that no excerpt addresses the person's goal,
-    the fixed `_GOAL_NOT_COVERED` notice leads the claims. It is added only
-    when there ARE claims to show: an unanswerable turn already says it found
-    no verifiable answer.
+    Fixed notices lead the claims: `_STATE_LAW_NOT_FOUND` when the excerpts
+    held no law of the state asked about, then `_GOAL_NOT_COVERED` when no
+    excerpt addresses the person's goal. They are added only when there ARE
+    claims to show: an unanswerable turn already says it found no verifiable
+    answer.
     """
     claims = answer.claims if answer.is_answerable else ()
     rendered = render_claim_answer(claims, language)
-    if claims and answer.goal_not_covered:
-        return f"{_static_text(_GOAL_NOT_COVERED, language)}\n\n{rendered}"
-    return rendered
+    if not claims:
+        return rendered
+    notices = []
+    if answer.state_law_not_found:
+        notices.append(
+            _static_text(_STATE_LAW_NOT_FOUND, language).format(
+                state=answer.state_law_not_found
+            )
+        )
+    if answer.goal_not_covered:
+        notices.append(_static_text(_GOAL_NOT_COVERED, language))
+    return "\n\n".join((*notices, rendered))
 
 
 def render_document_claims(

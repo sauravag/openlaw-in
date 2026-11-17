@@ -33,6 +33,8 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from openlaw.api.jurisdictions import INDIAN_STATES_AND_UTS
+
 
 class Claim(BaseModel):
     """One factual legal assertion and the chunks that support it."""
@@ -79,6 +81,12 @@ class DraftAnswer(BaseModel):
     #: survive validation. Defaults to True so a reply from before the field
     #: existed parses exactly as it did.
     goal_covered: bool = True
+    #: The state or union territory whose own law on the point is missing
+    #: from the excerpts, or "none" (SYSTEM_PROMPT rule 14). Constrained to
+    #: `INDIAN_STATES_AND_UTS` by the output schema and again by validation,
+    #: because the rendered notice interpolates it. Defaults to "none" so a
+    #: reply from before the field existed parses exactly as it did.
+    state_law_not_found: str = "none"
 
     @classmethod
     def from_json(cls, payload: str) -> "DraftAnswer":
@@ -191,12 +199,29 @@ ANSWER_JSON_SCHEMA: dict[str, Any] = {
                 "trying to achieve."
             ),
         },
+        "state_law_not_found": {
+            "type": "string",
+            "enum": [*sorted(INDIAN_STATES_AND_UTS), "none"],
+            "description": (
+                "The state or union territory the person asked about (named in "
+                "the question or selected) whose own law on any point is not in "
+                "the excerpts, so a claim relies on general or other-state law, "
+                "or \"none\"."
+            ),
+        },
     },
     # `document_claims` is listed here — an empty array on a turn with no
     # uploaded document — because OpenRouter's `strict` structured-output
     # mode requires every declared property to appear in `required`. The
-    # same rule puts `goal_covered` here.
-    "required": ["summary", "claims", "document_claims", "sufficient", "goal_covered"],
+    # same rule puts `goal_covered` and `state_law_not_found` here.
+    "required": [
+        "summary",
+        "claims",
+        "document_claims",
+        "sufficient",
+        "goal_covered",
+        "state_law_not_found",
+    ],
     "additionalProperties": False,
 }
 

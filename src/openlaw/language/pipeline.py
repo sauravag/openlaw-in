@@ -601,6 +601,7 @@ def _answer_turn(turn: _Turn, english_query: str) -> LocalisedAnswer:
         turn.classifier_failures,
         document_context,
         turn.history,
+        turn.state,
     )
     localised = translate_answer(
         result.answer, turn.language, turn.adapter, turn.registry, turn.glossary

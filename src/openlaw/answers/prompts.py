@@ -73,6 +73,7 @@ again after deploy.
 from typing import Any
 
 from openlaw.answers.history import HistoryTurn, build_history_messages
+from openlaw.api.jurisdictions import INDIAN_STATES_AND_UTS
 from openlaw.documents.context import (
     EMPTY_DOCUMENT_CONTEXT,
     DocumentContext,
@@ -96,8 +97,11 @@ Rules you must follow exactly:
 the excerpts provided in this turn. Never cite a chunk_id that is not listed.
 2. Never rely on legal knowledge that is not in the provided excerpts. If you know \
 something the excerpts do not support, leave it out.
-3. If the excerpts do not let you answer, set "sufficient" to false, say briefly \
-what is missing, and return no claims.
+3. If the excerpts do not let you answer at all, set "sufficient" to false, say \
+briefly what is missing, and return no claims. If they support only part of the \
+question, or only the general law rather than the place or situation asked \
+about, answer the part they do support: a partial, clearly labelled answer is \
+more useful to the person than none.
 4. Do not state what the person should do in their specific case as though it were \
 certain. Explain what the law says and what options generally exist.
 5. This is legal information, not legal advice. Do not present yourself as a lawyer.
@@ -134,6 +138,22 @@ set "goal_covered" to false, otherwise set it to true. Do not drift into \
 adjacent topics as though they answered the goal; you may still give closely \
 related law as cited claims. The service tells the person their goal was not \
 covered, so never write a claim to say so.
+14. If the person asks about a particular state or union territory -- by \
+naming it, by naming a city or district in it, or because the question says \
+which state they selected -- check, for EACH point the question raises, \
+whether the excerpts contain that state's own law on that point. Excerpts \
+often hold some of a state's law but not all of it (for example its eviction \
+procedure but not the eviction ground the person relies on). For every point \
+they do not cover, still answer from the general law the excerpts do \
+contain (central Acts, Supreme Court rulings, or other states' laws), and name in each claim where that law comes from (for example "Under \
+the Kerala Buildings (Lease and Rent Control) Act, ..."), so it is never \
+passed off as that state's law. Whenever any claim relies on central law, \
+another state's law or a general ruling because that state's own law on the \
+point is not in the excerpts, or a point cannot be answered for lack of it, \
+you MUST set "state_law_not_found" to that state's name exactly as the \
+schema lists it -- this applies even when the state was only named in the \
+question; otherwise set it to "none". Never write a \
+claim to say a state's law was not found: the service tells the person.
 
 Return only the structured JSON object requested."""
 
@@ -221,15 +241,22 @@ def build_context_message(context: RetrievalContext) -> dict[str, Any]:
     }
 
 
-def _question_message(query: str) -> dict[str, Any]:
+def _question_message(query: str, state: str | None = None) -> dict[str, Any]:
     """The user's new question, alone, as the final message of a turn.
 
     Kept separate from the excerpt block on purpose: everything that
     precedes this message can be a stable, cache-eligible prefix across
     consecutive turns of one conversation, and this is the one message
     guaranteed to differ every single turn.
+
+    The state the person selected rides here too (SYSTEM_PROMPT rule 14), so
+    the cacheable prefix is unchanged. Only an allowlisted name is ever
+    written into the prompt; anything else is dropped, not quoted.
     """
-    return {"role": "user", "content": [{"type": "text", "text": f"Question: {query}"}]}
+    text = f"Question: {query}"
+    if state in INDIAN_STATES_AND_UTS:
+        text += f"\n\nThe person selected this state or union territory: {state}"
+    return {"role": "user", "content": [{"type": "text", "text": text}]}
 
 
 def _document_excerpt_message(document_context: DocumentContext) -> dict[str, Any] | None:
@@ -250,6 +277,7 @@ def build_turn_messages(
     context: RetrievalContext,
     document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
     history: tuple[HistoryTurn, ...] = (),
+    state: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return the full message list for one turn, in cache-friendly order:
     history (oldest first) -> statutory/judgment excerpts -> fenced document
@@ -308,7 +336,7 @@ def build_turn_messages(
     document_message = _document_excerpt_message(document_context)
     if document_message is not None:
         messages.append(document_message)
-    messages.append(_question_message(context.query))
+    messages.append(_question_message(context.query, state))
     return messages
 
 

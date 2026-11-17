@@ -395,7 +395,8 @@ def test_document_claims_alone_never_make_a_turn_answerable() -> None:
     `is_answerable`, which is decided by the law-only pass."""
     adapter = StubAdapter(
         [
-            _legal_response(chunk_ids=["a"], sufficient=False),
+            # The legal claim cites nothing shown, so no legal claim survives.
+            _legal_response(chunk_ids=["invented"], sufficient=False),
             _document_response(excerpt_ids=["doc:lease:p1:0"]),
         ]
     )

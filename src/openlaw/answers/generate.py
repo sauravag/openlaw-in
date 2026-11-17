@@ -360,6 +360,7 @@ def _generate_from_context(
     footer: str,
     classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
     history: tuple[HistoryTurn, ...] = (),
+    state: str | None = None,
 ) -> AnswerResult:
     """Generate, validate and package one answer, assuming crisis routing has
     already cleared `question`.
@@ -405,7 +406,7 @@ def _generate_from_context(
     completion = adapter.complete(
         model=registry.for_role(ModelRole.GENERATOR),
         system=SYSTEM_PROMPT,
-        messages=build_turn_messages(bounded, EMPTY_DOCUMENT_CONTEXT, history),
+        messages=build_turn_messages(bounded, EMPTY_DOCUMENT_CONTEXT, history, state),
         output_schema=ANSWER_JSON_SCHEMA,
         max_tokens=MAX_ANSWER_TOKENS,
     )
@@ -452,6 +453,7 @@ def generate_turn(
     classifier_failures: tuple[ClassifierFailureEvent, ...] = (),
     document_context: DocumentContext = EMPTY_DOCUMENT_CONTEXT,
     history: tuple[HistoryTurn, ...] = (),
+    state: str | None = None,
 ) -> AnswerResult:
     """Run both generation passes for one turn and assemble their results.
 
@@ -473,7 +475,7 @@ def generate_turn(
     before the second pass existed.
     """
     result = _generate_from_context(
-        question, context, adapter, registry, footer, classifier_failures, history
+        question, context, adapter, registry, footer, classifier_failures, history, state
     )
     if not document_context.excerpts:
         return result
@@ -575,6 +577,7 @@ def generate_answer(
             failures,
             document_context,
             history,
+            state,
         )
 
     return _answer_with_crisis_first(detection, state, produce)
@@ -714,6 +717,7 @@ def answer_question(
             failures,
             document_context,
             history,
+            state,
         )
 
     result = _answer_with_crisis_first(detection, state, produce)

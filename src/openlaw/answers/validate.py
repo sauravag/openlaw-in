@@ -67,9 +67,12 @@ loop:
    `document_context.excerpt_ids`.
 4. A `DocumentClaim` is dropped if any of its ids does NOT start with
    `DOCUMENT_EXCERPT_PREFIX`.
-5. `is_answerable = bool(kept_claims) and draft.sufficient`. Surviving
-   `document_claims` alone never make an answer answerable: "your notice is
-   dated 4 March" establishes nothing about the law.
+5. `is_answerable = bool(kept_claims)`. A partial, cited answer is more
+   useful than none, so a draft with `sufficient=false` still ships its
+   surviving claims -- flagged `goal_not_covered`, so the fixed "closest
+   related law" notice leads them, and with no `unverified_summary`.
+   Surviving `document_claims` alone never make an answer answerable: "your
+   notice is dated 4 March" establishes nothing about the law.
 6. Every dropped claim of either kind is recorded — ids only on
    `ValidatedAnswer.dropped`, verbatim text only on `RejectedClaim`.
 
@@ -140,6 +143,7 @@ from openlaw.answers.schema import (
     DocumentDraftAnswer,
     DraftAnswer,
 )
+from openlaw.api.jurisdictions import INDIAN_STATES_AND_UTS
 from openlaw.documents import DOCUMENT_EXCERPT_PREFIX
 from openlaw.documents.context import EMPTY_DOCUMENT_CONTEXT, DocumentContext
 from openlaw.retrieval.context import ChunkKind, RetrievalContext
@@ -317,6 +321,11 @@ class ValidatedAnswer(BaseModel):
     #: front of anyone. It does not touch `is_answerable` or any claim --
     #: surviving claims are still only the cited ones.
     goal_not_covered: bool = False
+    #: The state whose own law on the point the model reported missing from
+    #: the excerpts (`DraftAnswer.state_law_not_found`, rule 14), or `None`.
+    #: Only an allowlisted name survives: the renderer interpolates it into a
+    #: FIXED notice, the same reason `AskRequest.state` is allowlisted.
+    state_law_not_found: str | None = None
 
 
 #: Either kind of claim the model can emit. Both carry `text` and a tuple of
@@ -511,10 +520,10 @@ def validate_answer(
         document_context.excerpt_ids,
         document_namespace=True,
     )
-    is_answerable = bool(kept) and draft.sufficient
+    is_answerable = bool(kept)
 
     return ValidatedAnswer(
-        unverified_summary=draft.summary if is_answerable else None,
+        unverified_summary=draft.summary if is_answerable and draft.sufficient else None,
         claims=kept,
         sources=_build_sources(kept, context),
         document_claims=kept_documents,
@@ -527,8 +536,14 @@ def validate_answer(
             for claim in rejected + rejected_documents
         ),
         is_answerable=is_answerable,
-        goal_not_covered=not draft.goal_covered,
+        goal_not_covered=not (draft.goal_covered and draft.sufficient),
+        state_law_not_found=_listed_state(draft.state_law_not_found),
     )
+
+
+def _listed_state(name: str) -> str | None:
+    """`name` if it is a real state or union territory, else `None`."""
+    return name if name in INDIAN_STATES_AND_UTS else None
 
 
 def rejected_claims(

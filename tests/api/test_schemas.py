@@ -369,3 +369,62 @@ def test_an_unanswerable_turn_keeps_only_the_no_verifiable_answer_message() -> N
     )
 
     assert response.answer == "We could not find a verifiable answer to this question in the corpus."
+
+
+# --- a state's own law was not found: general answer + notice ---------------
+
+
+def _localised_state_gap(
+    state: str | None, language: str = "en", goal_not_covered: bool = False
+) -> LocalisedAnswer:
+    source = Source(
+        chunk_id="kerala", source_url="https://indiacode.nic.in/k", kind=ChunkKind.PROVISION
+    )
+    answer = ValidatedAnswer(
+        unverified_summary="unverified model prose -- must never render",
+        claims=(Claim(text="Under the Kerala Act, abandonment is a ground.", chunk_ids=("kerala",)),),
+        sources=(source,),
+        is_answerable=True,
+        goal_not_covered=goal_not_covered,
+        state_law_not_found=state,
+    )
+    return LocalisedAnswer(
+        answer=answer, english_answer=answer, language=language,
+        english_query="q", crisis=None, footer="NALSA: 15100",
+    )
+
+
+def test_a_state_gap_leads_the_general_answer_with_a_notice_naming_the_state() -> None:
+    response = to_response(_localised_state_gap("Haryana"), "v1", 5, conversation_id=_CONVERSATION)
+
+    notice, _, rest = response.answer.partition("\n\n")
+    assert notice.startswith("We could not find Haryana's own law on every part of this in our sources.")
+    assert "general" in notice
+    assert rest == "Under the Kerala Act, abandonment is a ground."
+    assert "unverified model prose" not in response.answer
+
+
+def test_the_state_gap_notice_is_static_hindi_for_a_hindi_turn() -> None:
+    response = to_response(
+        _localised_state_gap("Haryana", language="hi"), "v1", 5, conversation_id=_CONVERSATION
+    )
+
+    assert "We could not" not in response.answer
+    assert response.answer.startswith("हमें हमारे स्रोतों में इस विषय के हर हिस्से पर Haryana")
+
+
+def test_both_notices_lead_state_first_when_both_flags_are_set() -> None:
+    response = to_response(
+        _localised_state_gap("Haryana", goal_not_covered=True), "v1", 5, conversation_id=_CONVERSATION
+    )
+
+    first, second, rest = response.answer.split("\n\n")
+    assert first.startswith("We could not find Haryana's own law")
+    assert second.startswith("We could not find a source that directly covers")
+    assert rest == "Under the Kerala Act, abandonment is a ground."
+
+
+def test_no_state_gap_renders_no_notice() -> None:
+    response = to_response(_localised_state_gap(None), "v1", 5, conversation_id=_CONVERSATION)
+
+    assert response.answer == "Under the Kerala Act, abandonment is a ground."

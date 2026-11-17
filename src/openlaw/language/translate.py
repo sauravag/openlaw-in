@@ -450,7 +450,10 @@ def translate_answer(
         # constructor and reintroduce unchecked model prose on a
         # not-answerable answer -- but only on the non-English path, since
         # the English `answer` from `validate_answer` already enforces it.
-        unverified_summary=summary if answer.is_answerable else None,
+        # A partial answer (`sufficient=false`) is answerable with no summary
+        # (`validate_answer` rule 5); a summary the translator returns for it
+        # must not be kept either.
+        unverified_summary=summary if answer.unverified_summary is not None else None,
         claims=claims,
         sources=answer.sources,
         document_claims=documents,
@@ -458,4 +461,5 @@ def translate_answer(
         dropped=answer.dropped,
         is_answerable=answer.is_answerable,
         goal_not_covered=answer.goal_not_covered,
+        state_law_not_found=answer.state_law_not_found,
     )

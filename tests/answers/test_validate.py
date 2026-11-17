@@ -123,12 +123,10 @@ def test_answer_is_unanswerable_when_the_model_reports_insufficiency() -> None:
 def test_answer_is_unanswerable_when_insufficient_even_with_fully_valid_claims() -> (
     None
 ):
-    """Pins the `and draft.sufficient` term specifically: without a claim that
-    is itself fully grounded, a regression to `is_answerable = bool(kept)`
-    (dropping the `sufficient` check entirely) would still pass every other
-    test in this file, since the only prior insufficiency test used
-    claims=(). A model saying "I cannot answer" while still emitting
-    well-cited claims must not ship as answerable.
+    """A model saying "I cannot fully answer" while still emitting well-cited
+    claims ships those claims -- a partial, cited answer is more useful than
+    none -- but flagged, so the fixed "closest related law" notice leads
+    them, and its uncited summary is still never kept.
     """
     draft = DraftAnswer(
         summary="cannot answer", claims=(Claim(text="c", chunk_ids=("a",)),), sufficient=False
@@ -136,7 +134,8 @@ def test_answer_is_unanswerable_when_insufficient_even_with_fully_valid_claims()
     result = validate_answer(draft, _context("a"))
 
     assert len(result.claims) == 1
-    assert result.is_answerable is False
+    assert result.is_answerable is True
+    assert result.goal_not_covered is True
     assert result.unverified_summary is None
 
 
