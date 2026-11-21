@@ -41,11 +41,19 @@ def build_hc_collection_payload(shards: int = 1) -> dict[str, Any]:
     Same dense geometry as `acts_india`/`sc_judgments_v1` (1024-dim, cosine),
     but the sparse vector's `idf` modifier is declared upfront rather than
     patched on after the fact.
+
+    The HNSW graph and the sparse index are kept on disk too: at tens of
+    millions of points, holding them in RAM outgrew the Docker VM and the
+    kernel OOM-killed Qdrant mid-build.
     """
     spec = CollectionSpec(name=HC_COLLECTION, shards=shards, mirror="")
-    payload = build_collection_payload(spec)
-    payload["sparse_vectors"] = {SPARSE_VECTOR_NAME: {"modifier": "idf"}}
-    return payload
+    return {
+        **build_collection_payload(spec),
+        "hnsw_config": {"on_disk": True},
+        "sparse_vectors": {
+            SPARSE_VECTOR_NAME: {"modifier": "idf", "index": {"on_disk": True}}
+        },
+    }
 
 
 def ensure_hc_collection(qdrant_url: str, client: httpx.Client) -> None:

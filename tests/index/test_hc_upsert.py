@@ -113,6 +113,12 @@ def test_collection_payload_declares_sparse_vector_with_idf_modifier() -> None:
     assert payload["sparse_vectors"]["sparse"]["modifier"] == "idf"
 
 
+def test_collection_payload_keeps_hnsw_graph_and_sparse_index_on_disk() -> None:
+    payload = build_hc_collection_payload()
+    assert payload["hnsw_config"] == {"on_disk": True}
+    assert payload["sparse_vectors"]["sparse"]["index"] == {"on_disk": True}
+
+
 def test_ensure_hc_collection_tolerates_already_exists() -> None:
     client = FakeClient(status_code=409)
     ensure_hc_collection("http://qdrant.test", client)  # must not raise
