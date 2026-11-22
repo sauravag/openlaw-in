@@ -123,11 +123,9 @@ PUBLISHED_COURT_SLUGS: tuple[str, ...] = (
 
 #: Measured point counts, read from the live collections rather than
 #: estimated (`POST /collections/<name>/points/count` with `exact: true`,
-#: filtered on `court_code` for the High Courts). Madras and Patna are the
-#: build's own final `indexed` totals instead (`[Index] done:` in their build
-#: logs): `hc_judgments_v1` has no `court_code` payload index, so an exact
-#: filtered count scans all ~14.5M points and times out. Each export's
-#: manifest records the true count. Used for progress
+#: filtered on `court_code` for the High Courts; that filter needs the
+#: `court_code` payload index, without which the count scans every point and
+#: times out -- see `openlaw.index.hc_upsert.COURT_CODE_INDEX`). Used for progress
 #: percentages and for the honest per-court sizes the README and the dataset
 #: card quote.
 PUBLISHED_POINT_COUNTS: dict[str, int] = {

@@ -34,6 +34,15 @@ from openlaw.index.upsert import point_id
 HC_COLLECTION = "hc_judgments_v1"
 COLLECTION_NOT_FOUND = 404
 
+# Every jurisdiction-scoped query and every per-court export filters on
+# `court_code`. Without a payload index Qdrant scans all points for each such
+# filter -- at ~14.6M points an exact per-court count timed out and a
+# per-court export ran at 19 points/s. On disk, like the other indexes.
+COURT_CODE_INDEX = {
+    "field_name": "court_code",
+    "field_schema": {"type": "keyword", "on_disk": True},
+}
+
 
 def build_hc_collection_payload(shards: int = 1) -> dict[str, Any]:
     """Return the Qdrant create-collection body for the shared HC collection.
@@ -63,6 +72,12 @@ def ensure_hc_collection(qdrant_url: str, client: httpx.Client) -> None:
     `openlaw.index.qdrant_restore.ensure_collection`. Retries transient
     connection failures (see `openlaw.index.qdrant_http`) since this is
     also the first Qdrant call `scripts/build_hc_index.py` makes each run.
+
+    A freshly created collection also gets its `court_code` payload index,
+    while it is still empty and indexing costs nothing. An existing collection
+    is left alone: indexing one that already holds millions of points reads
+    every payload, which is a deliberate operator step, not a side effect of
+    resuming a build.
     """
 
     def _create() -> httpx.Response:
@@ -74,7 +89,20 @@ def ensure_hc_collection(qdrant_url: str, client: httpx.Client) -> None:
             response.raise_for_status()
         return response
 
-    call_with_retry(_create, description=f"PUT collections/{HC_COLLECTION}")
+    def _index_court_code() -> httpx.Response:
+        response = client.put(
+            f"{qdrant_url}/collections/{HC_COLLECTION}/index",
+            params={"wait": "true"},
+            json=COURT_CODE_INDEX,
+        )
+        response.raise_for_status()
+        return response
+
+    created = call_with_retry(_create, description=f"PUT collections/{HC_COLLECTION}")
+    if created.status_code != COLLECTION_ALREADY_EXISTS:
+        call_with_retry(
+            _index_court_code, description=f"PUT collections/{HC_COLLECTION}/index"
+        )
 
 
 def delete_hc_court_points(court_code: str, qdrant_url: str, client: httpx.Client) -> None:

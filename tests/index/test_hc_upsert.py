@@ -125,6 +125,24 @@ def test_ensure_hc_collection_tolerates_already_exists() -> None:
     assert client.put_calls[0]["url"] == "http://qdrant.test/collections/hc_judgments_v1"
 
 
+def test_ensure_hc_collection_indexes_court_code_on_a_fresh_collection() -> None:
+    client = FakeClient(status_code=200)
+    ensure_hc_collection("http://qdrant.test", client)
+    index_call = client.put_calls[1]
+    assert index_call["url"] == "http://qdrant.test/collections/hc_judgments_v1/index"
+    assert index_call["json"] == {
+        "field_name": "court_code",
+        "field_schema": {"type": "keyword", "on_disk": True},
+    }
+    assert index_call["params"] == {"wait": "true"}
+
+
+def test_ensure_hc_collection_leaves_an_existing_collection_unindexed() -> None:
+    client = FakeClient(status_code=409)
+    ensure_hc_collection("http://qdrant.test", client)
+    assert len(client.put_calls) == 1
+
+
 def test_ensure_hc_collection_raises_on_a_real_server_error() -> None:
     client = FakeClient(status_code=500)
     with pytest.raises(httpx.HTTPStatusError):
