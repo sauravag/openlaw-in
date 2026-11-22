@@ -108,19 +108,26 @@ HC_COLLECTION_NAME = "hc_judgments_v1"
 
 #: The High Courts actually built and therefore actually publishable, in
 #: build order. `openlaw.corpus.high_courts.HIGH_COURTS` registers 25 courts
-#: because registration is what makes a court *queryable*; only these four
-#: hold points today, and exporting a registered-but-unbuilt court would
-#: publish an empty shard set that looks like coverage and is not.
+#: because registration is what makes a court *queryable*; only these
+#: finished ones are publishable. A court still building is left out:
+#: exporting it would publish a partial shard set that looks like coverage
+#: and is not.
 PUBLISHED_COURT_SLUGS: tuple[str, ...] = (
     "punjab-and-haryana",
     "delhi",
     "bombay",
     "karnataka",
+    "madras",
+    "patna",
 )
 
 #: Measured point counts, read from the live collections rather than
 #: estimated (`POST /collections/<name>/points/count` with `exact: true`,
-#: filtered on `court_code` for the High Courts). Used for progress
+#: filtered on `court_code` for the High Courts). Madras and Patna are the
+#: build's own final `indexed` totals instead (`[Index] done:` in their build
+#: logs): `hc_judgments_v1` has no `court_code` payload index, so an exact
+#: filtered count scans all ~14.5M points and times out. Each export's
+#: manifest records the true count. Used for progress
 #: percentages and for the honest per-court sizes the README and the dataset
 #: card quote.
 PUBLISHED_POINT_COUNTS: dict[str, int] = {
@@ -130,6 +137,8 @@ PUBLISHED_POINT_COUNTS: dict[str, int] = {
     "hc_judgments_v1/delhi": 1_053_138,
     "hc_judgments_v1/bombay": 2_788_379,
     "hc_judgments_v1/karnataka": 1_467_133,
+    "hc_judgments_v1/madras": 2_610_454,
+    "hc_judgments_v1/patna": 2_555_138,
 }
 
 _UNSAFE_PATH_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]+")

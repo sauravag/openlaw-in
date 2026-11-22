@@ -29,8 +29,8 @@ size_categories:
 > Nothing in this repository uploads anything — publishing needs the
 > publisher's own Hugging Face credentials and is their decision.
 
-Embedded, retrieval-ready Indian primary law: **8,486,377 chunks** of
-legislation, regulator instruments, Supreme Court judgments and four High
+Embedded, retrieval-ready Indian primary law: **13,651,969 chunks** of
+legislation, regulator instruments, Supreme Court judgments and six High
 Courts' judgments, with dense and sparse vectors, published as zstd parquet
 shards. It exists so that running OpenLaw.in — a free, open-source legal-aid
 Q&A system for ordinary Indian citizens — does not require ~30 days of local
@@ -162,7 +162,9 @@ search scores wrongly — silently, with no error anywhere.
 | `hc_judgments_v1/delhi` | NCT of Delhi | 1,053,138 | 3.9 GiB | ~10 GB |
 | `hc_judgments_v1/bombay` | Maharashtra, Goa, Dadra & Nagar Haveli, Daman & Diu | 2,788,379 | 9.4 GiB | ~26 GB |
 | `hc_judgments_v1/karnataka` | Karnataka | 1,467,133 | 5.5 GiB | ~14 GB |
-| **Total** | | **8,486,377** | **28 GiB** | **79 GB** |
+| `hc_judgments_v1/madras` | Tamil Nadu, Puducherry | 2,610,454 | 9.1 GiB | ~24 GB |
+| `hc_judgments_v1/patna` | Bihar | 2,555,138 | 8.2 GiB | ~24 GB |
+| **Total** | | **13,651,969** | **45 GiB** | **~127 GB** |
 
 Download sizes are extrapolated from a measured 3,000-point sample of each
 slice; the Qdrant figures are what each collection actually occupies once
