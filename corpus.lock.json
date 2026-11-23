@@ -1,5 +1,14 @@
 {
   "_comment": "Root of trust for scripts/fetch_corpus.py. `revision` is a Hugging Face commit hash or release tag; `manifests` maps each target key to the SHA-256 of its manifest.json, as printed by scripts/export_corpus.py. Fill both from the publisher's release notes in a reviewed commit. Empty means fetch_corpus.py refuses to download.",
-  "revision": null,
-  "manifests": {}
+  "revision": "f79999d9f9787a5db87c9469970fdd0c06184f7d",
+  "manifests": {
+    "acts_india_v1": "a9aaa28e7226a31942ca301a9219249403b8d5fd56afd2e85b71341aa80cff8c",
+    "sc_judgments_v1": "4f1d1e6413848c33b3e6e2ec5e04ba638cc55fecd3740dba7205a06170aa844c",
+    "hc_judgments_v1/punjab-and-haryana": "7292885f86204be793f46e240ab8e685e06c3340e0c218ceb8e6deaec47b7d3d",
+    "hc_judgments_v1/delhi": "e97bec84149c3c7b927a554e036fe61c12244fe817c4632ed863492b65720b35",
+    "hc_judgments_v1/bombay": "4874e7a9b32a01864cd67e16b989e07638758929a37ae7bfd20deca163f482d5",
+    "hc_judgments_v1/karnataka": "19711c2c91e3496678cd3d7f9a2378296a43964fd7c4d972d2dd31bcc397d8a3",
+    "hc_judgments_v1/madras": "3f12fbc8248da76a8794ba14b49a6fa46d11eacd4a72022af63874122edde111",
+    "hc_judgments_v1/patna": "4644ad5e57a61654c8377c93ad327efa3bf3857949c2035c4a6466cf34756def"
+  }
 }
