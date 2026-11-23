@@ -119,6 +119,7 @@ PUBLISHED_COURT_SLUGS: tuple[str, ...] = (
     "karnataka",
     "madras",
     "patna",
+    "kerala",
 )
 
 #: Measured point counts, read from the live collections rather than
@@ -137,6 +138,7 @@ PUBLISHED_POINT_COUNTS: dict[str, int] = {
     "hc_judgments_v1/karnataka": 1_467_133,
     "hc_judgments_v1/madras": 2_610_454,
     "hc_judgments_v1/patna": 2_555_138,
+    "hc_judgments_v1/kerala": 2_777_738,
 }
 
 _UNSAFE_PATH_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]+")

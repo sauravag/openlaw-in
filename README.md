@@ -479,7 +479,7 @@ anything. There are three honest paths, and the third one is a real answer:
 
 | | What you get | What it costs | Start with |
 |---|---|---|---|
-| **1. Download a prebuilt corpus** — the default path | A working, queryable corpus. Pick the slices you need. | Minutes to a few hours. **4.2 GiB** for the national minimum, **45 GiB** for everything. | `python scripts/fetch_corpus.py --repo-id ... --revision ...` ([verified](#verified-downloads-and-why-you-must-pin-one)) |
+| **1. Download a prebuilt corpus** — the default path | A working, queryable corpus. Pick the slices you need. | Minutes to a few hours. **4.2 GiB** for the national minimum, **55 GiB** for everything. | `python scripts/fetch_corpus.py --repo-id ... --revision ...` ([verified](#verified-downloads-and-why-you-must-pin-one)) |
 | **2. Build it yourself from the upstream datasets** | The same corpus, provably, from the two source datasets. | **~30 days** of local compute for the four High Courts, plus a real Voyage API bill for the Supreme Court, plus ~**120 GB** of disk for raw datasets and index together. | [Corpus build](#corpus-build) |
 | **3. Run with no corpus at all** | The application, end to end, honestly degraded. `/readyz` reports `degraded` and every question returns `unanswerable` — never a fabricated citation. | Minutes. **No corpus download.** | `docker compose up -d` |
 
@@ -585,13 +585,14 @@ building a tenant-rights tool in Bengaluru needs 2.8M Bombay judgments.
 | `hc_judgments_v1/karnataka` — Karnataka | 1,467,133 | 5.5 GiB | ~14 GB |
 | `hc_judgments_v1/madras` — Tamil Nadu, Puducherry | 2,610,454 | 9.1 GiB | ~24 GB |
 | `hc_judgments_v1/patna` — Bihar | 2,555,138 | 8.2 GiB | ~24 GB |
-| **everything** | **13,651,969** | **45 GiB** | **~127 GB** |
+| `hc_judgments_v1/kerala` — Kerala, Lakshadweep | 2,777,738 | 9.8 GiB | ~26 GB |
+| **everything** | **16,429,707** | **55 GiB** | **~153 GB** |
 
 Download sizes are zstd-compressed parquet with float16 dense vectors,
 extrapolated from a measured 3,000-point sample of each slice. The Qdrant
 figures are what the collections actually occupy once restored, and are the
-number that matters for provisioning your disk. Six of the 25 High Courts
-registered in `openlaw.corpus.high_courts` are published; the other 19 are
+number that matters for provisioning your disk. Seven of the 25 High Courts
+registered in `openlaw.corpus.high_courts` are published; the other 18 are
 queryable-but-empty and return nothing.
 
 ### 2. Build it yourself
@@ -611,7 +612,7 @@ Publishing a corpus you built is `scripts/export_corpus.py` — see
 ### 3. Run with no corpus
 
 This is supported, not a broken state, and it is the fastest way to see
-whether this project is worth 45 GiB of your bandwidth:
+whether this project is worth 55 GiB of your bandwidth:
 
     cp .env.example .env     # set OPENLAW_ANTHROPIC_API_KEY
     docker compose up -d
@@ -837,11 +838,11 @@ and the web frontend -- in one command. It does **not** bring up a working
 corpus. Be clear-eyed about what that means before you start:
 
 - **The corpus does not ship in an image, but it is downloadable.** It is
-  **13.7 million vectors** across `acts_india_v1` + `sc_judgments_v1` +
-  `hc_judgments_v1`, occupying **~127 GB** of Qdrant storage. Two ways to get
+  **16.4 million vectors** across `acts_india_v1` + `sc_judgments_v1` +
+  `hc_judgments_v1`, occupying **~153 GB** of Qdrant storage. Two ways to get
   it, both covered in "Step one: choose a corpus" above:
   **`python scripts/fetch_corpus.py`** downloads prebuilt shards from a
-  Hugging Face dataset (from 4.2 GiB for the national minimum up to 45 GiB
+  Hugging Face dataset (from 4.2 GiB for the national minimum up to 55 GiB
   for everything) and is the path to take; building it yourself from the two
   datasets under "Data attribution" is ~30 days of local compute plus a paid
   Voyage API bill. `docker compose up` ships neither, for the same reason it

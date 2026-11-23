@@ -86,7 +86,7 @@ def test_measured_per_court_counts_sum_to_the_measured_collection_total() -> Non
     per_court = sum(
         PUBLISHED_POINT_COUNTS[f"hc_judgments_v1/{slug}"] for slug in PUBLISHED_COURT_SLUGS
     )
-    assert per_court == 12_319_586
+    assert per_court == 15_097_324
 
 
 def test_every_target_key_has_a_measured_point_count() -> None:
@@ -108,6 +108,7 @@ def test_default_targets_are_every_collection_and_every_published_court() -> Non
         "hc_judgments_v1/karnataka",
         "hc_judgments_v1/madras",
         "hc_judgments_v1/patna",
+        "hc_judgments_v1/kerala",
     ]
 
 
@@ -151,9 +152,9 @@ def test_unknown_court_is_refused_naming_the_published_ones() -> None:
 
 
 def test_a_registered_but_unbuilt_court_is_refused_rather_than_exported_empty() -> None:
-    assert "kerala" in HIGH_COURTS
-    with pytest.raises(ValueError, match="kerala"):
-        resolve_targets(None, ["kerala"])
+    assert "sikkim" in HIGH_COURTS
+    with pytest.raises(ValueError, match="sikkim"):
+        resolve_targets(None, ["sikkim"])
 
 
 def test_court_code_filter_is_none_for_a_whole_collection() -> None:
