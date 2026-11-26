@@ -29,8 +29,8 @@ size_categories:
 > Nothing in this repository uploads anything — publishing needs the
 > publisher's own Hugging Face credentials and is their decision.
 
-Embedded, retrieval-ready Indian primary law: **16,429,707 chunks** of
-legislation, regulator instruments, Supreme Court judgments and seven High
+Embedded, retrieval-ready Indian primary law: **19,162,094 chunks** of
+legislation, regulator instruments, Supreme Court judgments and eight High
 Courts' judgments, with dense and sparse vectors, published as zstd parquet
 shards. It exists so that running OpenLaw.in — a free, open-source legal-aid
 Q&A system for ordinary Indian citizens — does not require ~30 days of local
@@ -165,7 +165,8 @@ search scores wrongly — silently, with no error anywhere.
 | `hc_judgments_v1/madras` | Tamil Nadu, Puducherry | 2,610,454 | 9.1 GiB | ~24 GB |
 | `hc_judgments_v1/patna` | Bihar | 2,555,138 | 8.2 GiB | ~24 GB |
 | `hc_judgments_v1/kerala` | Kerala, Lakshadweep | 2,777,738 | 9.8 GiB | ~26 GB |
-| **Total** | | **16,429,707** | **55 GiB** | **~153 GB** |
+| `hc_judgments_v1/telangana` | Telangana | 2,732,387 | 10.4 GiB | ~26 GB |
+| **Total** | | **19,162,094** | **65 GiB** | **~179 GB** |
 
 Download sizes are extrapolated from a measured 3,000-point sample of each
 slice; the Qdrant figures are what each collection actually occupies once
@@ -265,9 +266,9 @@ dangerous.
   any amendment, repeal or judgment after that snapshot. Always verify
   against the official source before relying on anything.
 - **English only.** Non-English chunks were filtered out at build time.
-- **7 of 25 High Courts.** The other 18 are registered in the application
+- **8 of 25 High Courts.** The other 17 are registered in the application
   (so they are *queryable*) but hold **no points** and return nothing.
-  Telangana, Rajasthan, Allahabad and the rest are not here yet; each is
+  Rajasthan, Allahabad, Gujarat and the rest are not here yet; each is
   added as its build finishes.
 - **No District or trial court decisions**, and **no consumer fora** (NCDRC
   and the State Commissions).

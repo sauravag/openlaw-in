@@ -86,7 +86,7 @@ def test_measured_per_court_counts_sum_to_the_measured_collection_total() -> Non
     per_court = sum(
         PUBLISHED_POINT_COUNTS[f"hc_judgments_v1/{slug}"] for slug in PUBLISHED_COURT_SLUGS
     )
-    assert per_court == 15_097_324
+    assert per_court == 17_829_711
 
 
 def test_every_target_key_has_a_measured_point_count() -> None:
@@ -109,6 +109,7 @@ def test_default_targets_are_every_collection_and_every_published_court() -> Non
         "hc_judgments_v1/madras",
         "hc_judgments_v1/patna",
         "hc_judgments_v1/kerala",
+        "hc_judgments_v1/telangana",
     ]
 
 

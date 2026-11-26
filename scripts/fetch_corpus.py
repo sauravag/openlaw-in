@@ -1,6 +1,6 @@
 """Download a prebuilt OpenLaw corpus into your own Qdrant.
 
-This is step one of actually running OpenLaw.in. The corpus is ~153 GB of
+This is step one of actually running OpenLaw.in. The corpus is ~179 GB of
 Qdrant storage and roughly 30 days of local compute to build from the
 upstream datasets; this script downloads the finished vectors instead, in
 minutes to hours depending on how much of India you need.
@@ -41,6 +41,7 @@ Take only what you need. Approximate download sizes:
     hc_judgments_v1/madras             (2,610,454)         9.1 GiB
     hc_judgments_v1/patna              (2,555,138)         8.2 GiB
     hc_judgments_v1/kerala             (2,777,738)         9.8 GiB
+    hc_judgments_v1/telangana          (2,732,387)        10.4 GiB
 
 Statutes and the Supreme Court bind everywhere in India and are the useful
 minimum (~4.2 GiB). A High Court binds only in its own jurisdiction, so add
@@ -141,6 +142,7 @@ PUBLISHED_BYTES_PER_POINT: dict[str, int] = {
     "hc_judgments_v1/madras": 3752,
     "hc_judgments_v1/patna": 3438,
     "hc_judgments_v1/kerala": 3783,
+    "hc_judgments_v1/telangana": 4096,
 }
 
 
