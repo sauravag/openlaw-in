@@ -38,10 +38,13 @@ Three decisions are load-bearing:
    `build_published_collection_payload` both refuse the name outright.
 """
 
+import fcntl
 import hashlib
 import json
+import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -425,10 +428,55 @@ def read_checkpoint(path: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text())
 
 
+class TargetBusyError(RuntimeError):
+    """Another process already holds this target, so this one must not start."""
+
+
+@contextmanager
+def target_lock(checkpoint_path: Path) -> Iterator[None]:
+    """Hold an exclusive lock on the target whose checkpoint is `checkpoint_path`.
+
+    Two processes working one target write the same shard files and the same
+    checkpoint, and nothing downstream can tell: identical bytes are the lucky
+    case, and a torn shard still gets a manifest hash computed from whatever
+    landed on disk, so the hash chain certifies the damage. The second worker is
+    therefore refused here rather than left to interleave.
+
+    `flock` rather than an exclusively-created lock file: the kernel drops a
+    `flock` when its holder exits, so a killed export leaves nothing stale to
+    clear by hand, which is exactly the trap a pid file sets for the next run.
+    """
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = checkpoint_path.with_name(f"{checkpoint_path.name}.lock")
+    handle = lock_path.open("a+")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.seek(0)
+            holder = handle.read().strip() or "an unknown process"
+            raise TargetBusyError(
+                f"{checkpoint_path} is already being written by {holder}; "
+                "refusing to run a second worker on the same target"
+            ) from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"pid {os.getpid()}")
+        handle.flush()
+        yield
+    finally:
+        handle.close()
+
+
 def write_checkpoint(path: Path, state: Mapping[str, Any]) -> None:
-    """Record `state` at `path` atomically, via a temp file and rename."""
+    """Record `state` at `path` atomically, via a temp file and rename.
+
+    The temp file carries this process's pid: a shared name let two concurrent
+    writers rename the same path, so the loser of the race died on a temp file
+    the winner had already moved into place.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp")
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(dict(state), indent=2, sort_keys=True))
     temporary.replace(path)
 

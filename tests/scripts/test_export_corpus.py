@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from openlaw.index.embed import EMBEDDING_DIMENSIONS
-from openlaw.index.publish import ExportTarget
+from openlaw.index.publish import ExportTarget, resolve_targets, target_lock
 from openlaw.index.sparse import SPARSE_VECTOR_NAME
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "export_corpus.py"
@@ -383,6 +383,30 @@ def test_an_unknown_court_exits_without_touching_qdrant() -> None:
 
 def test_the_publishers_snapshot_cannot_be_exported() -> None:
     assert export_corpus.main(["--collections", "acts_india"]) == 2
+
+
+def test_a_target_another_worker_holds_is_refused_before_qdrant_is_touched(
+    tmp_path: Path, capsys
+) -> None:
+    """Two exports of one target would write the same shards; the second stops.
+
+    Qdrant is never reached, so this also proves the refusal happens before any
+    scrolling rather than part-way through a court.
+    """
+    target = resolve_targets(["sc_judgments_v1"], None)[0]
+    with target_lock(target.checkpoint_path(tmp_path)):
+        exit_code = export_corpus.main(
+            [
+                "--collections",
+                "sc_judgments_v1",
+                "--out",
+                str(tmp_path / "out"),
+                "--checkpoint-dir",
+                str(tmp_path),
+            ]
+        )
+    assert exit_code == 1
+    assert "already being written by pid" in capsys.readouterr().out
 
 
 def replace_shards(state: Any, shards: tuple[Any, ...]) -> Any:

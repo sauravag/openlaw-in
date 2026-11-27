@@ -45,6 +45,7 @@ from openlaw.config import get_settings  # noqa: E402
 from openlaw.index.publish import (  # noqa: E402
     DENSE_VECTOR_NAME,
     ExportTarget,
+    TargetBusyError,
     court_code_filter,
     float16_worst_cosine,
     point_to_row,
@@ -53,6 +54,7 @@ from openlaw.index.publish import (  # noqa: E402
     rows_to_table,
     sha256_file,
     shard_name,
+    target_lock,
     write_checkpoint,
 )
 from openlaw.index.qdrant_http import build_index_client, call_with_retry  # noqa: E402
@@ -492,13 +494,30 @@ def main(argv: list[str] | None = None) -> int:
             verify_float16(
                 client, settings.qdrant_url, targets, args.verify_fp16, args.fp16_floor
             )
-        for target in targets:
-            state = export_target(
-                client, settings.qdrant_url, target, options, settings.corpus_version
-            )
-            manifest = write_manifest(target, options, state, settings.corpus_version)
-            report(target, state)
-            print(f"[Export] pin in corpus.lock.json -> manifests:\n{pin_line(target, manifest)}")
+        try:
+            for target in targets:
+                # One worker per target: a second one writes the same shards and
+                # the same checkpoint, and the manifest would then hash whatever
+                # the interleaving happened to leave behind.
+                with target_lock(target.checkpoint_path(options.checkpoint_dir)):
+                    state = export_target(
+                        client,
+                        settings.qdrant_url,
+                        target,
+                        options,
+                        settings.corpus_version,
+                    )
+                    manifest = write_manifest(
+                        target, options, state, settings.corpus_version
+                    )
+                    report(target, state)
+                    print(
+                        "[Export] pin in corpus.lock.json -> manifests:\n"
+                        f"{pin_line(target, manifest)}"
+                    )
+        except TargetBusyError as exc:
+            print(f"[Export] FAIL: {exc}")
+            return 1
     return 0
 
 

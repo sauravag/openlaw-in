@@ -20,6 +20,7 @@ from openlaw.index.publish import (
     PUBLISHED_COURT_SLUGS,
     PUBLISHED_POINT_COUNTS,
     ExportTarget,
+    TargetBusyError,
     build_published_collection_payload,
     court_code_filter,
     export_schema,
@@ -30,6 +31,7 @@ from openlaw.index.publish import (
     row_to_point,
     rows_to_table,
     shard_name,
+    target_lock,
     write_checkpoint,
 )
 from openlaw.index.sparse import SPARSE_VECTOR_NAME
@@ -332,6 +334,59 @@ def test_an_unparseable_checkpoint_fails_loudly_rather_than_silently_restarting(
     path.write_text("{not json")
     with pytest.raises(json.JSONDecodeError):
         read_checkpoint(path)
+
+
+def test_write_checkpoint_leaves_another_processes_temp_file_alone(
+    tmp_path: Path,
+) -> None:
+    """A concurrent writer's temp file is not this writer's to rename.
+
+    Both processes used to pick `<name>.tmp`, so whichever renamed second found
+    its own temp already gone and died with FileNotFoundError mid-export.
+    """
+    path = tmp_path / "checkpoint.json"
+    stranger = tmp_path / "checkpoint.json.tmp"
+    stranger.write_text("another process is mid-write")
+
+    write_checkpoint(path, {"rows": 7})
+
+    assert read_checkpoint(path) == {"rows": 7}
+    assert stranger.read_text() == "another process is mid-write"
+
+
+def test_a_second_worker_on_the_same_target_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "checkpoint.json"
+    with target_lock(path):
+        with pytest.raises(TargetBusyError, match="checkpoint.json"):
+            with target_lock(path):
+                pass
+
+
+def test_the_target_lock_frees_the_target_once_the_holder_leaves(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "checkpoint.json"
+    with target_lock(path):
+        pass
+    with target_lock(path):
+        pass
+
+
+def test_the_target_lock_frees_the_target_when_the_body_raises(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "checkpoint.json"
+    with pytest.raises(RuntimeError, match="boom"):
+        with target_lock(path):
+            raise RuntimeError("boom")
+    with target_lock(path):
+        pass
+
+
+def test_separate_targets_do_not_block_each_other(tmp_path: Path) -> None:
+    with target_lock(tmp_path / "delhi.json"):
+        with target_lock(tmp_path / "bombay.json"):
+            pass
 
 
 def test_target_checkpoint_paths_are_distinct_per_court(tmp_path: Path) -> None:
